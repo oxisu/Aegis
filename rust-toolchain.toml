@@ -1,6 +1,10 @@
 # 锁定工具链，保证团队与 CI 构建结果一致
 [toolchain]
-channel    = "stable"
-components = ["rustfmt", "clippy"]
-targets    = ["x86_64-pc-windows-msvc"]
+# 显式指定 gnu 宿主：本项目当前用 MinGW-w64(gcc) 作为链接器后端。
+# 待本机装好 MSVC 生成工具后，可改为 x86_64-pc-windows-msvc。
+channel    = "stable-x86_64-pc-windows-gnu"
+# 暂不在此声明 components：rustup 安装 clippy 时会与已装的 msvc 工具链
+# 因 bin\cargo-clippy.exe 同名冲突而回滚，进而阻塞每次 cargo 调用。
+# 需要的组件请单独安装：rustup component add rustfmt clippy
+targets    = ["x86_64-pc-windows-gnu", "x86_64-pc-windows-msvc"]
 profile    = "minimal"

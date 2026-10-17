@@ -9,9 +9,16 @@ authors.workspace      = true
 
 [dependencies]
 # OS 交互：IP Helper（网卡表 / 适配器地址 / 路由） + WLAN（取 SSID）
+# 注意：Win32_NetworkManagement_Ndis 必须显式开启。
+# windows-rs 把 MIB_IF_TABLE2 / MIB_IF_ROW2 / MIB_IPFORWARD_TABLE2 /
+# IP_ADAPTER_ADDRESSES_LH 以及 GetIfTable2 / GetIpForwardTable2 / GetAdaptersAddresses
+# 这些依赖 Ndis 类型（NET_LUID_LH、IF_OPER_STATUS 等）的定义用
+# #[cfg(feature = "Win32_NetworkManagement_Ndis")] 门控了，
+# 只开 IpHelper 的话它们不会出现在作用域里。
 windows = { workspace = true, features = [
     "Win32_Foundation",
     "Win32_NetworkManagement_IpHelper",
+    "Win32_NetworkManagement_Ndis",
     "Win32_NetworkManagement_WiFi",
     "Win32_Networking_WinSock",
 ] }
