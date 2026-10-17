@@ -10,7 +10,7 @@ use std::ptr;
 use windows::Win32::NetworkManagement::IpHelper::*;
 use windows::Win32::Networking::WinSock::{SOCKADDR_INET, AF_INET};
 
-use crate::error::{SenseError, Win32Error};
+use crate::error::{check, SenseError};
 
 /// 一条 IPv4 路由记录。
 #[derive(Debug, Clone)]
@@ -29,12 +29,7 @@ pub fn ipv4_routes() -> Result<Vec<RouteRow>, SenseError> {
     unsafe {
         let mut table: *mut MIB_IPFORWARD_TABLE2 = ptr::null_mut();
         let code = GetIpForwardTable2(AF_INET, &mut table);
-        if code.0 != 0 {
-            return Err(SenseError::Os {
-                op: "GetIpForwardTable2",
-                code: Win32Error(code.0),
-            });
-        }
+        check("GetIpForwardTable2", code.0)?;
         if table.is_null() {
             return Err(SenseError::Malformed {
                 op: "GetIpForwardTable2",

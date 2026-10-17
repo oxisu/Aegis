@@ -29,7 +29,7 @@ pub enum SenseError {
     Os { op: &'static str, code: Win32Error },
 
     /// API 返回的缓冲区结构异常（长度、指针为 null 等）。
-    #[error("{0} 返回的数据结构异常: {detail}")]
+    #[error("{op} 返回的数据结构异常: {detail}")]
     Malformed { op: &'static str, detail: String },
 
     /// 字符串转换失败（宽字符 → UTF-8）。
@@ -37,16 +37,17 @@ pub enum SenseError {
     Encoding(String),
 }
 
-/// 便捷构造：把 Win32 返回码转成 Result。
-pub(crate) fn ok_or_os(op: &'static str, code: Win32Error) -> Result<(), SenseError> {
-    if code.is_ok() {
+/// 把 Win32 返回码转成 `Result`（0 = 成功）。
+///
+/// 各 API 的返回类型在 windows-rs 中并不统一：有的返回 `WIN32_ERROR`，
+/// 有的直接返回 `u32`。这里统一收敛到 `u32` 入口，调用方只需 `check("Op", code.0)`。
+pub(crate) fn check(op: &'static str, raw: u32) -> Result<(), SenseError> {
+    if raw == 0 {
         Ok(())
     } else {
-        Err(SenseError::Os { op, code })
+        Err(SenseError::Os {
+            op,
+            code: Win32Error(raw),
+        })
     }
-}
-
-/// 把 (u32 返回码) 视作 Win32 错误码并检查。
-pub(crate) fn check_win32(op: &'static str, raw: u32) -> Result<(), SenseError> {
-    ok_or_os(op, Win32Error(raw))
 }

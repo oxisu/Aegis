@@ -46,7 +46,7 @@ pub enum OperStatus {
 }
 
 /// MAC 地址的稳定字符串表达：`AA-BB-CC-DD-EE-FF`。
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub struct MacAddress(pub [u8; 6]);
 
 impl MacAddress {

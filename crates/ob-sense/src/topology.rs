@@ -16,13 +16,13 @@ use windows::Win32::Foundation::WIN32_ERROR;
 use windows::Win32::NetworkManagement::IpHelper::*;
 use windows::Win32::Networking::WinSock::{SOCKET_ADDRESS, AF_INET};
 
-use crate::error::{SenseError, Win32Error};
+use crate::error::{check, SenseError, Win32Error};
 use crate::fingerprint::compute_fingerprint;
 use crate::model::{InterfaceInfo, MacAddress, OperStatus, TopologySnapshot};
 use crate::route::RouteRow;
 
 /// 由 `GetAdaptersAddresses` 汇总出的 per-interface IPv4 侧信息。
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 struct AdapterIpInfo {
     ipv4: Vec<Ipv4Addr>,
     dhcp_server: Option<Ipv4Addr>,
@@ -31,13 +31,12 @@ struct AdapterIpInfo {
 /// 采集一次完整拓扑快照。
 pub fn snapshot() -> Result<TopologySnapshot, SenseError> {
     let ifaces = enumerate_interfaces()?;
-
-    // 默认出口（不在货车一切都不清楚时才允许 0 值）
-    let default_egress_luid = crate::route::default_egress()?
-        .map(|r| r.interface_luid)
-        .unwrap_or(0);
-
     let routes = crate::route::ipv4_routes()?;
+
+    // 默认出口裁决：只在默认路由中挑，且**优先挑接口当前处于 Up 的那条**。
+    // 若所有默认路由都落在 Down 接口（例如拔线后残留的路由），才退回纯 Metric 最小。
+    let default_egress_luid = pick_default_egress(&routes, &ifaces);
+
     let mut interfaces = attach_route_info(ifaces, &routes);
 
     let fingerprint = compute_fingerprint(&interfaces);
@@ -85,16 +84,26 @@ pub fn enumerate_interfaces() -> Result<Vec<InterfaceInfo>, SenseError> {
     }
 }
 
+/// 默认出口裁决：优先"默认路由 ∧ 接口 Up"，再按 Metric 最小。
+/// 返回 0 表示没有任何 IPv4 默认路由。
+fn pick_default_egress(routes: &[RouteRow], ifaces: &[InterfaceInfo]) -> u64 {
+    let is_up = |luid: u64| ifaces.iter().any(|i| i.luid == luid && i.is_up());
+
+    let default_routes = || routes.iter().filter(|r| r.dest_prefix_len == 0);
+
+    default_routes()
+        .filter(|r| is_up(r.interface_luid))
+        .min_by_key(|r| r.metric)
+        .or_else(|| default_routes().min_by_key(|r| r.metric))
+        .map(|r| r.interface_luid)
+        .unwrap_or(0)
+}
+
 /// 从 `GetIfTable2` 取回全部 `MIB_IF_ROW2`。
 unsafe fn if_table_rows() -> Result<Vec<MIB_IF_ROW2>, SenseError> {
     let mut table: *mut MIB_IF_TABLE2 = ptr::null_mut();
     let code: WIN32_ERROR = GetIfTable2(&mut table);
-    if code.0 != 0 {
-        return Err(SenseError::Os {
-            op: "GetIfTable2",
-            code: Win32Error(code.0),
-        });
-    }
+    check("GetIfTable2", code.0)?;
     if table.is_null() {
         return Err(SenseError::Malformed {
             op: "GetIfTable2",
@@ -113,13 +122,7 @@ unsafe fn adapter_ip_map() -> Result<HashMap<u32, AdapterIpInfo>, SenseError> {
     let flags: GET_ADAPTERS_ADDRESSES_FLAGS = core::mem::zeroed();
 
     // 第一次调用：取所需缓冲区大小（预期返回 ERROR_BUFFER_OVERFLOW）
-    let rc = GetAdaptersAddresses(
-        AF_INET.0 as u32,
-        flags,
-        None,
-        ptr::null_mut(),
-        &mut size,
-    );
+    let rc = GetAdaptersAddresses(AF_INET.0 as u32, flags, None, None, &mut size);
 
     // 除 buffer overflow 外，任何非 "NO_DATA" 的失败都要上报
     if rc != 0 && rc != 111 && size == 0 {
@@ -141,12 +144,7 @@ unsafe fn adapter_ip_map() -> Result<HashMap<u32, AdapterIpInfo>, SenseError> {
         Some(buf.as_mut_ptr() as *mut IP_ADAPTER_ADDRESSES_LH),
         &mut size,
     );
-    if rc != 0 {
-        return Err(SenseError::Os {
-            op: "GetAdaptersAddresses",
-            code: Win32Error(rc),
-        });
-    }
+    check("GetAdaptersAddresses", rc)?;
 
     let mut map: HashMap<u32, AdapterIpInfo> = HashMap::new();
     let mut cur: *const IP_ADAPTER_ADDRESSES_LH = buf.as_ptr() as *const _;
@@ -166,7 +164,9 @@ unsafe fn adapter_ip_map() -> Result<HashMap<u32, AdapterIpInfo>, SenseError> {
         }
         entry.ipv4.sort();
 
-        map.insert(a.IfIndex, entry);
+        // IP_ADAPTER_ADDRESSES_LH 把 Length/IfIndex 放在匿名 union 里，
+        // windows-rs 展开为 Anonymous1.Anonymous.IfIndex
+        map.insert(a.Anonymous1.Anonymous.IfIndex, entry);
         cur = a.Next;
     }
 
@@ -183,6 +183,8 @@ fn attach_route_info(
             .iter()
             .filter(|r| r.interface_luid == iface.luid && r.interface_index == iface.index)
             .filter_map(|r| r.next_hop)
+            // 0.0.0.0 表示"直连/无下一跳"，不是真正的网关，须剔除
+            .filter(|ip| !ip.is_unspecified())
             .collect();
         iface.gateway = dedup(gws);
     }

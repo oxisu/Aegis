@@ -14,7 +14,7 @@
 use std::time::Instant;
 
 use ob_sense::model::OperStatus;
-use ob_sense::{default_egress, snapshot};
+use ob_sense::snapshot;
 
 fn main() {
     println!("╔══════════════════════════════════════════════════════════════╗");
@@ -75,20 +75,19 @@ fn main() {
     }
 
     println!("── 默认出口裁决 ────────────────────────────────────────────────");
-    match default_egress() {
-        Ok(Some(route)) => {
-            println!("默认路由存在，出口 LUID = {}", route.interface_luid);
-            println!(
-                "  下一跳网关 : {}",
-                route
-                    .next_hop
-                    .map(|i| i.to_string())
-                    .unwrap_or_else(|| "<直连/无网关>".into())
-            );
-            println!("  Metric     : {}", route.metric);
+    // 注意：这里读的是 snapshot 里裁决过的结果（优先"默认路由 ∧ 接口 Up"），
+    // 而不是 route::default_egress() 那种只看路由表、会把残留路由也算进去的裸结果。
+    if snap.default_egress_luid == 0 {
+        println!("⚠ 未发现可用于出网的 IPv4 默认路由（整机离线？）—— 这是合法状态");
+    } else {
+        let luid = snap.default_egress_luid;
+        let egress = snap.interfaces.iter().find(|i| i.luid == luid);
+        let alias = egress.map(|i| i.alias.as_str()).unwrap_or("<未知接口>");
+        println!("默认出口 : {}  [{}]", alias, luid);
+        match egress.and_then(|i| i.gateway.first()) {
+            Some(gw) => println!("  网关     : {}", gw),
+            None => println!("  网关     : <直连 / 无网关>"),
         }
-        Ok(None) => println!("⚠ 未发现 IPv4 默认路由（整机离线？）—— 这是合法状态"),
-        Err(e) => eprintln!("[WARN] 路由采集失败: {}", e),
     }
     println!();
 
