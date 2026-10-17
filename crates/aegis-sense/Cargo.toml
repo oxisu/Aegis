@@ -1,5 +1,5 @@
 [package]
-name        = "ob-sense"
+name        = "aegis-sense"
 description = "感知层：网络拓扑采集 / 拓扑指纹 / 默认出口裁决（纯只读，绝不注入任何网络策略）"
 version.workspace      = true
 edition.workspace      = true

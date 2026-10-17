@@ -34,7 +34,7 @@ jobs:
         run: cargo clippy --workspace --all-targets -- -D warnings
 
   build:
-    name: 构建 ob-sense
+    name: 构建 aegis-sense
     needs: quality
     runs-on: windows-latest
     steps:
@@ -47,7 +47,7 @@ jobs:
         uses: Swatinem/rust-cache@v2
 
       - name: 编译感知层（含示例）
-        run: cargo build -p ob-sense --examples --verbose
+        run: cargo build -p aegis-sense --examples --verbose
 
       - name: 干跑自检（只读，CI 上仅验证不崩溃）
-        run: cargo run -p ob-sense --example dry_run
+        run: cargo run -p aegis-sense --example dry_run

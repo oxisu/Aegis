@@ -1,7 +1,23 @@
-# InterBoot —— 本地网络编排代理 Cargo Workspace
+# Aegis —— 宙斯的神盾 · 本地零信任网络编排守护进程
 #
 # 设计文档（单一事实来源）：design-spec.md
-# 命名约定：全部 crate 统一使用 `ob-` 前缀（Orchestrator Boot Guardian）
+#
+# ── 命名约定 ──────────────────────────────────────────────────────────────
+# 项目名：Aegis（英文为主）/ 宙斯的神盾（中文为辅）
+# 所有 crate 统一使用 `aegis-` 前缀：
+#
+#   aegis-sense        感知层：拓扑采集 / 默认出口裁决 / SSID / 拓扑指纹（只读）
+#   aegis-core         编排核心：角色模型 / 状态机 / 策略裁决
+#   aegis-wfp          OS 级底座：WFP Boot-Time 过滤器 / 出站审计
+#   aegis-fuse         微秒级网络端口熔断器
+#   aegis-audit        审计与证据链落盘（防篡改哈希）
+#   aegis-ipc          本地 IPC 协议（命名管道 + token 鉴权）
+#   aegis-orchestrator 应用层代理适配器（SPI，可插拔：Clash / sing-box ...）
+#   aegisd             守护进程二进制
+#   aegisctl           控制端二进制
+#
+# 分层铁律：`aegis-wfp` 及以上为 OS 级底座，绝不依赖任何应用层代理；
+#           `aegis-orchestrator` 只通过 SPI trait 与底座解耦，可整体替换。
 
 [workspace]
 resolver = "2"
@@ -12,8 +28,8 @@ version      = "0.1.0"
 edition      = "2021"
 rust-version = "1.85"
 license      = "AGPL-3.0-or-later"
-authors      = ["InterBoot Contributors"]
-description  = "本地零信任网络编排守护进程：WFP 绝缘底座 + 可插拔适配器"
+authors      = ["Aegis Contributors"]
+description  = "Aegis（宙斯的神盾）：本地零信任网络编排守护进程 —— WFP 绝缘底座 + 可插拔适配器"
 
 # ── 可插拔依赖（仅声明版本，具体 features 由各 crate 按需开启，避免全量编译）──
 [workspace.dependencies]

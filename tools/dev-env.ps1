@@ -1,4 +1,4 @@
-﻿# InterBoot 开发构建入口（Windows）—— MSVC 路线专用
+﻿# Aegis 开发构建入口（Windows）—— MSVC 路线专用
 #
 # ⚠ 注意：当前仓库默认走的是 **gnu/MinGW 路线**（见 rust-toolchain.toml），
 #   因为本机尚未装好 MSVC 生成工具。等 MSVC 装好后，
@@ -14,8 +14,8 @@
 #      本脚本清空代理环境变量，直连拉包。
 #
 # 用法：
-#   .\tools\dev-env.ps1 check -p ob-sense --all-targets
-#   .\tools\dev-env.ps1 run   -p ob-sense --example dry_run
+#   .\tools\dev-env.ps1 check -p aegis-sense --all-targets
+#   .\tools\dev-env.ps1 run   -p aegis-sense --example dry_run
 #   .\tools\dev-env.ps1 fmt
 #
 # 自定义工具链位置：
@@ -81,7 +81,7 @@ foreach ($v in @('HTTP_PROXY','HTTPS_PROXY','http_proxy','https_proxy','ALL_PROX
 }
 
 Write-Host "────────────────────────────────────────────" -ForegroundColor DarkGray
-Write-Host " InterBoot 开发环境已就绪"                    -ForegroundColor Cyan
+Write-Host " Aegis 开发环境已就绪"                    -ForegroundColor Cyan
 Write-Host " MSVC      : $($msvc.Name)"                   -ForegroundColor Gray
 Write-Host " HOSTBIN   : $hostBin"                        -ForegroundColor Gray
 # 注意：不要在这里用 `??` 空合并运算符 —— 那是 PowerShell 7+ 语法，

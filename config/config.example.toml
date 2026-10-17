@@ -1,4 +1,4 @@
-# InterBoot 编排器配置样例
+# Aegis 编排器配置样例
 #
 # 对应 design-spec.md §22「编排器自身配置与持久化 Schema」。
 # 系统级路径：%PROGRAMDATA%\Orchestrator\config.toml

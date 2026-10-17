@@ -12,7 +12,7 @@
 - **Cargo workspace**：统一 crate 元数据与依赖版本，Release profile 面向最小体积与快速冷启动
 - **工具链标准**：`rust-toolchain.toml`（stable + rustfmt + clippy）、`rustfmt.toml`、`clippy.toml`
 - **采用 GNU AGPL-3.0 许可证**
-- **`ob-sense` 感知层（只读）**
+- **`aegis-sense` 感知层（只读）**
   - 数据模型：网卡信息、角色枚举、运营状态、拓扑快照（与 Win32 API 解耦）
   - 统一错误类型 `SenseError`，任何 Win32 失败向上传递而非 panic
   - `GetIfTable2` 网卡枚举（LUID / MAC / 别名 / 类型 / 运营状态）

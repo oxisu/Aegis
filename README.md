@@ -1,11 +1,11 @@
-# InterBoot · 本地网络编排代理
+# Aegis · 本地网络编排代理
 
 > 原生运行在 Windows 内核网络栈（WFP）之上的**零信任网络编排守护进程**，
 > 而非又一个代理软件。
 
 ## 它是什么
 
-InterBoot 建立一张**独立于任何上层代理软件的 OS 级安全底座**，包含：内核级出站审计、
+Aegis 建立一张**独立于任何上层代理软件的 OS 级安全底座**，包含：内核级出站审计、
 物理网口微秒级熔断、拓扑指纹防伪、网卡角色裁决；并通过**可插拔适配器 SPI**
 去兼容接管 Clash Verge / HypoMux / sing-box 等上层工具。
 
@@ -31,15 +31,15 @@ InterBoot 建立一张**独立于任何上层代理软件的 OS 级安全底座*
 
 | Crate | 状态 | 说明 |
 |---|---|---|
-| `ob-sense` | 🚧 进行中 | 感知层：拓扑采集 / 默认出口裁决 / SSID / SHA-256 拓扑指纹 |
+| `aegis-sense` | 🚧 进行中 | 感知层：拓扑采集 / 默认出口裁决 / SSID / SHA-256 拓扑指纹 |
 | `ob-netfilter` | ⬜ 待建 | WFP 绝缘笼、Boot-Time 背板、DNS 封锁 |
-| `ob-core` | ⬜ 待建 | 角色模型、状态机、IPC 协议 |
+| `aegis-core` | ⬜ 待建 | 角色模型、状态机、IPC 协议 |
 | `ob-service` | ⬜ 待建 | Windows Service 宿主（SYSTEM） |
 
 ## 目录结构
 
 ```text
-InterBoot/
+Aegis/
 ├── design-spec.md          # 设计文档（唯一事实来源）
 ├── Cargo.toml              # workspace
 ├── rust-toolchain.toml     # 工具链锁定
@@ -47,11 +47,11 @@ InterBoot/
 ├── config/
 │   └── config.example.toml # 编排器配置样例
 └── crates/
-    └── ob-sense/           # 感知层（纯只读）
+    └── aegis-sense/           # 感知层（纯只读）
         └── examples/dry_run.rs
 ```
 
-## 安全边界（`ob-sense` 的硬约束）
+## 安全边界（`aegis-sense` 的硬约束）
 
 感知层刻意做成**纯只读**且**不需管理员权限**，因此可以在任何环境（尤其是已接入校园网时）放心干跑：
 
@@ -79,7 +79,7 @@ InterBoot/
 
 ```bash
 export PATH="/d/Dev/msys64/mingw64/bin:$PATH"   # Git Bash；把 gcc 放进 PATH
-cargo run -p ob-sense --example dry_run
+cargo run -p aegis-sense --example dry_run
 ```
 
 本机实测输出（节选）：
