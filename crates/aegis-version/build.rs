@@ -23,6 +23,28 @@ fn main() {
     let repo_root = manifest_dir.join("..").join("..");
 
     let git_dir = resolve_git_dir(&repo_root);
+
+    // 关键：一旦声明了 rerun-if-changed，Cargo 就**只在**这些文件变化时才重跑
+    // build.rs。`.git/HEAD` 在切分支时会变，但**同分支上新增提交时它不变**
+    // （变的只有 refs/heads/<branch>）。不把引用文件也列进来的话，
+    // 版本号里的 Git 哈希会一直停在首次构建那次提交上。
+    if let Some(gd) = &git_dir {
+        println!("cargo:rerun-if-changed={}", gd.join("HEAD").display());
+        if let Ok(head) = fs::read_to_string(gd.join("HEAD")) {
+            if let Some(reference) = head.trim().strip_prefix("ref: ") {
+                println!(
+                    "cargo:rerun-if-changed={}",
+                    gd.join(reference.replace('/', std::path::MAIN_SEPARATOR_STR))
+                        .display()
+                );
+            }
+        }
+        println!(
+            "cargo:rerun-if-changed={}",
+            gd.join("packed-refs").display()
+        );
+    }
+
     let branch = git_dir
         .as_deref()
         .and_then(read_branch)
