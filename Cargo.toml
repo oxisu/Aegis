@@ -23,13 +23,18 @@
 resolver = "2"
 members = ["crates/*"]
 
+# ── 统一版本号：所有 crate 共用，与根目录 VERSION 文件严格一致 ──────────────
+# Cargo 的 version 字段不接受 SemVer build metadata（+xxx），
+# 因此这里只写到预发布标签；build metadata 由 aegis-version 在运行时追加。
 [workspace.package]
-version      = "0.1.0"
+version      = "0.1.0-alpha.1"
 edition      = "2021"
 rust-version = "1.85"
 license      = "AGPL-3.0-or-later"
 authors      = ["Aegis Contributors"]
 description  = "Aegis（宙斯的神盾）：本地零信任网络编排守护进程 —— WFP 绝缘底座 + 可插拔适配器"
+homepage     = "https://github.com/aegis-net/aegis"
+repository   = "https://github.com/aegis-net/aegis"
 
 # ── 可插拔依赖（仅声明版本，具体 features 由各 crate 按需开启，避免全量编译）──
 [workspace.dependencies]
@@ -43,6 +48,8 @@ thiserror = { version = "2" }
 tracing  = { version = "0.1" }
 # 序列化：IPC 帧、配置落盘、审计导出均依赖
 serde    = { version = "1", features = ["derive"] }
+# 工作区内部：版本标识（所有 crate 都应依赖它，不要各自读 CARGO_PKG_VERSION）
+aegis-version = { path = "crates/aegis-version" }
 
 # ── Release 优化：本机安全底座追求极小体积与快速冷启动 ──
 [profile.release]

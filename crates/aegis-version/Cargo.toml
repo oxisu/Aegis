@@ -1,0 +1,17 @@
+[package]
+name        = "aegis-version"
+description = "Aegis 版本标识单一事实来源：语义化版本号 + 预发布标签 + 构建元数据（Git 哈希 / 分支）"
+version.workspace      = true
+edition.workspace      = true
+rust-version.workspace = true
+license.workspace      = true
+authors.workspace      = true
+build                  = "build.rs"
+
+[dependencies]
+# 刻意零依赖：版本号必须能被所有层（含最底层的 aegis-wfp）无条件引用，
+# 不能引入任何可能失败的依赖链。
+
+[[example]]
+name = "version"
+path = "examples/version.rs"

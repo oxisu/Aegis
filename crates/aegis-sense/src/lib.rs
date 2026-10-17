@@ -29,3 +29,13 @@ pub use self::fingerprint::{compute_fingerprint, hex};
 pub use self::model::{InterfaceInfo, InterfaceRole, MacAddress, OperStatus, TopologySnapshot};
 pub use self::route::default_egress;
 pub use self::topology::snapshot;
+
+// 把版本标识透出，调用方无需再单独依赖 aegis-version 就能拿到统一版本号
+pub use aegis_version as version;
+
+/// 本 crate 所属项目的完整版本号，例如 `0.1.0-alpha.1+g334165c`。
+/// 日志与导出文件统一用这个函数取值，避免各处硬编码导致版本错配。
+#[must_use]
+pub fn aegis_version() -> String {
+    version::full()
+}

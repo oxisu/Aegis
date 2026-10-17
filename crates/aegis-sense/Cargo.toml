@@ -27,6 +27,10 @@ sha2      = { workspace = true }
 thiserror = { workspace = true }
 serde     = { workspace = true }
 
+# 版本标识：所有对外输出（日志、指纹记录、导出文件）都要带上统一版本号，
+# 便于把任何一次采集结果回溯到具体的 Aegis 版本与提交。
+aegis-version = { workspace = true }
+
 # 感知层是纯同步的系统信息读取，dry-run 示例同步执行即可
 [[example]]
 name = "dry_run"
