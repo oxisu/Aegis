@@ -13,7 +13,9 @@
 
 use std::time::Instant;
 
-use aegis_sense::model::OperStatus;
+use aegis_sense::delta;
+use aegis_sense::fingerprint;
+use aegis_sense::model::{FingerprintScope, OperStatus};
 use aegis_sense::route;
 use aegis_sense::snapshot;
 use aegis_sense::version;
@@ -38,23 +40,29 @@ fn main() {
     let elapsed = started.elapsed();
 
     println!("── 本机网络接口拓扑 ────────────────────────────────────────────");
-    println!("共 {} 张网卡：", snap.interfaces.len());
+    println!("共 {} 张网卡，按性质分类：", snap.interfaces.len());
+    for (kind, n) in fingerprint::count_by_kind(&snap.interfaces) {
+        if n > 0 {
+            println!("    {:<4} : {} 张", kind, n);
+        }
+    }
     println!();
 
     for iface in &snap.interfaces {
         let up = matches!(iface.oper_status, OperStatus::Up);
         let flag = if up { "●" } else { "○" };
-        let kind = if iface.is_wireless() {
+        let medium = if iface.is_wireless() {
             "无线"
         } else {
             "有线/其它"
         };
 
         println!(
-            "{} {} [{}] {}",
+            "{} {} [{}][{}] {}",
             flag,
             iface.alias,
-            kind,
+            iface.kind(),
+            medium,
             iface.oper_status_str()
         );
         println!("    identity : {}", iface.identity());
@@ -145,15 +153,76 @@ fn main() {
 
     println!("── 拓扑指纹（§20.4）───────────────────────────────────────────");
     println!("SHA-256 : {}", snap.fingerprint);
+    println!("格式版本: v{}", fingerprint::FINGERPRINT_VERSION);
     println!(
-        "（仅 {} 张 Up 接口参与计算；插拔网口/换 Wi-Fi 会改变此值 = 判定拓扑漂移）",
-        snap.interfaces.iter().filter(|i| i.is_up()).count()
+        "参与集合: {}（{} 张）",
+        snap.fingerprint_scope, snap.fingerprint_participants
     );
+    if snap.fingerprint_scope != FingerprintScope::Physical {
+        println!("⚠ 指纹作用域已降级：没有可用的物理网卡参与计算，请检查采集结果");
+    }
+    if snap.fingerprint_participants == 0 {
+        println!("⚠ 参与集合为空（整机离线或采集异常）——不得当作“拓扑未变”放行");
+    }
     println!();
+    println!("参与网卡：");
+    for iface in snap.fingerprint_participants() {
+        println!(
+            "  ● {} [{}] {}",
+            iface.alias,
+            iface.kind(),
+            iface
+                .mac
+                .as_ref()
+                .map(|m| m.to_hex())
+                .unwrap_or_else(|| "<无 MAC>".into())
+        );
+    }
+    println!();
+    println!("（指纹只计入物理网卡：WFP/QoS 过滤器伪接口的增减不会造成假漂移）");
+    println!();
+
+    // 稳定性自检：连续两次采集做差分，正常情况下必须"零变化"。
+    // 这一步同时验证了指纹的可重复性——若两次指纹不同，
+    // 说明参与集合里混进了不稳定因素，收敛就没做到位。
+    println!("── 稳定性自检（连续两次快照差分）─────────────────────────────");
+    match snapshot() {
+        Ok(second) => {
+            let d = delta::diff(&snap, &second);
+            println!("{}", d.summary());
+            if !d.is_empty() {
+                println!(
+                    "  指纹: {} → {}",
+                    short(&d.fingerprint_before),
+                    short(&d.fingerprint_after)
+                );
+                for i in &d.added {
+                    println!("  + 新增 {} [{}]", i.alias, i.kind());
+                }
+                for i in &d.removed {
+                    println!("  - 消失 {} [{}]", i.alias, i.kind());
+                }
+                for c in &d.changed {
+                    println!("  ~ 变化 {}（物理网卡={}）", c.alias, c.physical);
+                }
+            }
+            if d.needs_reconfirmation() {
+                println!("⚠ 两次采集之间拓扑发生实质变化，需要用户重新确认");
+            }
+        },
+        Err(e) => println!("（第二次采集失败: {}）", e),
+    }
+    println!();
+
     println!("采集耗时: {:?}", elapsed);
     println!();
     println!("✅ 干跑完成。全程只读，本机网络状态未被修改。");
     println!("   Aegis {}", version::full());
+}
+
+/// 指纹只显示前 16 位，够区分又不占版面。
+fn short(fp: &str) -> String {
+    format!("{}…", &fp[..fp.len().min(16)])
 }
 
 /// 按**显示宽度**截断（中文按 2 列宽算），避免格式化对齐被打乱。
