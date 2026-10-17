@@ -1,0 +1,110 @@
+# InterBoot 编排器配置样例
+#
+# 对应 design-spec.md §22「编排器自身配置与持久化 Schema」。
+# 系统级路径：%PROGRAMDATA%\Orchestrator\config.toml
+# 用户级偏好：%LOCALAPPDATA%\Orchestrator\prefs.toml
+#
+# ⚠ 本文件仅为**样例**，不含任何真实密钥。请勿把填写过的 token / secret 提交进仓库。
+
+[service]
+auto_start        = true          # 注册为 Windows Service，SYSTEM 权限、自动启动
+pipe_name         = "orchestrator"
+ipc_fallback_port = 19827         # Named Pipe 不可用时的本地 HTTP 兜底端口
+log_level         = "info"
+
+# ── 救砖逃生通道（地雷二，§28.2）──
+[rescue]
+boot_time_filter_guid   = "00000000-0000-0000-0000-000000000000"  # 安装时生成并固化
+watchdog_fail_threshold = 3       # 连续 N 次启动失败 → 看门狗自动清背板
+rescue_key_combo        = "Shift" # 开机按住此键跳过装载 Boot-Time 背板
+rescue_exe_path         = "C:\\Program Files\\Orchestrator\\orchestrator-rescue.exe"
+
+# ── 可插拔适配器选择（§2A 解耦核心）──
+# 底座（WFP / 审计 / 熔断）与下列 provider 完全解耦；换上层工具只改这里
+[orchestrator]
+proxy_provider    = "generic"    # generic | clash_verge | sing_box | command_hooks | none
+multiwan_provider = "none"       # hypomux | command_hooks | none
+
+[topology]
+trusted_fingerprint = ""          # 空值表示首次开机需人工分配角色
+last_confirmed_at   = ""
+
+# 接口角色分配：键为稳定标识（优先 NET_LUID，回退 MAC）
+# [[topology.interface_roles]]
+# identity = "LUID:1689395631011611136"
+# role     = "CampusStrict"
+
+[whitelist]
+domestic_rule_set = "domestic-direct"
+allow_dns         = ["223.5.5.5", "119.29.29.29"]
+
+[audit]
+db_path        = "%PROGRAMDATA%\\Orchestrator\\audit.db"
+rotation_days  = 30
+max_size_mb    = 512
+export_formats = ["csv", "json"]
+
+# ── 四角色的模式定义 ──
+[modes.CampusStrict]
+rule_set            = "domestic-direct"
+system_proxy_lock   = "off"
+multiwan_on_this_if = false
+dns_policy          = "tun-only"      # 物理 53 一律 DROP
+
+[modes.FreeOutbound]
+rule_set            = "full-outbound"
+system_proxy_lock   = "off"
+multiwan_on_this_if = false
+dns_policy          = "tun-or-spec"
+
+[modes.Aggregated]
+clash_tun_exclude   = true
+multiwan_on_this_if = true
+multiwan_mode       = "src-bind"
+
+[modes.Isolated]
+all_drop = true
+
+# ── 可插拔 Provider 实现 ──
+[providers.generic]
+type = "native_system"            # 纯 WFP 白名单隔离，不联动任何外部工具
+
+# [providers.clash_verge]
+# type        = "clash_rest"
+# api_base    = "http://127.0.0.1:9090"
+# secret      = "<从环境变量注入，勿硬编码>"
+# rule_campus = "domestic-direct"
+# rule_free   = "full-outbound"
+
+# [providers.command_hooks]
+# type = "custom_exec"
+# on_campus_enter   = "powershell.exe -File C:\\Scripts\\switch_campus.ps1"
+# on_free_enter     = "powershell.exe -File C:\\Scripts\\switch_free.ps1"
+
+# ── 人机交互与弹窗行为（§29）──
+[interaction]
+notification_style       = "fluent_flyout"
+fullscreen_behavior      = "silent_fallback"
+confirmation_timeout_sec = 30
+timeout_action           = "auto_campus_strict"
+# 锁屏态策略：strict_airgap（本地账户首选）/ allow_trusted_only（默认）
+lockscreen_policy        = "allow_trusted_only"
+# 零信任铁律：即便指纹吻合也必须用户显式放行
+require_manual_approval  = true
+alert_aggregation_window_sec = 60
+
+# ── 校园网 Web 认证沙盒（§27.6 / §29.2）──
+[captive_portal]
+enabled           = true
+auto_open_browser = true
+portal_servers    = ["10.254.1.1"]
+allowed_browsers  = ["msedge.exe", "chrome.exe", "firefox.exe"]
+probe_url         = "http://connectivitycheck.gstatic.com/generate_204"
+sandbox_lease_sec = 180
+
+# ── 已知网络指纹与自动化规则库（§29.4）──
+# [[known_profiles]]
+# name         = "校园网主干无线"
+# ssid         = "EXAMPLE-EDU"
+# default_role = "CampusStrict"
+# auto_approve = true
