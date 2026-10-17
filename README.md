@@ -62,36 +62,69 @@ InterBoot/
 
 ## 构建与运行
 
-### 前置条件
+### 当前已验证的开发环境（本机）
 
-1. **Rust 工具链**（stable、含 `rustfmt` + `clippy`）
-2. **MSVC 生成工具**（Windows Service / WFP 项目的官方路线）
-   —— 装 Build Tools for Visual Studio + Windows 11 SDK
+| 组件 | 位置 | 说明 |
+|---|---|---|
+| Rust 工具链 | `D:\Dev\Rust` | **gnu 宿主** `stable-x86_64-pc-windows-gnu`，由 `rust-toolchain.toml` 锁定 |
+| MinGW-w64 (gcc 16.2.0) | `D:\Dev\msys64\mingw64` | 作为链接后端，从 MSYS2 腾讯云镜像装 |
+| crates 镜像 | rsproxy.cn | 写在 `D:\Dev\Rust\.cargo\config.toml` |
+
+> 为什么是 gnu 而不是 msvc：本机此前没有 MSVC 生成工具，且 VS Build Tools 安装器
+> 在本机会因环境变量 `Path`/`PATH` 重复而崩溃（详见下方"已知坑"）。
+> 等 MSVC 装好后，把 `rust-toolchain.toml` 的 `channel` 改回
+> `stable-x86_64-pc-windows-msvc` 即可切换。
 
 ### 运行感知层干跑
 
-```powershell
+```bash
+export PATH="/d/Dev/msys64/mingw64/bin:$PATH"   # Git Bash；把 gcc 放进 PATH
 cargo run -p ob-sense --example dry_run
 ```
 
-输出示例包含：网卡列表（别名 / MAC / LUID / IPv4 / 网关 / SSID）、默认出口裁决、SHA-256 拓扑指纹。
+本机实测输出（节选）：
 
-### ⚠️ 本机环境两个已知坑（重要）
+```text
+● 以太网 4 [有线/其它] Up
+    MAC      : 1C-86-0B-01-B6-AB
+    IPv4     : 10.41.0.229
+    网关     : 10.41.0.1
+    DHCP     : 10.41.0.1
 
-1. **`link.exe` 名字冲突**
+── 默认出口裁决 ──
+默认出口 : 以太网 4  [1689399750295552]
+  网关     : 10.41.0.1
+
+── 拓扑指纹（§20.4）──
+SHA-256 : fb9aaf7d159e841f73833b934eb1d2641605176b8239ed27e309651c95a052c4
+
+采集耗时: 17.6251ms
+✅ 干跑完成。全程只读，本机网络状态未被修改。
+```
+
+### ⚠️ 本机环境三个已知坑（重要）
+
+1. **`link.exe` 名字冲突**（仅在用 MSVC 时）
    Git Bash 会在 PATH 里放一份 GNU coreutils 的 `link.exe`（`/usr/bin/link`）。
-   若在 Git Bash 里直接 `cargo build`，rustc 会调错程序，报：
+   若在 Git Bash 里直接构建 msvc 目标，rustc 会调错程序，报：
    `link: extra operand ...` / `Try 'link --help'`。
-   **解决**：在 **PowerShell（或原生终端）** 里构建，或让 MSVC 的
-   `VC\Tools\MSVC\<ver>\bin\Hostx64\x64` 排在 PATH 最前（推荐用 VS 开发者命令行)。
+   **解决**：在 PowerShell 里构建，或让 MSVC 的 `VC\Tools\MSVC\<ver>\bin\Hostx64\x64`
+   排到 PATH 最前。
 2. **失效的系统代理**
-   若 Internet 选项里残留了指向某个已停止运行的本地代理（例如 `127.0.0.1:7897`），
-   cargo 拉取依赖会卡住报 `Could not connect to server over proxy 127.0.0.1`。
+   Internet 选项里残留了指向已停止运行的本地代理（`127.0.0.1:7897`，无进程监听），
+   cargo 会去连它并报 `Could not connect to server over proxy 127.0.0.1`。
    **解决**：构建前清空代理环境变量即可直连：
 
-   ```powershell
-   $env:HTTP_PROXY=""; $env:HTTPS_PROXY=""; $env:CARGO_HTTP_PROXY=""; $env:ALL_PROXY=""
+   ```bash
+   unset HTTP_PROXY HTTPS_PROXY http_proxy https_proxy ALL_PROXY all_proxy
    ```
+3. **VS Build Tools 安装器崩溃**（`0x80070057`）
+   本机工具会话的进程环境里同时存在 `Path` 与 `PATH`（注册表本身是干净的，
+   由 MSYS/Git Bash 会话注入）。VS Installer Engine 派生 MSI 子进程时，其 .NET
+   `ProcessStartInfo.EnvironmentVariables` 用大小写不敏感字典，插入重复键即抛异常，
+   最终以 `vital failure` 收场。
+   **规避**：不要在本工具会话里装 VS；直接在资源管理器双击安装器，
+   或改用 MSYS2 + MinGW（本项目当前采用）。
 
 ## 许可证
 
