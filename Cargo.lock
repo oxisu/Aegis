@@ -13,6 +13,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "aegis-ipc"
+version = "0.1.0-alpha.1"
+dependencies = [
+ "aegis-version",
+ "serde",
+ "thiserror",
+]
+
+[[package]]
 name = "aegis-sense"
 version = "0.1.0-alpha.1"
 dependencies = [

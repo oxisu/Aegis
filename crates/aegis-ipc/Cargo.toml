@@ -1,0 +1,17 @@
+[package]
+name        = "aegis-ipc"
+description = "本地 IPC：协议帧编解码 + 版本握手（纯逻辑，不创建管道、不做任何特权操作）"
+version.workspace      = true
+edition.workspace      = true
+rust-version.workspace = true
+license.workspace      = true
+authors.workspace      = true
+
+[dependencies]
+# 版本标识：握手时要带上 Aegis 自身版本号
+aegis-version = { workspace = true }
+thiserror     = { workspace = true }
+serde         = { workspace = true }
+
+# 刻意不依赖任何序列化库：帧格式必须完全由本项目掌控，
+# 不允许外部 crate 的版本升级悄悄改变线上帧布局（IPC 两端版本可能不同）。
