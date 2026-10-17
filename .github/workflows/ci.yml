@@ -92,8 +92,11 @@ jobs:
       - name: 单测
         run: cargo test --workspace
 
-      - name: 编译感知层（含示例）
-        run: cargo build -p aegis-sense --examples --verbose
+      - name: 编译全部示例
+        run: cargo build --workspace --examples --verbose
 
-      - name: 干跑自检（只读，CI 上仅验证不崩溃）
+      - name: 感知层干跑自检（只读，CI 上仅验证不崩溃）
         run: cargo run -p aegis-sense --example dry_run
+
+      - name: 编排核心只读推演（纯逻辑，验证角色裁决与状态机铁律）
+        run: cargo run -p aegis-core --example plan

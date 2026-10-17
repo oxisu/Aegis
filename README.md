@@ -41,14 +41,29 @@ Aegis 建立一张**独立于任何上层代理软件的 OS 级安全底座**：
 | Crate | 状态 | 说明 |
 |---|---|---|
 | `aegis-version` | ✅ 可用 | 版本标识单一事实来源（零依赖） |
-| `aegis-sense` | 🚧 进行中 | 感知层：拓扑采集 / 默认出口裁决 / SSID / SHA-256 拓扑指纹 |
-| `aegis-core` | ⬜ 待建 | 角色模型、状态机、IPC 协议 |
+| `aegis-sense` | ✅ 可用 | 感知层：拓扑采集 / 接口分类 / 默认出口裁决 / SSID / 拓扑指纹 / 拓扑差分 |
+| `aegis-core` | 🚧 进行中 | 角色裁决（§20.5）+ 状态机（§26）；IPC 协议待建 |
 | `aegis-wfp` | ⬜ 待建 | WFP 绝缘笼、Boot-Time 背板、DNS 封锁 |
 | `aegis-fuse` | ⬜ 待建 | 微秒级网络端口熔断器 |
 | `aegis-audit` | ⬜ 待建 | 审计与证据链落盘 |
 | `aegis-ipc` | ⬜ 待建 | 本地 IPC 协议（命名管道 + token 鉴权） |
 | `aegis-orchestrator` | ⬜ 待建 | 应用层代理适配器（SPI，可插拔） |
 | `aegisd` / `aegisctl` | ⬜ 待建 | 守护进程 / 控制端二进制 |
+
+已完成的决策链路（全部只读、无需管理员权限）：
+
+```text
+GetIfTable2 / GetAdaptersAddresses / GetIpForwardTable2 / GetIpInterfaceTable / WLAN API
+        │
+        ▼  aegis-sense::snapshot()
+   拓扑快照（44 张网卡分类为 3 物理 / 25 过滤器 / 7 隧道 / 1 回环 / 8 虚拟）
+        │
+        ├─ 指纹：只算物理 Up 网卡 → 消除伪接口引起的假漂移
+        └─ 差分：两次快照比对 → 输出"该不该打断用户"
+                    │
+                    ▼  aegis-core
+              角色裁决（Fail-Closed）+ 状态机绝缘等级
+```
 
 ## 目录结构
 
@@ -67,9 +82,11 @@ Aegis/
 │   ├── dev-env.ps1         # MSVC 路线的构建入口
 │   └── clean-ghost-nics.ps1# 幽灵网卡盘点与清理（默认只读）
 └── crates/
-    ├── aegis-version/      # 版本标识
-    └── aegis-sense/        # 感知层（纯只读）
-        └── examples/dry_run.rs
+    ├── aegis-version/      # 版本标识（零依赖）
+    ├── aegis-sense/        # 感知层（纯只读）：采集 / 分类 / 指纹 / 差分
+    │   └── examples/dry_run.rs
+    └── aegis-core/         # 编排核心（纯逻辑）：角色裁决 / 状态机
+        └── examples/plan.rs
 ```
 
 ## 安全边界（`aegis-sense` 的硬约束）
@@ -124,37 +141,50 @@ Aegis —— 宙斯的神盾
   稳定性    : 0.x 阶段，MINOR 递增即破坏性变更
 ```
 
-### 运行感知层干跑
+### 运行只读干跑
 
 ```bash
 export PATH="/d/Dev/msys64/mingw64/bin:$PATH"   # Git Bash；把 gcc 放进 PATH
-cargo run -p aegis-sense --example dry_run
+cargo run -p aegis-sense --example dry_run   # 感知层：拓扑 + 指纹 + 稳定性自检
+cargo run -p aegis-core  --example plan      # 编排核心：角色裁决 + 状态机推演
 ```
 
 本机实测输出（节选）：
 
 ```text
-Aegis 0.1.0-alpha.1+g05d624e (宙斯的神盾) [debug/x86_64-pc-windows-gnu @ master]
+共 44 张网卡，按性质分类：
+    物理 : 3 张 / 过滤器 : 25 张 / 隧道 : 7 张 / 回环 : 1 张 / 虚拟 : 8 张
 
 ── 默认出口裁决 ────────────────────────────────────────────────
   接口                                 接口度量       路由偏移       合成度量
   WLAN                                 55          0         55
   以太网 4                                25          0         25  ← 选中
 
-默认出口 : 以太网 4  [1689399750295552]
-  网关     : 10.41.0.1
-
 ── 拓扑指纹（§20.4）───────────────────────────────────────────
-SHA-256 : 4b558969ae0ecbc5b11ce7bc6d966e8acc7821afe002fc978d072bad25181820
+SHA-256 : a7ad713e3f4e821095e53b2c40a937f5db17c32938ac81bb203b6cf9b4d30991
+格式版本: v2
+参与集合: 仅物理网卡（2 张）
 
-采集耗时: 16.5988ms
-✅ 干跑完成。全程只读，本机网络状态未被修改。
+参与网卡：
+  ● 以太网 4 [物理] 1C-86-0B-01-B6-AB
+  ● WLAN [物理] E0-AD-47-10-86-7A
+
+── 稳定性自检（连续两次快照差分）─────────────────────────────
+拓扑无变化
 ```
 
-> 上面"接口度量 / 路由偏移 / 合成度量"三列不是装饰。Windows 选路用的是
+两处刻意的设计，都不是装饰：
+
+> **"接口度量 / 路由偏移 / 合成度量"三列**：Windows 选路用的是
 > **接口度量 + 路由度量偏移**，而 DHCP 自动度量下路由偏移恒为 0；
 > 只看偏移就会在两条 0 之间比大小，把出口判错（本机实测会把 `以太网 4` 误判成 `WLAN`）。
-> 详见 `crates/aegis-sense/src/route.rs` 的模块注释与回归测试。
+> 详见 `crates/aegis-sense/src/route.rs`。
+>
+> **指纹只算物理网卡**：44 张网卡里真正是硬件的只有 3 张（其中 2 张 Up）。
+> 其余 25 张是 WFP / QoS 等 NDIS 过滤器为物理网卡派生的伪接口，
+> 数量会随驱动装卸载和系统更新变化。若把它们计入指纹，物理环境没变也会"漂移"，
+> 用户会被反复要求重新确认——久了就会无脑点确认，**零信任直接失效**。
+> 详见 `crates/aegis-sense/src/fingerprint.rs`。
 
 ### ⚠️ 本机环境四个已知坑（重要）
 
