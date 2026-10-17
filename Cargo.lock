@@ -4,7 +4,7 @@ version = 4
 
 [[package]]
 name = "aegis-config"
-version = "0.1.0-alpha.1"
+version = "0.1.0-alpha.2"
 dependencies = [
  "aegis-core",
  "aegis-version",
@@ -15,7 +15,7 @@ dependencies = [
 
 [[package]]
 name = "aegis-core"
-version = "0.1.0-alpha.1"
+version = "0.1.0-alpha.2"
 dependencies = [
  "aegis-sense",
  "aegis-version",
@@ -25,7 +25,7 @@ dependencies = [
 
 [[package]]
 name = "aegis-ipc"
-version = "0.1.0-alpha.1"
+version = "0.1.0-alpha.2"
 dependencies = [
  "aegis-version",
  "serde",
@@ -34,7 +34,7 @@ dependencies = [
 
 [[package]]
 name = "aegis-sense"
-version = "0.1.0-alpha.1"
+version = "0.1.0-alpha.2"
 dependencies = [
  "aegis-version",
  "serde",
@@ -45,7 +45,7 @@ dependencies = [
 
 [[package]]
 name = "aegis-version"
-version = "0.1.0-alpha.1"
+version = "0.1.0-alpha.2"
 
 [[package]]
 name = "block-buffer"

@@ -1,5 +1,5 @@
 # Aegis（宙斯的神盾）—— 编排器配置样例
-# 版本：0.1.0-alpha.1（与仓库根 VERSION 文件一致）
+# 版本：0.1.0-alpha.2（与仓库根 VERSION 文件一致）
 #
 # 对应 design-spec.md §22「编排器自身配置与持久化 Schema」。
 # 系统级路径：%PROGRAMDATA%\Aegis\config.toml

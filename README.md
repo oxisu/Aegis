@@ -3,7 +3,7 @@
 > 原生运行在 Windows 内核网络栈（WFP）之上的**零信任网络编排守护进程**，
 > 而非又一个代理软件。
 >
-> 版本 `0.1.0-alpha.1` · 许可证 AGPL-3.0 · 版本规范见 [`docs/VERSIONING.md`](docs/VERSIONING.md)
+> 版本 `0.1.0-alpha.2` · 许可证 AGPL-3.0 · 版本规范见 [`docs/VERSIONING.md`](docs/VERSIONING.md)
 
 ## 它是什么
 
@@ -131,15 +131,17 @@ cargo run -p aegis-version --example version -- --verbose # 多行
 
 ```text
 Aegis —— 宙斯的神盾
-  版本      : 0.1.0-alpha.1+g05d624e
-  语义版本  : 0.1.0-alpha.1
-  预发布    : alpha.1
+  版本      : 0.1.0-alpha.2+g64abfd2
+  语义版本  : 0.1.0-alpha.2
+  预发布    : alpha.2
   构建配置  : debug
   目标平台  : x86_64-pc-windows-gnu
   Git 分支  : master
-  Git 提交  : 05d624e
+  Git 提交  : 64abfd2
   稳定性    : 0.x 阶段，MINOR 递增即破坏性变更
 ```
+
+（`+g<hash>` 由构建期采集，随提交变化。）
 
 ### 运行只读干跑
 

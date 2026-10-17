@@ -28,7 +28,7 @@ members = ["crates/*"]
 # Cargo 的 version 字段不接受 SemVer build metadata（+xxx），
 # 因此这里只写到预发布标签；build metadata 由 aegis-version 在运行时追加。
 [workspace.package]
-version      = "0.1.0-alpha.1"
+version      = "0.1.0-alpha.2"
 edition      = "2021"
 rust-version = "1.85"
 license      = "AGPL-3.0-or-later"

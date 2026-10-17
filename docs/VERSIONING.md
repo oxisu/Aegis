@@ -44,10 +44,10 @@ Aegis 是安全底座，契约包括：IPC 协议帧格式、配置 schema、审
 
 | 位置 | 内容 | 用途 |
 |---|---|---|
-| `VERSION`（仓库根） | `0.1.0-alpha.1` | 发布脚本与 CI 读取的权威值 |
-| `Cargo.toml` → `[workspace.package].version` | `0.1.0-alpha.1` | 所有 crate 继承（不含 build metadata） |
+| `VERSION`（仓库根） | `0.1.0-alpha.2` | 发布脚本与 CI 读取的权威值 |
+| `Cargo.toml` → `[workspace.package].version` | `0.1.0-alpha.2` | 所有 crate 继承（不含 build metadata） |
 | `crates/aegis-version/src/lib.rs` | 编译期从 `CARGO_PKG_VERSION*` 派生 | 代码内常量与 `--version` 输出 |
-| `CHANGELOG.md` 顶部条目 | `## [0.1.0-alpha.1] - YYYY-MM-DD` | 人类可读的变更归档 |
+| `CHANGELOG.md` 顶部条目 | `## [0.1.0-alpha.2] - YYYY-MM-DD` | 人类可读的变更归档 |
 
 运行时完整版本号由 `aegis_version::full()` 拼装：
 `CARGO_PKG_VERSION` + `+g<Git 短哈希>`（哈希由 `aegis-version/build.rs` 在构建期

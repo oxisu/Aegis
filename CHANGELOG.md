@@ -9,6 +9,12 @@
 
 ## [Unreleased]
 
+## [0.1.0-alpha.2] - 2026-10-18
+
+自 `v0.1.0-alpha.1`（`a6797cb`）以来的 21 个提交。新增三个 crate
+（`aegis-ipc` / `aegis-config`）与 `aegis-core` 的角色策略与状态机测试补强。
+**接口仍未冻结**，IPC 协议与配置 schema 均未定型。
+
 ### Added
 
 - **`aegis-ipc` 本地 IPC 协议层**（新建 crate）

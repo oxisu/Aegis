@@ -180,7 +180,7 @@ mod tests {
     #[test]
     fn version_parses_from_cargo_env() {
         let v = Version::current();
-        // 当前 workspace 版本为 0.1.0-alpha.1
+        // 当前 workspace 版本为 0.1.0-alpha.2
         assert_eq!(v.major, 0);
         assert!(v.is_unstable());
     }
@@ -209,8 +209,10 @@ mod tests {
         assert!(b.contains(TARGET_TRIPLE));
     }
 
+    /// 这条断言是"版本号四处一致"的守门员之一：
+    /// 改了 `Cargo.toml` 却忘了改这里，CI 会立刻变红。
     #[test]
     fn prerelease_matches_workspace_version() {
-        assert_eq!(PRERELEASE, "alpha.1");
+        assert_eq!(PRERELEASE, "alpha.2");
     }
 }
