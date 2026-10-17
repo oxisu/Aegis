@@ -31,18 +31,50 @@
     关键字（用户可覆盖误判）、置信度标为 `Confirmed` 而非 `Inferred`
   - 不写入代码默认值——个人化 SSID 属用户生活习惯，声明权始终在用户手上
   - `plan` 示例新增 `--free` / `--campus`，可直接对比声明前后的裁决差异
+- **`aegis-config` 配置加载与 schema 版本校验**（新建 crate）
+  - **Fail-Closed**：配置里写着"哪些网卡可以出网"，解析失败若退回默认值，
+    等于用一套用户没批准过的策略放行。因此任何失败都拒绝加载并明确报错，
+    没有任何 `unwrap_or_default()` 式兜底
+  - `config_schema_version` 单独校验：配置是对外契约，升级后字段语义可能已变，
+    读旧配置按新语义解释 = 安全策略静默降级
+  - 规则复用 `aegis_version::compat`（与 IPC 握手同一套）；0.x 阶段
+    schema MINOR 不同（如 `0.2`）即拒绝
+  - 严格性分层：已实现的段（`meta` / `roles` / `topology`）一律
+    `deny_unknown_fields`，拼写错误必须报错而非静默忽略；顶层宽容，
+    兼容本版本尚未实现的段
+  - `roles` 段直接反序列化成 `RolePolicy`，不另建 DTO（两个结构必然漂移）
+  - 两条护栏测试：配置声明 `MMi` → 裁决放行的端到端链路；
+    仓库内 `config.example.toml` 必须能被本程序加载
 - **变异回归测试（`cargo-mutants`）**
   - 单测全绿只证明"代码通过了我们想到的用例"，变异测试反过来问：
     注入一个 bug，测试会不会红
   - 配置见 `mutants.toml`；CI 的 `mutation` job 每周一 + 手动触发，
     阈值 `MUTATION_MAX_MISSED=0`，产物以 artifact 上传
   - `CONTRIBUTING.md` 写入本地运行方式、漏检的处理办法与三条经验
-  - 首轮 `aegis-core` 79 个变异体漏检 26 个，绝大多数是
+  - 首轮 `aegis-core` 79 个变异体**漏检 26 个**，绝大多数是
     "delete match arm in next"——删掉任意一条状态迁移边测试仍全绿，
-    用户真走到那条边时系统不会迁移。已改为把 §26 状态图的 29 条边抄进
-    测试逐边穷举（11 状态 × 15 事件 = 165 种组合），并新增"无死锁状态"
-    与"任何状态都能回到 Controlled"两条结构性不变量；`insulation()` /
-    `awaits_user()` / `Display` 改为逐值钉死、布尔函数双向断言
+    用户真走到那条边时系统不会迁移
+  - 修法：把 §26 状态图的 29 条边抄进测试逐边穷举（11 状态 × 15 事件 =
+    165 种组合），并新增"无死锁状态"与"任何状态都能回到 Controlled"两条
+    结构性不变量；`insulation()` / `awaits_user()` / `Display` 改为逐值
+    钉死、布尔函数双向断言
+  - 复测结果：**79 变异体，65 被杀死，14 不可行，漏检 0**（耗时 11 分钟）
+
+### Changed
+
+- **契约版本判定下沉到 `aegis-version::compat`**
+  配置 schema 校验与 IPC 版本握手要用同一套规则；留在 `aegis-ipc` 里会让
+  `aegis-config` 要么分层倒置依赖 IPC，要么另写一份而必然漂移。
+  `aegis-version` 保持零依赖（手写 `Display` / `Error`，不引 `thiserror`）。
+  顺带修正 `parse("")` 由 `NotANumber` 改为 `MissingSegment`。
+
+### Fixed
+
+- **变异测试在本机的两个假死现象**（详见 CONTRIBUTING.md）
+  - 不带 `-v` 时输出走块缓冲，重定向后长时间不落盘，日志停在基线那一行，
+    看起来像卡死（实测 45 秒 0 行）
+  - `-j` 开并行是负优化：cargo 对 target 目录独占锁，`-j 8` 时单次构建
+    从 5s 膨胀到 30~56s 并全部超时，`--copy-target` 亦无效。改为单线程
 - **`aegis-core` 编排核心**（新建 crate）
   - 角色裁决（§20.5）：`InterfaceRole` 从感知层迁出——角色是策略而非感知事实，
     两处定义必然各自漂移，必须收敛为单一定义
