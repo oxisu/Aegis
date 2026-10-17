@@ -90,6 +90,65 @@ cargo test --workspace
   （本机 `Path`/`PATH` 重复键会让 .NET 抛出）
 - 提交前用 `Parser::ParseFile` 做一次语法自检
 
+## 测试要求：必须通过变异回归测试
+
+**单测全绿 ≠ 用例有效。** 本项目用 [`cargo-mutants`](https://mutants.rs) 做变异测试：
+它会往源码里注入一个个"人造 bug"（变异体），然后跑测试；
+**测试没变红的变异体 = 漏检（missed）= 一块没有被真正守护的逻辑**。
+
+对 Aegis 这类安全底座，漏检不是"测试覆盖率不好看"的问题，而是真实事故：
+
+> 删掉 `next()` 里的某条 `match arm` 后测试仍然全绿，
+> 意味着用户真的走到那条状态边时系统不会迁移——而我们一直以为它是好的。
+
+### 本地运行
+
+```powershell
+# 全量（分钟级，建议挂后台）
+cargo mutants --no-shuffle --output mutants.out
+
+# 只跑某个 crate
+cargo mutants --package aegis-core
+
+# 只跑某个文件
+cargo mutants --file crates/aegis-core/src/state.rs
+```
+
+配置见仓库根目录 `mutants.toml`。产物落在 `mutants.out/`（已 gitignore）：
+`missed.txt` 是漏检清单，`caught.txt` 是已被杀死的，`unviable.txt` 是无法编译的注入。
+
+### 判定标准
+
+- **漏检必须为 0**（CI 里 `MUTATION_MAX_MISSED=0`）。
+- 提交新逻辑时，请顺手跑一次对应 crate 的变异测试，确保自己写的用例**真的能杀死 bug**。
+
+### 漏检了怎么办
+
+先分辨两类漏检，处理方式完全不同：
+
+| 类型 | 现象 | 处理 |
+|---|---|---|
+| **测试不够** | 逻辑确实有行为差异，但没人断言 | 补断言。迁移表/语义矩阵/展示文案这类"穷举型"逻辑，用**表驱动**一次钉死全部取值，比一条条手写 `assert` 更能杀死注入 |
+| **等价变异体** | 改了也没差别（如 `is_empty` 在永远非空的表上） | 在 `mutants.toml` 的 `exclude_globs` 登记，并写明原因 |
+
+补测试时的经验：
+
+- **只测快乐路径会漏掉整片状态图**——把整张迁移表抄进测试逐边穷举。
+- **单向断言会被"恒为真/恒为假"的注入骗过**——`is_empty`、`awaits_user`、
+  任何返回 `bool` 的函数都要**两侧都断言**。
+- **`Display` 也是契约**——它是给运维看的诊断信息，串了会误导排障，逐条钉死。
+- **校验和要有标准测试向量**——否则"校验和"只是几个无意义的字节。
+
+### CI 中的变异测试
+
+`.github/workflows/ci.yml` 的 `mutation` job **不在每次推送时跑**（太慢），
+触发方式是：
+
+- 每周一 03:17 UTC 定时
+- 手动 `workflow_dispatch`
+
+产物会以 `mutants-report` artifact 上传。
+
 ## 设计文档同步
 
 `design-spec.md` 是**单一事实来源**。任何设计决策发生变更时，

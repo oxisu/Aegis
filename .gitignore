@@ -54,5 +54,9 @@ staging/
 *.msi
 *.zip
 
+# ============ 变异测试产物 ============
+mutants.out/
+mutants.out.old/
+
 # ============ WorkBuddy 本地项目数据（非临时缓存，但无需入库）============
 .workbuddy/
