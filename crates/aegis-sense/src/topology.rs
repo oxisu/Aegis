@@ -14,7 +14,7 @@ use std::ptr;
 
 use windows::Win32::Foundation::WIN32_ERROR;
 use windows::Win32::NetworkManagement::IpHelper::*;
-use windows::Win32::Networking::WinSock::{SOCKET_ADDRESS, AF_INET};
+use windows::Win32::Networking::WinSock::{AF_INET, SOCKET_ADDRESS};
 
 use crate::error::{check, SenseError, Win32Error};
 use crate::fingerprint::compute_fingerprint;
@@ -84,17 +84,28 @@ pub fn enumerate_interfaces() -> Result<Vec<InterfaceInfo>, SenseError> {
     }
 }
 
-/// 默认出口裁决：优先"默认路由 ∧ 接口 Up"，再按 Metric 最小。
+/// 默认出口裁决：**优先"默认路由 ∧ 接口 Up"**，再按**合成度量**最小。
 /// 返回 0 表示没有任何 IPv4 默认路由。
+///
+/// 两点必须注意：
+/// 1. 比较的是 [`RouteRow::effective_metric`]（接口度量 + 路由度量偏移），
+///    绝不能只比 `route_metric` —— 后者在自动度量下恒为 0，会把出口判错。
+/// 2. 只在"接口 Up"的默认路由里挑。拔线/停用后残留的默认路由会让裁决
+///    指向一张已经不通的网卡；只有全都不通时才退回不设限的最优选。
 fn pick_default_egress(routes: &[RouteRow], ifaces: &[InterfaceInfo]) -> u64 {
     let is_up = |luid: u64| ifaces.iter().any(|i| i.luid == luid && i.is_up());
-
     let default_routes = || routes.iter().filter(|r| r.dest_prefix_len == 0);
 
-    default_routes()
+    // 先按"接口 Up"过滤后取最优；全都不通时再退回全体最优
+    let mut candidates: Vec<RouteRow> = default_routes()
         .filter(|r| is_up(r.interface_luid))
-        .min_by_key(|r| r.metric)
-        .or_else(|| default_routes().min_by_key(|r| r.metric))
+        .cloned()
+        .collect();
+    if candidates.is_empty() {
+        candidates = default_routes().cloned().collect();
+    }
+
+    crate::route::pick_best(candidates)
         .map(|r| r.interface_luid)
         .unwrap_or(0)
 }
@@ -151,9 +162,10 @@ unsafe fn adapter_ip_map() -> Result<HashMap<u32, AdapterIpInfo>, SenseError> {
 
     while !cur.is_null() {
         let a = &*cur;
-        let mut entry = AdapterIpInfo::default();
-
-        entry.dhcp_server = socket_address_v4(&a.Dhcpv4Server);
+        let mut entry = AdapterIpInfo {
+            dhcp_server: socket_address_v4(&a.Dhcpv4Server),
+            ..Default::default()
+        };
 
         let mut uc = a.FirstUnicastAddress;
         while !uc.is_null() {
@@ -174,10 +186,7 @@ unsafe fn adapter_ip_map() -> Result<HashMap<u32, AdapterIpInfo>, SenseError> {
 }
 
 /// 把路由表中的网关归并回各接口，并据此判定角色线索。
-fn attach_route_info(
-    mut ifaces: Vec<InterfaceInfo>,
-    routes: &[RouteRow],
-) -> Vec<InterfaceInfo> {
+fn attach_route_info(mut ifaces: Vec<InterfaceInfo>, routes: &[RouteRow]) -> Vec<InterfaceInfo> {
     for iface in ifaces.iter_mut() {
         let gws: Vec<Ipv4Addr> = routes
             .iter()
