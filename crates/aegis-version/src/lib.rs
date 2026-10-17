@@ -23,6 +23,16 @@
 //! ```
 //! Cargo 的 `version` 字段不接受 build metadata（`+` 之后的部分），
 //! 所以 `Cargo.toml` 里只写到预发布标签，`+` 段由本 crate 在运行时追加。
+//!
+//! # 模块
+//! - [`compat`]：对外契约（IPC 帧格式、配置 schema）的版本兼容性判定。
+//!   放在这里而不是各自 crate，是为了让"什么算兼容"只有一处定义。
+//!
+//! # 零依赖
+//! 本 crate 不依赖任何第三方 crate（含 `thiserror`）：
+//! 它是最底层的事实来源，任何依赖升级都不应波及版本号。
+
+pub mod compat;
 
 /// 项目英文名（用于日志前缀、IPC 协议标识、服务名）。
 pub const NAME: &str = "Aegis";
