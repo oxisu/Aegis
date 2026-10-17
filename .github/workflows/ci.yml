@@ -106,6 +106,12 @@ jobs:
       - name: 编排核心只读推演（纯逻辑，验证角色裁决与状态机铁律）
         run: cargo run -p aegis-core --example plan
 
+      # 只做枚举与审计，不添加 / 不修改 / 不删除任何 WFP 对象。
+      # GitHub 的 Windows runner 默认具备管理员权限，可完成枚举；
+      # 若环境不具备，示例会带错误码与处置建议退出，便于定位。
+      - name: WFP 只读勘察（枚举 + 持久背板审计）
+        run: cargo run -p aegis-wfp --example wfp_inspect
+
   # ---------------------------------------------------------------------------
   # 变异回归测试
   #

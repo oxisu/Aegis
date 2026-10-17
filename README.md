@@ -42,11 +42,12 @@ Aegis 建立一张**独立于任何上层代理软件的 OS 级安全底座**：
 |---|---|---|
 | `aegis-version` | ✅ 可用 | 版本标识单一事实来源（零依赖） |
 | `aegis-sense` | ✅ 可用 | 感知层：拓扑采集 / 接口分类 / 默认出口裁决 / SSID / 拓扑指纹 / 拓扑差分 |
-| `aegis-core` | 🚧 进行中 | 角色裁决（§20.5）+ 状态机（§26）；IPC 协议待建 |
-| `aegis-wfp` | ⬜ 待建 | WFP 绝缘笼、Boot-Time 背板、DNS 封锁 |
+| `aegis-core` | ✅ 可用 | 角色裁决（§20.5）+ 状态机（§26） |
+| `aegis-wfp` | 🚧 只读阶段 | WFP 状态勘察：枚举过滤器 / Provider、**持久背板审计**；规则下发待建 |
 | `aegis-fuse` | ⬜ 待建 | 微秒级网络端口熔断器 |
 | `aegis-audit` | ⬜ 待建 | 审计与证据链落盘 |
-| `aegis-ipc` | ⬜ 待建 | 本地 IPC 协议（命名管道 + token 鉴权） |
+| `aegis-ipc` | ✅ 可用 | 本地 IPC 帧编解码 + 版本握手（未建管道） |
+| `aegis-config` | ✅ 可用 | 配置加载与 schema 版本校验（Fail-Closed） |
 | `aegis-orchestrator` | ⬜ 待建 | 应用层代理适配器（SPI，可插拔） |
 | `aegisd` / `aegisctl` | ⬜ 待建 | 守护进程 / 控制端二进制 |
 
@@ -63,6 +64,12 @@ GetIfTable2 / GetAdaptersAddresses / GetIpForwardTable2 / GetIpInterfaceTable / 
                     │
                     ▼  aegis-core
               角色裁决（Fail-Closed）+ 状态机绝缘等级
+
+WFP 侧（只读勘察，需管理员权限才能枚举）：
+FwpmEngineOpen0（动态会话）+ FwpmFilterEnum0 / FwpmProviderEnum0
+        ▼  aegis-wfp::Session::snapshot()
+   过滤器的层 / 动作 / 归属 / persistent-boottime 标志
+        └─ 持久背板审计：区分"系统自带底板"与"第三方持久阻断"
 ```
 
 ## 目录结构
@@ -85,8 +92,12 @@ Aegis/
     ├── aegis-version/      # 版本标识（零依赖）
     ├── aegis-sense/        # 感知层（纯只读）：采集 / 分类 / 指纹 / 差分
     │   └── examples/dry_run.rs
-    └── aegis-core/         # 编排核心（纯逻辑）：角色裁决 / 状态机
-        └── examples/plan.rs
+    ├── aegis-core/         # 编排核心（纯逻辑）：角色裁决 / 状态机
+    │   └── examples/plan.rs
+    ├── aegis-wfp/          # OS 级底座（当前仅只读）：WFP 枚举 + 持久背板审计
+    │   └── examples/wfp_inspect.rs
+    ├── aegis-ipc/          # IPC 帧编解码 + 版本握手（纯逻辑）
+    └── aegis-config/       # 配置加载 + schema 版本校验（Fail-Closed）
 ```
 
 ## 安全边界（`aegis-sense` 的硬约束）
@@ -97,6 +108,15 @@ Aegis/
 - ❌ 不注入任何 WFP / 防火墙规则
 - ❌ 不启停任何进程或服务（**含任何上层代理软件**）
 - ❌ 不修改注册表、系统代理、路由表
+
+`aegis-wfp` 当前同样**只做只读勘察**：打开动态会话、枚举、审计，
+**不添加 / 不修改 / 不删除任何 WFP 对象**。会话使用
+`FWPM_SESSION_FLAG_DYNAMIC`，即使进程崩溃，引擎也会自动回收该会话的
+一切对象——这条写在会话标志里，而不是依赖"退出前记得清理"，
+因为崩溃路径上没有机会执行清理代码。
+
+> 注：枚举 WFP 通常需要管理员权限。权限不足时 `wfp_inspect` 会明确报出
+> 错误码与处置建议，而不是假装"什么都没有"。
 
 ## 构建与运行
 
@@ -149,6 +169,8 @@ Aegis —— 宙斯的神盾
 export PATH="/d/Dev/msys64/mingw64/bin:$PATH"   # Git Bash；把 gcc 放进 PATH
 cargo run -p aegis-sense --example dry_run   # 感知层：拓扑 + 指纹 + 稳定性自检
 cargo run -p aegis-core  --example plan      # 编排核心：角色裁决 + 状态机推演
+cargo run -p aegis-core  --example plan -- --free MMi   # 声明手机热点后再裁决
+cargo run -p aegis-wfp   --example wfp_inspect # WFP 只读勘察：枚举 + 持久背板审计（需管理员）
 ```
 
 本机实测输出（节选）：
