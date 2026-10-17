@@ -95,16 +95,30 @@ pub struct RoleDecision {
 
 /// 角色判定策略。
 ///
-/// 全部可配置，**不内置任何具体校园名/运营商名**：
+/// 全部可配置，**不内置任何具体校园名 / 运营商名**：
 /// 把机构特有信息硬编码进代码既不通用，也会随环境失效。
+///
+/// # 为什么需要"精确名单"
+/// 关键字 + 网关前缀这两种启发式覆盖不了一类很常见的网络：**个人手机热点**。
+/// 它的 SSID 往往是个人化的（例如一个叫 `MMi` 的小米手机热点），
+/// 既不含 `hotspot` 关键字，网关也不在校园网段，两种启发式都命中不了。
+///
+/// 此时策略落到 Fail-Closed 的绝缘态——**这本身是正确且安全的**，
+/// 但每次开机都要手动放行一次很烦。所以提供 `known_free_ssids` /
+/// `known_campus_ssids` 让用户显式钉死具体网络：
+/// 声明权始终在用户手上，代码不替用户猜测，也不把用户的生活习惯写进源码。
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct RolePolicy {
     /// SSID 含这些关键字 → `CampusStrict`
     pub campus_ssid_keywords: Vec<String>,
+    /// SSID **精确等于**这些值 → `CampusStrict`（优先级高于关键字）
+    pub known_campus_ssids: Vec<String>,
     /// 网关 IP 以这些前缀开头 → `CampusStrict`
     pub campus_gateway_prefixes: Vec<String>,
     /// SSID 含这些关键字 → `FreeOutbound`
     pub free_ssid_keywords: Vec<String>,
+    /// SSID **精确等于**这些值 → `FreeOutbound`（优先级高于关键字）
+    pub known_free_ssids: Vec<String>,
     /// 无法判定时的兜底角色
     pub fallback_role: InterfaceRole,
     /// 是否允许同时有多张 FreeOutbound
@@ -115,6 +129,7 @@ impl Default for RolePolicy {
     fn default() -> Self {
         Self {
             campus_ssid_keywords: vec!["campus".into(), "edu".into(), "校园".into()],
+            known_campus_ssids: Vec::new(),
             campus_gateway_prefixes: vec!["10.".into(), "172.16.".into(), "172.17.".into()],
             free_ssid_keywords: vec![
                 "hotspot".into(),
@@ -122,6 +137,7 @@ impl Default for RolePolicy {
                 "iphone".into(),
                 "android".into(),
             ],
+            known_free_ssids: Vec::new(),
             // Fail-closed：猜不出来就绝缘
             fallback_role: InterfaceRole::Isolated,
             allow_multiple_free: false,
@@ -174,6 +190,23 @@ pub fn adjudicate(iface: &InterfaceInfo, policy: &RolePolicy) -> RoleDecision {
     }
 
     if let Some(ssid) = &iface.ssid {
+        // 精确名单优先于关键字：用户显式声明过的网络，信任度高于启发式猜测。
+        // 注意 confidence 标记为 Confirmed —— 这是用户自己填的，不是我们猜的。
+        if policy.known_free_ssids.iter().any(|s| s == ssid) {
+            return decision(
+                InterfaceRole::FreeOutbound,
+                Confidence::Confirmed,
+                format!("SSID「{ssid}」在用户声明的自由出海名单中"),
+            );
+        }
+        if policy.known_campus_ssids.iter().any(|s| s == ssid) {
+            return decision(
+                InterfaceRole::CampusStrict,
+                Confidence::Confirmed,
+                format!("SSID「{ssid}」在用户声明的校园网名单中"),
+            );
+        }
+
         if RolePolicy::matches_any(ssid, &policy.free_ssid_keywords) {
             return decision(
                 InterfaceRole::FreeOutbound,
@@ -378,6 +411,82 @@ mod tests {
     }
 
     /// Fail-closed 是整套模型的底线，这条测试就是底线本身。
+    /// 手机热点这类个人化 SSID（如 `MMi`）既不含关键字、网关也不在校园网段，
+    /// 两种启发式都命中不了。默认应 Fail-Closed，由用户在配置里显式声明后放行。
+    #[test]
+    fn personal_hotspot_ssid_defaults_to_isolated() {
+        let d = adjudicate(
+            &nic(
+                1,
+                if_flags::HARDWARE,
+                if_type::IEEE80211,
+                Some("MMi"),
+                Some("192.168.40.220"),
+            ),
+            &RolePolicy::default(),
+        );
+        assert_eq!(d.role, InterfaceRole::Isolated);
+        assert_eq!(d.confidence, Confidence::Unassigned);
+    }
+
+    #[test]
+    fn user_declared_free_ssid_beats_keywords_and_is_confirmed() {
+        let policy = RolePolicy {
+            known_free_ssids: vec!["MMi".into()],
+            ..Default::default()
+        };
+        let d = adjudicate(
+            &nic(
+                1,
+                if_flags::HARDWARE,
+                if_type::IEEE80211,
+                Some("MMi"),
+                Some("192.168.40.220"),
+            ),
+            &policy,
+        );
+        assert_eq!(d.role, InterfaceRole::FreeOutbound);
+        assert_eq!(d.confidence, Confidence::Confirmed, "用户声明的不是猜测");
+    }
+
+    /// 精确名单必须优先于关键字，否则用户无法覆盖启发式的误判。
+    #[test]
+    fn exact_list_takes_priority_over_keywords() {
+        // "Campus-Hotspot" 同时命中两个关键字；精确名单应胜出
+        let policy = RolePolicy {
+            known_free_ssids: vec!["Campus-Hotspot".into()],
+            ..Default::default()
+        };
+        let d = adjudicate(
+            &nic(
+                1,
+                if_flags::HARDWARE,
+                if_type::IEEE80211,
+                Some("Campus-Hotspot"),
+                None,
+            ),
+            &policy,
+        );
+        assert_eq!(d.role, InterfaceRole::FreeOutbound);
+
+        let policy = RolePolicy {
+            known_free_ssids: Vec::new(),
+            known_campus_ssids: vec!["Campus-Hotspot".into()],
+            ..Default::default()
+        };
+        let d = adjudicate(
+            &nic(
+                1,
+                if_flags::HARDWARE,
+                if_type::IEEE80211,
+                Some("Campus-Hotspot"),
+                None,
+            ),
+            &policy,
+        );
+        assert_eq!(d.role, InterfaceRole::CampusStrict);
+    }
+
     #[test]
     fn unknown_nic_falls_back_to_isolated_and_unassigned() {
         let d = adjudicate(
@@ -440,5 +549,149 @@ mod tests {
 
         t.remove("LUID:1");
         assert!(t.is_empty());
+    }
+
+    /// `is_empty` 若恒为 true，"表里没东西"和"表里有东西"将无法区分，
+    /// 进而在开机首帧误判为"角色表已就绪"。两侧都必须断言。
+    #[test]
+    fn role_table_is_empty_tracks_entries_both_ways() {
+        let mut t = RoleTable::new();
+        assert!(t.is_empty(), "空表必须报告为空");
+        assert_eq!(t.len(), 0);
+
+        t.assign("LUID:1", InterfaceRole::CampusStrict, true);
+        assert!(!t.is_empty(), "有条目后必须报告非空");
+        assert_eq!(t.len(), 1);
+
+        t.remove("LUID:1");
+        assert!(t.is_empty(), "移除后必须重新报告为空");
+    }
+
+    /// `iter` 若退化成空迭代器，`len()` 与遍历结果会自相矛盾。
+    #[test]
+    fn role_table_iter_matches_len_and_order() {
+        let mut t = RoleTable::new();
+        t.assign("LUID:1", InterfaceRole::CampusStrict, true);
+        t.assign("LUID:2", InterfaceRole::FreeOutbound, false);
+        t.assign("LUID:3", InterfaceRole::Isolated, false);
+
+        let all: Vec<_> = t.iter().collect();
+        assert_eq!(all.len(), t.len(), "迭代器条目数与 len 不一致");
+        assert_eq!(all[0].0, "LUID:1");
+        assert_eq!(
+            all[1],
+            &("LUID:2".to_string(), InterfaceRole::FreeOutbound, false)
+        );
+        assert_eq!(all[2].0, "LUID:3");
+
+        // iter 与 unconfirmed 必须一致：未确认的正是后两条
+        let unconfirmed: Vec<_> = t.unconfirmed().map(|e| e.0.clone()).collect();
+        assert_eq!(
+            unconfirmed,
+            vec!["LUID:2".to_string(), "LUID:3".to_string()]
+        );
+        assert!(!t.all_confirmed());
+    }
+
+    #[test]
+    fn role_table_get_returns_role_and_confirmation_flag() {
+        let mut t = RoleTable::new();
+        t.assign("LUID:1", InterfaceRole::Aggregated, false);
+        assert_eq!(t.get("LUID:1"), Some((InterfaceRole::Aggregated, false)));
+        assert_eq!(t.get("LUID:404"), None, "未分配的网卡必须返回 None");
+
+        t.assign("LUID:1", InterfaceRole::Aggregated, true);
+        assert_eq!(
+            t.get("LUID:1"),
+            Some((InterfaceRole::Aggregated, true)),
+            "重复 assign 必须覆盖确认标记"
+        );
+    }
+
+    /// 角色语义是翻译成 WFP 策略时的总开关，四个取值逐个钉死。
+    #[test]
+    fn role_egress_and_dns_matrix_is_pinned() {
+        let matrix = [
+            (InterfaceRole::CampusStrict, true, true),
+            (InterfaceRole::FreeOutbound, true, false),
+            (InterfaceRole::Aggregated, false, false),
+            (InterfaceRole::Isolated, false, false),
+        ];
+        for (role, egress, dns) in matrix {
+            assert_eq!(role.allows_egress(), egress, "{role} 的出网语义被改动");
+            assert_eq!(role.locks_dns(), dns, "{role} 的 DNS 锁语义被改动");
+        }
+    }
+
+    #[test]
+    fn role_display_texts_are_pinned() {
+        let expected = [
+            (InterfaceRole::CampusStrict, "校园网严格"),
+            (InterfaceRole::FreeOutbound, "自由出海"),
+            (InterfaceRole::Aggregated, "带宽聚合"),
+            (InterfaceRole::Isolated, "彻底绝缘"),
+        ];
+        let mut seen = std::collections::BTreeSet::new();
+        for (role, want) in expected {
+            let got = role.to_string();
+            assert_eq!(got, want, "{role} 的展示文案被改动");
+            assert!(seen.insert(got), "{role} 的展示文案与其他角色重复");
+        }
+    }
+
+    #[test]
+    fn confidence_display_texts_are_pinned() {
+        let expected = [
+            (Confidence::Confirmed, "已确认"),
+            (Confidence::Inferred, "策略推断"),
+            (Confidence::Unassigned, "待人工分配"),
+        ];
+        let mut seen = std::collections::BTreeSet::new();
+        for (c, want) in expected {
+            let got = c.to_string();
+            assert_eq!(got, want, "{c} 的展示文案被改动");
+            assert!(seen.insert(got), "{c} 的展示文案与其他可信度重复");
+        }
+    }
+
+    /// 裁决理由必须包含判定依据，否则用户无法判断要不要改配置。
+    #[test]
+    fn every_decision_carries_a_non_empty_reason() {
+        let policy = RolePolicy::default();
+        let cases = vec![
+            nic(
+                1,
+                if_flags::HARDWARE,
+                if_type::IEEE80211,
+                Some("Campus-WiFi"),
+                None,
+            ),
+            nic(
+                2,
+                if_flags::HARDWARE,
+                if_type::IEEE80211,
+                Some("MyHotspot"),
+                None,
+            ),
+            nic(
+                3,
+                if_flags::HARDWARE,
+                if_type::ETHERNET_CSMACD,
+                None,
+                Some("10.41.0.1"),
+            ),
+            nic(4, if_flags::HARDWARE, if_type::IEEE80211, Some("MMi"), None),
+            nic(5, 0, if_type::ETHERNET_CSMACD, None, None),
+        ];
+        for c in &cases {
+            let d = adjudicate(c, &policy);
+            assert!(!d.reason.trim().is_empty(), "{} 缺少判定依据", d.identity);
+            assert!(
+                d.reason.contains(&d.role.to_string()) || !d.reason.is_ascii(),
+                "{} 的理由应可读且可追溯：{}",
+                d.identity,
+                d.reason
+            );
+        }
     }
 }

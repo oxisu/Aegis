@@ -46,6 +46,40 @@ last_confirmed_at   = ""
 # identity = "LUID:1689395631011611136"
 # role     = "CampusStrict"
 
+# ── 网卡角色判定策略（§20.5，由 aegis-core::role::RolePolicy 消费）──
+#
+# 判定优先级：精确 SSID 名单 > 关键字子串 > 网关前缀 > fallback_role。
+# 精确名单的价值在于覆盖启发式命中不了的**个人化网络**——
+# 典型就是手机热点：SSID 往往是个人化的（例如一台小米手机的热点叫 MMi），
+# 既不含 "hotspot" 关键字，网关也不在校园网段，两种启发式都判不出来。
+#
+# 未命中任何规则时落到 fallback_role（默认 Isolated）——Fail-Closed，
+# 宁可让用户手动放行一次，也绝不猜错放开通往外网的口子。
+# 想少点几次确认，就在下面的名单里显式声明，声明权始终在你手上。
+[roles]
+# SSID 精确匹配 → 自由出海（手机热点 / 随身 Wi-Fi 填这里）
+known_free_ssids = [
+    # "MMi",          # 示例：小米手机热点（SSID 个人化，关键字与网关都命中不了）
+]
+
+# SSID 精确匹配 → 校园网严格
+known_campus_ssids = [
+    # "CQU-WLAN",
+]
+
+# 关键字子串匹配（大小写不敏感），用于覆盖一类网络
+campus_ssid_keywords = ["campus", "edu", "校园"]
+free_ssid_keywords   = ["hotspot", "热点", "iphone", "android"]
+
+# 网关前缀匹配 → 校园网严格
+campus_gateway_prefixes = ["10.", "172.16.", "172.17."]
+
+# 无法判定时的兜底角色：Isolated（默认，Fail-Closed）/ Aggregated / FreeOutbound
+fallback_role = "Isolated"
+
+# 是否允许同时存在多张 FreeOutbound（多 WAN 叠加时才开）
+allow_multiple_free = false
+
 [whitelist]
 domestic_rule_set = "domestic-direct"
 allow_dns         = ["223.5.5.5", "119.29.29.29"]

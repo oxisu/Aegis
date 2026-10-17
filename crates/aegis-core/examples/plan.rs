@@ -9,7 +9,17 @@
 //!
 //! ```text
 //! cargo run -p aegis-core --example plan
+//!
+//! # 显式声明"这张网是手机热点 / 是校园网"，看裁决如何变化
+//! cargo run -p aegis-core --example plan -- --free MMi
+//! cargo run -p aegis-core --example plan -- --campus Campus-WiFi
 //! ```
+//!
+//! `--free` / `--campus` 对应配置文件里的 `[roles].known_free_ssids` /
+//! `[roles].known_campus_ssids`。之所以需要它们：关键字 + 网关前缀这两种
+//! 启发式覆盖不了个人手机热点——它的 SSID 是个人化的（例如 `MMi`），
+//! 既不含 `hotspot` 关键字，网关也不在校园网段。声明权留给用户，
+//! 代码不替用户猜。
 
 use aegis_core::role::{adjudicate_all, Confidence, RolePolicy, RoleTable};
 use aegis_core::state::{insulation, next, Event, State};
@@ -22,6 +32,28 @@ fn main() {
     println!("╚══════════════════════════════════════════════════════════════╝");
     println!("  {}", version::banner());
     println!();
+
+    // 极简参数解析：--free <SSID> / --campus <SSID>，均可重复。
+    let mut declared_free: Vec<String> = Vec::new();
+    let mut declared_campus: Vec<String> = Vec::new();
+    let mut args = std::env::args().skip(1);
+    while let Some(a) = args.next() {
+        match a.as_str() {
+            "--free" => {
+                if let Some(v) = args.next() {
+                    declared_free.push(v);
+                }
+            },
+            "--campus" => {
+                if let Some(v) = args.next() {
+                    declared_campus.push(v);
+                }
+            },
+            other => {
+                eprintln!("[WARN] 忽略未知参数：{other}（可用：--free <SSID> / --campus <SSID>）");
+            },
+        }
+    }
 
     let snap = match aegis_core::sense::snapshot() {
         Ok(s) => s,
@@ -38,7 +70,19 @@ fn main() {
     );
     println!();
 
-    let policy = RolePolicy::default();
+    let policy = RolePolicy {
+        known_free_ssids: declared_free.clone(),
+        known_campus_ssids: declared_campus.clone(),
+        ..Default::default()
+    };
+    if !declared_free.is_empty() || !declared_campus.is_empty() {
+        println!(
+            "本次显式声明：自由出海 {:?} / 校园网 {:?}",
+            declared_free, declared_campus
+        );
+        println!("（等价于写进 config.toml 的 [roles] 段）");
+        println!();
+    }
     let decisions = adjudicate_all(&snap.interfaces, &policy);
 
     if decisions.is_empty() {
@@ -88,6 +132,10 @@ fn main() {
         }
         println!();
         println!("Fail-closed：猜不出来就绝缘，绝不放开通往外网的口子。");
+        println!();
+        println!("  提示：若其中某张其实是手机热点 / 校园网，可直接声明，免去每次开机手动放行：");
+        println!("        cargo run -p aegis-core --example plan -- --free <SSID>");
+        println!("        或写入 config.toml 的 [roles].known_free_ssids / known_campus_ssids");
     }
     println!();
 
