@@ -105,14 +105,27 @@ cargo test --workspace
 
 ```powershell
 # 全量（分钟级，建议挂后台）
-cargo mutants --no-shuffle --output mutants.out
+cargo mutants --no-shuffle -v --output mutants.out
 
 # 只跑某个 crate
-cargo mutants --package aegis-core
+cargo mutants --package aegis-core -v
 
 # 只跑某个文件
-cargo mutants --file crates/aegis-core/src/state.rs
+cargo mutants --file crates/aegis-core/src/state.rs -v
 ```
+
+> **务必带 `-v`。**
+> 不带时输出走块缓冲，重定向到文件后要等缓冲区满才落盘，
+> 于是日志长时间停在基线那一行，**看起来像卡死，其实在跑**。
+> 本机实测：不带 `-v` 时 45 秒内日志 0 行、采样到的 CPU 增量 0.7s，
+> 一度被误判为挂起；带 `-v` 后同一环境下 75 秒跑完 7 个变异体。
+>
+> **不要用 `-j` 开高并行。**
+> cargo 对 target 目录是独占锁，多个 cargo 进程并发会互相等锁：
+> 实测 `-j 8` 时每个变异体的构建耗时从 5s 膨胀到 30~56s，
+> 全部以 TIMEOUT 告终（`--copy-target` 也未能救回）。
+> 变异测试的成本是「变异体数 × 单次构建时间」，
+> 提高 `-j` 在共享 target 下是负优化，默认单线程即可。
 
 配置见仓库根目录 `mutants.toml`。产物落在 `mutants.out/`（已 gitignore）：
 `missed.txt` 是漏检清单，`caught.txt` 是已被杀死的，`unviable.txt` 是无法编译的注入。

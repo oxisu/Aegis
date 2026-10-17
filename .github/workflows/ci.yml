@@ -140,9 +140,13 @@ jobs:
         run: cargo install cargo-mutants --locked
 
       - name: 运行变异测试
-        # 不依赖 cargo mutants 自身的退出码语义，改为解析产物目录自行判定，
-        # 这样"阈值是多少"这件事只由本文件说了算。
-        run: cargo mutants --no-shuffle --output mutants.out
+        # -v 是必需的：不带时输出走块缓冲，日志会长时间停在基线那一行，
+        # 看起来像挂起（本机实测踩过）。
+        # 不开 -j 并行：cargo 对 target 目录独占锁，并发会互相等锁，
+        # 实测 -j 8 时单次构建从 5s 膨胀到 30~56s 并全部超时。
+        # 另外不依赖 cargo mutants 自身的退出码语义，改为解析产物目录
+        # 自行判定，这样"阈值是多少"这件事只由本文件说了算。
+        run: cargo mutants --no-shuffle -v --output mutants.out
 
       - name: 判定漏检数量
         shell: pwsh
