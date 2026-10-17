@@ -1,4 +1,4 @@
-# InterBoot 开发构建入口（Windows）—— MSVC 路线专用
+﻿# InterBoot 开发构建入口（Windows）—— MSVC 路线专用
 #
 # ⚠ 注意：当前仓库默认走的是 **gnu/MinGW 路线**（见 rust-toolchain.toml），
 #   因为本机尚未装好 MSVC 生成工具。等 MSVC 装好后，
@@ -84,7 +84,10 @@ Write-Host "──────────────────────�
 Write-Host " InterBoot 开发环境已就绪"                    -ForegroundColor Cyan
 Write-Host " MSVC      : $($msvc.Name)"                   -ForegroundColor Gray
 Write-Host " HOSTBIN   : $hostBin"                        -ForegroundColor Gray
-Write-Host " SDK       : $($sdkVersion ?? '<未安装>')"     -ForegroundColor Gray
+# 注意：不要在这里用 `??` 空合并运算符 —— 那是 PowerShell 7+ 语法，
+# Windows PowerShell 5.1 解析阶段就会直接报"意外的标记"。
+$sdkLabel = if ($sdkVersion) { $sdkVersion } else { '<未安装>' }
+Write-Host " SDK       : $sdkLabel"                        -ForegroundColor Gray
 Write-Host " link.exe  : $((Get-Command link.exe).Source)" -ForegroundColor Gray
 Write-Host " cargo     : $((Get-Command cargo).Source)"    -ForegroundColor Gray
 Write-Host "────────────────────────────────────────────" -ForegroundColor DarkGray
