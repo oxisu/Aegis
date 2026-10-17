@@ -17,6 +17,7 @@
 //! 留下 `Present=False` 的设备残留，导致拓扑指纹在物理环境没变的情况下漂移，
 //! 误触发"拓扑变更"告警。可用 `tools/clean-ghost-nics.ps1` 盘点与清理。
 
+pub mod delta;
 pub mod error;
 pub mod fingerprint;
 pub mod model;
@@ -24,9 +25,13 @@ pub mod route;
 pub mod topology;
 pub mod wifi;
 
+pub use self::delta::{diff, InterfaceChange, TopologyDelta};
 pub use self::error::SenseError;
-pub use self::fingerprint::{compute_fingerprint, hex};
-pub use self::model::{InterfaceInfo, InterfaceRole, MacAddress, OperStatus, TopologySnapshot};
+pub use self::fingerprint::{compute as compute_fingerprint, hex, Fingerprint};
+pub use self::model::{
+    if_access, if_flags, if_type, FingerprintScope, InterfaceInfo, InterfaceKind, InterfaceRole,
+    MacAddress, OperStatus, TopologySnapshot,
+};
 pub use self::route::default_egress;
 pub use self::topology::snapshot;
 

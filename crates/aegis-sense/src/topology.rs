@@ -17,7 +17,7 @@ use windows::Win32::NetworkManagement::IpHelper::*;
 use windows::Win32::Networking::WinSock::{AF_INET, SOCKET_ADDRESS};
 
 use crate::error::{check, SenseError, Win32Error};
-use crate::fingerprint::compute_fingerprint;
+use crate::fingerprint::compute as compute_fingerprint;
 use crate::model::{InterfaceInfo, MacAddress, OperStatus, TopologySnapshot};
 use crate::route::RouteRow;
 
@@ -39,13 +39,18 @@ pub fn snapshot() -> Result<TopologySnapshot, SenseError> {
 
     let mut interfaces = attach_route_info(ifaces, &routes);
 
-    let fingerprint = compute_fingerprint(&interfaces);
+    // 指纹只在网关填好之后算：网关是指纹分量之一（v2 起）
+    let fp = compute_fingerprint(&interfaces);
+    let scope = fp.scope;
+    let participants = fp.participants;
     interfaces.sort_by(|a, b| a.luid.cmp(&b.luid).then_with(|| a.alias.cmp(&b.alias)));
 
     Ok(TopologySnapshot {
         interfaces,
         default_egress_luid,
-        fingerprint,
+        fingerprint: fp.value,
+        fingerprint_scope: scope,
+        fingerprint_participants: participants,
     })
 }
 
@@ -73,6 +78,12 @@ pub fn enumerate_interfaces() -> Result<Vec<InterfaceInfo>, SenseError> {
                 description: wide_trim(&row.Description),
                 mac: mac_from(&row.PhysicalAddress, row.PhysicalAddressLength),
                 if_type: row.Type,
+                // InterfaceAndOperStatusFlags 在 windows-rs 里是无访问器的位域联合体，
+                // 直接取底层字节即可（位含义见 model::if_flags）。
+                flags: row.InterfaceAndOperStatusFlags._bitfield,
+                // NET_IF_ACCESS_TYPE / TUNNEL_TYPE 在 windows-rs 里是 i32 包装类型
+                access_type: row.AccessType.0 as u32,
+                tunnel_type: row.TunnelType.0 as u32,
                 oper_status: map_oper_status(row.OperStatus.0),
                 ipv4: info.ipv4,
                 gateway: Vec::new(), // 后一步由路由表填充
