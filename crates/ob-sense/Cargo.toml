@@ -1,0 +1,26 @@
+[package]
+name        = "ob-sense"
+description = "感知层：网络拓扑采集 / 拓扑指纹 / 默认出口裁决（纯只读，绝不注入任何网络策略）"
+version.workspace      = true
+edition.workspace      = true
+rust-version.workspace = true
+license.workspace      = true
+authors.workspace      = true
+
+[dependencies]
+# OS 交互：IP Helper（网卡表 / 适配器地址 / 路由） + WLAN（取 SSID）
+windows = { workspace = true, features = [
+    "Win32_Foundation",
+    "Win32_NetworkManagement_IpHelper",
+    "Win32_NetworkManagement_WiFi",
+    "Win32_Networking_WinSock",
+] }
+
+sha2      = { workspace = true }
+thiserror = { workspace = true }
+serde     = { workspace = true }
+
+# 感知层是纯同步的系统信息读取，dry-run 示例同步执行即可
+[[example]]
+name = "dry_run"
+path = "examples/dry_run.rs"

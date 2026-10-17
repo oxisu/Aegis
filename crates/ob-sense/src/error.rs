@@ -1,0 +1,52 @@
+//! 感知层统一错误类型。
+//!
+//! 约定：感知层始终保持**只读**，任何失败都必须向上传递而不是 panic，
+//! 这样即使某一路探针失败，编排器仍能带着部分拓扑继续走自检流水线。
+
+use std::fmt;
+
+/// Win32 错误码包装，保留原始错误码便于排障与审计。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Win32Error(pub u32);
+
+impl Win32Error {
+    /// 是否为成功码（NO_ERROR / ERROR_SUCCESS）。
+    pub fn is_ok(self) -> bool {
+        self.0 == 0
+    }
+}
+
+impl fmt::Display for Win32Error {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "Win32 error 0x{:08X}", self.0)
+    }
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum SenseError {
+    /// 底层 Win32 API 调用失败。
+    #[error("{op} 调用失败: {code}")]
+    Os { op: &'static str, code: Win32Error },
+
+    /// API 返回的缓冲区结构异常（长度、指针为 null 等）。
+    #[error("{0} 返回的数据结构异常: {detail}")]
+    Malformed { op: &'static str, detail: String },
+
+    /// 字符串转换失败（宽字符 → UTF-8）。
+    #[error("字符串转码失败: {0}")]
+    Encoding(String),
+}
+
+/// 便捷构造：把 Win32 返回码转成 Result。
+pub(crate) fn ok_or_os(op: &'static str, code: Win32Error) -> Result<(), SenseError> {
+    if code.is_ok() {
+        Ok(())
+    } else {
+        Err(SenseError::Os { op, code })
+    }
+}
+
+/// 把 (u32 返回码) 视作 Win32 错误码并检查。
+pub(crate) fn check_win32(op: &'static str, raw: u32) -> Result<(), SenseError> {
+    ok_or_os(op, Win32Error(raw))
+}
