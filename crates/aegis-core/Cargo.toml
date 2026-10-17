@@ -1,0 +1,19 @@
+[package]
+name        = "aegis-core"
+description = "编排核心：网卡角色裁决 / 角色分配表 / 编排器状态机（纯逻辑，不做任何特权操作）"
+version.workspace      = true
+edition.workspace      = true
+rust-version.workspace = true
+license.workspace      = true
+authors.workspace      = true
+
+[dependencies]
+# 感知层提供拓扑事实；本 crate 只在其之上做策略裁决，不重复采集
+aegis-sense   = { workspace = true }
+aegis-version = { workspace = true }
+thiserror     = { workspace = true }
+serde         = { workspace = true }
+
+[[example]]
+name = "plan"
+path = "examples/plan.rs"

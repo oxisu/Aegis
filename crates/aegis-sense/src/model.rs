@@ -8,31 +8,6 @@ use serde::Serialize;
 use std::fmt;
 use std::net::Ipv4Addr;
 
-/// 网卡角色（对应 design-spec.md §20.5 角色模型）。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-pub enum InterfaceRole {
-    /// 校园网接入：锁物理 53 / 广播端口，非白名单物理阻断
-    CampusStrict,
-    /// 热点 / PCE / 独立外网：自由出海
-    FreeOutbound,
-    /// 仅用于多网卡聚合的次级网卡
-    Aggregated,
-    /// 未知 / 未配置 / 违规网卡：绝对 DROP
-    Isolated,
-}
-
-impl fmt::Display for InterfaceRole {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let s = match self {
-            Self::CampusStrict => "校园网严格",
-            Self::FreeOutbound => "自由出海",
-            Self::Aggregated => "带宽聚合",
-            Self::Isolated => "彻底绝缘",
-        };
-        f.write_str(s)
-    }
-}
-
 /// 网卡运营状态（对应 Windows `IF_OPER_STATUS`）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub enum OperStatus {

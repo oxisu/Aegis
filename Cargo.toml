@@ -50,6 +50,8 @@ tracing  = { version = "0.1" }
 serde    = { version = "1", features = ["derive"] }
 # 工作区内部：版本标识（所有 crate 都应依赖它，不要各自读 CARGO_PKG_VERSION）
 aegis-version = { path = "crates/aegis-version" }
+# 工作区内部：感知层（提供拓扑事实）
+aegis-sense   = { path = "crates/aegis-sense" }
 
 # ── Release 优化：本机安全底座追求极小体积与快速冷启动 ──
 [profile.release]

@@ -3,6 +3,16 @@
 version = 4
 
 [[package]]
+name = "aegis-core"
+version = "0.1.0-alpha.1"
+dependencies = [
+ "aegis-sense",
+ "aegis-version",
+ "serde",
+ "thiserror",
+]
+
+[[package]]
 name = "aegis-sense"
 version = "0.1.0-alpha.1"
 dependencies = [

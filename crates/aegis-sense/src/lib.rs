@@ -28,9 +28,11 @@ pub mod wifi;
 pub use self::delta::{diff, InterfaceChange, TopologyDelta};
 pub use self::error::SenseError;
 pub use self::fingerprint::{compute as compute_fingerprint, hex, Fingerprint};
+// 注意：网卡角色 InterfaceRole 不在感知层定义。角色是**策略**而非**感知**，
+// 归属 aegis-core（见 design-spec.md §20.5）。感知层只负责如实描述网卡长什么样。
 pub use self::model::{
-    if_access, if_flags, if_type, FingerprintScope, InterfaceInfo, InterfaceKind, InterfaceRole,
-    MacAddress, OperStatus, TopologySnapshot,
+    if_access, if_flags, if_type, FingerprintScope, InterfaceInfo, InterfaceKind, MacAddress,
+    OperStatus, TopologySnapshot,
 };
 pub use self::route::default_egress;
 pub use self::topology::snapshot;
