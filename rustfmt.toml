@@ -1,0 +1,10 @@
+# rustfmt 格式规范（仅使用 stable 选项，避免 nightly-only 警告）
+edition            = "2021"
+max_width          = 100
+newline_style      = "Unix"
+tab_spaces         = 4
+use_small_heuristics = "Default"
+reorder_imports    = true
+reorder_modules    = true
+remove_nested_parens = true
+match_block_trailing_comma = true

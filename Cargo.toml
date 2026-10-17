@@ -1,0 +1,37 @@
+# InterBoot —— 本地网络编排代理 Cargo Workspace
+#
+# 设计文档（单一事实来源）：design-spec.md
+# 命名约定：全部 crate 统一使用 `ob-` 前缀（Orchestrator Boot Guardian）
+
+[workspace]
+resolver = "2"
+members = ["crates/*"]
+
+[workspace.package]
+version      = "0.1.0"
+edition      = "2021"
+rust-version = "1.85"
+license      = "AGPL-3.0-or-later"
+authors      = ["InterBoot Contributors"]
+description  = "本地零信任网络编排守护进程：WFP 绝缘底座 + 可插拔适配器"
+
+# ── 可插拔依赖（仅声明版本，具体 features 由各 crate 按需开启，避免全量编译）──
+[workspace.dependencies]
+# OS 交互底座：WFP / IP Helper / WLAN / SCM / WMI
+windows  = { version = "0.58" }
+# 拓扑指纹 / 日志防篡改哈希
+sha2     = { version = "0.10" }
+# 统一错误类型
+thiserror = { version = "2" }
+# 结构化日志（后续 审计/告警层 使用）
+tracing  = { version = "0.1" }
+# 序列化：IPC 帧、配置落盘、审计导出均依赖
+serde    = { version = "1", features = ["derive"] }
+
+# ── Release 优化：本机安全底座追求极小体积与快速冷启动 ──
+[profile.release]
+opt-level     = "z"   # 最小体积
+lto           = true  # 链接时优化
+codegen-units = 1
+panic         = "abort"
+strip         = true

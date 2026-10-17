@@ -1,0 +1,7 @@
+# Clippy Lint 规范
+# MSRV：与 rust-toolchain / Cargo.toml rust-version 保持一致的最小支持版本
+msrv = "1.85.0"
+
+# 本项目大量使用 Windows FFI，`windows::core::Result` 的 `Option`-like 类型
+# 会让某些 pedantic 规则误报，这里适度放宽。
+too-many-arguments-threshold = 10

@@ -1,0 +1,6 @@
+# 锁定工具链，保证团队与 CI 构建结果一致
+[toolchain]
+channel    = "stable"
+components = ["rustfmt", "clippy"]
+targets    = ["x86_64-pc-windows-msvc"]
+profile    = "minimal"
