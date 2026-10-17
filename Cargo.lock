@@ -48,6 +48,15 @@ name = "aegis-version"
 version = "0.1.0-alpha.2"
 
 [[package]]
+name = "aegis-wfp"
+version = "0.1.0-alpha.2"
+dependencies = [
+ "aegis-version",
+ "thiserror",
+ "windows",
+]
+
+[[package]]
 name = "block-buffer"
 version = "0.10.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"

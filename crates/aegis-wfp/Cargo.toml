@@ -1,0 +1,24 @@
+[package]
+name        = "aegis-wfp"
+description = "OS 级底座：WFP 只读状态勘察（枚举过滤器/Provider/子层，审计持久背板）"
+version.workspace      = true
+edition.workspace      = true
+rust-version.workspace = true
+license.workspace      = true
+authors.workspace      = true
+
+[dependencies]
+# WFP 需要这几个 feature 才会生成对应绑定：
+# WindowsFilteringPlatform 本体；Win32_Security 提供 FWPM_* 结构的 TypeKind/Default；
+# Win32_System_Rpc 提供 FwpmEngineOpen0 签名里的 SEC_WINNT_AUTH_IDENTITY_W。
+windows = { workspace = true, features = [
+    "Win32_NetworkManagement_WindowsFilteringPlatform",
+    "Win32_Security",
+    "Win32_System_Rpc",
+    "Win32_Foundation",
+] }
+aegis-version = { workspace = true }
+thiserror     = { workspace = true }
+
+# 刻意不依赖 aegis-core：底座层（OS Level）不关心上层的角色策略，
+# 否则"换一套策略"会牵动最靠近内核的那一层。
