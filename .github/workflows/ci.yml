@@ -5,7 +5,7 @@ on:
     branches: [master, main]
   pull_request:
 
-# 本编排代理是 Windows 专属项目（WFP / Windows Service / IP Helper），
+# Aegis 是 Windows 专属项目（WFP / Windows Service / IP Helper），
 # CI 必须跑在 windows 上。
 env:
   CARGO_TERM_COLOR: always
@@ -33,18 +33,64 @@ jobs:
       - name: Clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
 
-  build:
-    name: 构建 aegis-sense
-    needs: quality
+  version:
+    name: 版本号一致性
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
+
+      # VERSION 文件与 Cargo.toml 的 workspace 版本必须逐字相同，
+      # 否则 aegis-version 打出的版本号会与发布号不一致。
+      - name: 校验 VERSION 与 Cargo.toml 一致
+        shell: pwsh
+        run: |
+          $fileVersion = (Get-Content VERSION -Raw).Trim()
+          $cargoVersion = (Select-String -Path Cargo.toml -Pattern '^version\s*=\s*"([^"]+)"' |
+            Select-Object -First 1).Matches[0].Groups[1].Value
+          Write-Host "VERSION     = $fileVersion"
+          Write-Host "Cargo.toml  = $cargoVersion"
+          if ($fileVersion -ne $cargoVersion) {
+            Write-Error "版本号不一致：VERSION='$fileVersion' 与 Cargo.toml='$cargoVersion'"
+            exit 1
+          }
+          # 必须是合法 SemVer（允许预发布标签，不允许 build metadata）
+          if ($fileVersion -notmatch '^\d+\.\d+\.\d+(-[0-9A-Za-z.-]+)?$') {
+            Write-Error "版本号 '$fileVersion' 不是合法 SemVer（Cargo 不接受 build metadata）"
+            exit 1
+          }
+          Write-Host "::notice::Aegis 版本号 $fileVersion"
+
+      # CHANGELOG 必须为当前版本归档了条目
+      - name: 校验 CHANGELOG 已归档当前版本
+        shell: pwsh
+        run: |
+          $v = (Get-Content VERSION -Raw).Trim()
+          if (-not (Select-String -Path CHANGELOG.md -Pattern "\[$v\]" -Quiet)) {
+            Write-Error "CHANGELOG.md 缺少 [$v] 条目"
+            exit 1
+          }
+
+  build:
+    name: 构建与干跑
+    needs: [quality, version]
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # 需要完整历史与 tag，构建脚本才会算出正确的 Git 短哈希
+          fetch-depth: 0
 
       - name: 安装 Rust 工具链
         uses: dtolnay/rust-toolchain@stable
 
       - name: 缓存 cargo
         uses: Swatinem/rust-cache@v2
+
+      - name: 打印完整版本号
+        run: cargo run -p aegis-version --example version -- --verbose
+
+      - name: 单测
+        run: cargo test --workspace
 
       - name: 编译感知层（含示例）
         run: cargo build -p aegis-sense --examples --verbose

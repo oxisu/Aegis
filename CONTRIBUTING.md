@@ -1,5 +1,9 @@
 # 贡献指南
 
+## 项目身份
+
+**Aegis**（英文为主）/ **宙斯的神盾**（中文为辅）。
+
 ## 重要前提：这是一台接入校园网的开发机
 
 在提交任何涉及**网络状态变更**的代码或执行任何变更前，请遵守：
@@ -28,12 +32,35 @@ chore/<scope>     工程杂项    chore/deps-bump
 
 feat(sense): 实现默认出口裁决与拓扑指纹
 build(workspace): 建立 Cargo workspace 与工具链标准
-fix(netfilter): 修正 DHCP 豁免在 Boot-Time 阶段的死锁
+fix(wfp): 修正 DHCP 豁免在 Boot-Time 阶段的死锁
 ```
 
 `type` 取值：`feat` / `fix` / `docs` / `refactor` / `test` / `chore` / `build` / `ci`。
 
 **请保持细粒度提交**：一个逻辑变更一次提交，便于追溯与回滚（这也是本仓库的要求）。
+提交信息的**正文请写清楚"为什么"**——尤其是踩坑类修复，把现象、根因和实测数据写进去。
+
+## 命名约定
+
+| 对象 | 约定 | 示例 |
+|---|---|---|
+| crate | `aegis-` 前缀 | `aegis-sense` / `aegis-wfp` / `aegis-fuse` |
+| 守护进程二进制 | `aegisd` | |
+| 控制端二进制 | `aegisctl` | |
+| 版本号 | 统一引用 `aegis-version`，**禁止**各 crate 自己 `env!("CARGO_PKG_VERSION")` | `aegis_version::full()` |
+
+分层铁律：`aegis-wfp` 及以上属 OS 级底座，绝不依赖任何应用层代理；
+`aegis-orchestrator` 只通过 SPI trait 与底座解耦，可整体替换。
+
+## 版本号
+
+发版前**必读 [`docs/VERSIONING.md`](docs/VERSIONING.md)**。要点：
+
+- 形态：`MAJOR.MINOR.PATCH[-alpha/beta/rc.N][+g<hash>]`
+- `MAJOR = 0` 期间，破坏性变更走 **MINOR** 递增
+- 版本号四处必须一致：`VERSION`、`Cargo.toml` 的 `[workspace.package].version`、
+  `aegis-version` 的单测断言、`CHANGELOG.md` 顶部条目
+- Git tag 严格用 `v<版本>`，附注 tag，推送后不可变
 
 ## 代码规范
 
@@ -42,17 +69,29 @@ fix(netfilter): 修正 DHCP 豁免在 Boot-Time 阶段的死锁
 ```powershell
 cargo fmt --all
 cargo clippy --workspace --all-targets -- -D warnings
+cargo test --workspace
 ```
 
 要点：
 
-- 本平台**仅 Windows**，不要在 `ob-netfilter` 以外引入跨平台抽象成本。
+- 本平台**仅 Windows**，不要在 `aegis-wfp` 以外引入跨平台抽象成本。
 - 所有 `unsafe` 块必须写明**为什么安全**（SAFETY 注释）。
 - FFI 失败必须向上传递 `Result`，**禁止 panic**（守护进程 panic = fail-closed 断网）。
 - 涉及 `windows` crate 结构体 union 字段时，优先按稳定内存布局取字节，
   避免依赖 windows-rs 版本相关的 union 命名（见 `route.rs` 的做法）。
+- **构建脚本（`build.rs`）禁止启动子进程**，受限环境下可能长时间挂起。
+  需要 Git 元数据时直接读 `.git` 目录下的文件。
+
+### PowerShell 脚本（本机是 5.1）
+
+- 一律写成 **UTF-8 BOM + CRLF**；无 BOM 会被按 GBK 解码，中文错位到无法解析
+- 只用 5.1 兼容语法：**不要**用 `??` 空合并、`if` 作表达式（尤其在 `param()` 默认值里）
+- 起进程用 `&` 调用运算符直调，**不要**用 `Start-Process`
+  （本机 `Path`/`PATH` 重复键会让 .NET 抛出）
+- 提交前用 `Parser::ParseFile` 做一次语法自检
 
 ## 设计文档同步
 
 `design-spec.md` 是**单一事实来源**。任何设计决策发生变更时，
 请**先更新设计文档，再改代码**，并在提交信息里注明受影响的章节编号。
+项目命名与版本编号规范见 §31。

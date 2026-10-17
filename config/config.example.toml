@@ -1,14 +1,26 @@
-# Aegis 编排器配置样例
+# Aegis（宙斯的神盾）—— 编排器配置样例
+# 版本：0.1.0-alpha.1（与仓库根 VERSION 文件一致）
 #
 # 对应 design-spec.md §22「编排器自身配置与持久化 Schema」。
-# 系统级路径：%PROGRAMDATA%\Orchestrator\config.toml
-# 用户级偏好：%LOCALAPPDATA%\Orchestrator\prefs.toml
+# 系统级路径：%PROGRAMDATA%\Aegis\config.toml
+# 用户级偏好：%LOCALAPPDATA%\Aegis\prefs.toml
 #
 # ⚠ 本文件仅为**样例**，不含任何真实密钥。请勿把填写过的 token / secret 提交进仓库。
 
+# ── 版本与契约元信息（§31.2）──
+# Aegis 是安全底座：配置 schema / IPC 帧格式 / 审计记录结构都属于对外契约，
+# 任一变更都必须体现在版本号上，不允许静默改动。
+[meta]
+# 本配置文件遵循的 schema 版本；与 Aegis 版本号的前两段保持一致
+config_schema_version = "0.1"
+# 生成/校验本文件时的 Aegis 完整版本号（形如 0.1.0-alpha.1+g05d624e）
+aegis_version        = ""
+# 读到比自身更新的 schema_version 时必须拒绝加载并提示升级，
+# 而不是按旧语义猜测 —— 猜错等于安全策略静默降级。
+
 [service]
 auto_start        = true          # 注册为 Windows Service，SYSTEM 权限、自动启动
-pipe_name         = "orchestrator"
+pipe_name         = "aegis"
 ipc_fallback_port = 19827         # Named Pipe 不可用时的本地 HTTP 兜底端口
 log_level         = "info"
 
@@ -17,7 +29,7 @@ log_level         = "info"
 boot_time_filter_guid   = "00000000-0000-0000-0000-000000000000"  # 安装时生成并固化
 watchdog_fail_threshold = 3       # 连续 N 次启动失败 → 看门狗自动清背板
 rescue_key_combo        = "Shift" # 开机按住此键跳过装载 Boot-Time 背板
-rescue_exe_path         = "C:\\Program Files\\Orchestrator\\orchestrator-rescue.exe"
+rescue_exe_path         = "C:\\Program Files\\Aegis\\aegis-rescue.exe"
 
 # ── 可插拔适配器选择（§2A 解耦核心）──
 # 底座（WFP / 审计 / 熔断）与下列 provider 完全解耦；换上层工具只改这里
@@ -39,7 +51,7 @@ domestic_rule_set = "domestic-direct"
 allow_dns         = ["223.5.5.5", "119.29.29.29"]
 
 [audit]
-db_path        = "%PROGRAMDATA%\\Orchestrator\\audit.db"
+db_path        = "%PROGRAMDATA%\\Aegis\\audit.db"
 rotation_days  = 30
 max_size_mb    = 512
 export_formats = ["csv", "json"]
