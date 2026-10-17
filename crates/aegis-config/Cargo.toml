@@ -1,0 +1,17 @@
+[package]
+name        = "aegis-config"
+description = "编排器配置加载与 schema 版本校验（纯逻辑，Fail-Closed，不落盘不提权）"
+version.workspace      = true
+edition.workspace      = true
+rust-version.workspace = true
+license.workspace      = true
+authors.workspace      = true
+
+[dependencies]
+# schema 版本判定规则（与 IPC 握手共用同一套，来自最底层的版本 crate）
+aegis-version = { workspace = true }
+# 角色策略直接反序列化成 aegis_core::role::RolePolicy，不另建 DTO
+aegis-core    = { workspace = true }
+serde         = { workspace = true }
+toml          = { workspace = true }
+thiserror     = { workspace = true }

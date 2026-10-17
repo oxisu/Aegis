@@ -17,7 +17,11 @@ use aegis_sense::model::InterfaceInfo;
 use aegis_sense::model::InterfaceKind;
 
 /// 网卡角色（§20.5）。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+///
+/// 同时派生 `Deserialize`：配置里的 `fallback_role = "Isolated"` 直接落到这里，
+/// 不再另建一个"配置专用 DTO"——两个结构必然各自漂移，而漂移的结果是
+/// 安全策略按旧字段静默生效。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum InterfaceRole {
     /// 校园网接入：锁死物理 53 端口，除白名单外物理阻断其余出站
     CampusStrict,
@@ -107,7 +111,11 @@ pub struct RoleDecision {
 /// 但每次开机都要手动放行一次很烦。所以提供 `known_free_ssids` /
 /// `known_campus_ssids` 让用户显式钉死具体网络：
 /// 声明权始终在用户手上，代码不替用户猜测，也不把用户的生活习惯写进源码。
-#[derive(Debug, Clone, serde::Serialize)]
+// `deny_unknown_fields`：安全配置里的拼写错误必须报错，而不是被静默忽略后
+// 退回默认值——那样用户以为自己改了策略，实际生效的仍是旧的那套。
+// 缺字段则退回 Default（Fail-Closed 的 Isolated 兜底）。
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(default, deny_unknown_fields)]
 pub struct RolePolicy {
     /// SSID 含这些关键字 → `CampusStrict`
     pub campus_ssid_keywords: Vec<String>,

@@ -8,6 +8,7 @@
 #
 #   aegis-sense        感知层：拓扑采集 / 默认出口裁决 / SSID / 拓扑指纹（只读）
 #   aegis-core         编排核心：角色模型 / 状态机 / 策略裁决
+#   aegis-config       配置加载与 schema 版本校验（纯逻辑，Fail-Closed）
 #   aegis-wfp          OS 级底座：WFP Boot-Time 过滤器 / 出站审计
 #   aegis-fuse         微秒级网络端口熔断器
 #   aegis-audit        审计与证据链落盘（防篡改哈希）
@@ -48,10 +49,18 @@ thiserror = { version = "2" }
 tracing  = { version = "0.1" }
 # 序列化：IPC 帧、配置落盘、审计导出均依赖
 serde    = { version = "1", features = ["derive"] }
+# 配置解析：仅 aegis-config 使用
+toml     = { version = "1" }
 # 工作区内部：版本标识（所有 crate 都应依赖它，不要各自读 CARGO_PKG_VERSION）
 aegis-version = { path = "crates/aegis-version" }
 # 工作区内部：感知层（提供拓扑事实）
 aegis-sense   = { path = "crates/aegis-sense" }
+# 工作区内部：编排核心（提供角色模型与状态机）
+aegis-core    = { path = "crates/aegis-core" }
+# 工作区内部：IPC 帧编解码与版本握手
+aegis-ipc     = { path = "crates/aegis-ipc" }
+# 工作区内部：配置加载与 schema 校验
+aegis-config  = { path = "crates/aegis-config" }
 
 # ── Release 优化：本机安全底座追求极小体积与快速冷启动 ──
 [profile.release]
