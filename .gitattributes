@@ -1,0 +1,28 @@
+# 行尾策略：仓库内统一 LF，Windows 脚本保留 CRLF
+* text=auto eol=lf
+
+# Rust / 配置 / 文档 —— LF
+*.rs      text eol=lf
+*.toml    text eol=lf
+*.md      text eol=lf
+*.yml     text eol=lf
+*.yaml    text eol=lf
+*.json    text eol=lf
+*.svg     text eol=lf
+*.sh      text eol=lf
+
+# Windows 专用脚本 —— CRLF（否则 cmd/powershell 解析异常）
+*.ps1     text eol=crlf
+*.bat     text eol=crlf
+*.cmd     text eol=crlf
+
+# 二进制 —— 禁止任何转换与 diff
+*.png     binary
+*.jpg     binary
+*.jpeg    binary
+*.gif     binary
+*.ico     binary
+*.exe     binary
+*.dll     binary
+*.zip     binary
+*.db      binary

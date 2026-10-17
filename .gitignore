@@ -1,0 +1,58 @@
+# ============ Rust 构建产物 ============
+/target/**
+**/target/**
+debug/
+release/
+*.pdb
+*.rs.bk
+*.rlib
+*.dll
+*.exe
+
+# ============ 编辑器 / IDE ============
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# ============ 操作系统垃圾 ============
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+.DS_Store
+
+# ============ 本机敏感信息（严禁入库）============
+# 编排器 IPC 一次性令牌（每次服务启动随机生成）
+ipc.token
+*.local.toml
+.env
+.env.*
+*.key
+*.pem
+*.pfx
+
+# ============ 运行时数据 / 证据导出 ============
+# 审计库与按天轮转副本
+audit.db
+audit.db-shm
+audit.db-wal
+audit.db-journal
+*.sqlite
+*.sqlite3
+# 导出的证据包（含本机路径 / 连接记录，属隐私）
+exports/
+evidence/
+
+# ============ 日志 ============
+logs/
+*.log
+
+# ============ 打包 / 升级暂存 ============
+staging/
+*.msi
+*.zip
+
+# ============ WorkBuddy 本地项目数据（非临时缓存，但无需入库）============
+.workbuddy/
