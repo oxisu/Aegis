@@ -15,6 +15,7 @@
 //! 把策略层也保持"可只读干跑"，是为了能在校园网环境下安全地验证决策链路，
 //! 而不必先拿到特权。**先能看懂它要做什么，再谈让它去做。**
 
+pub mod guard;
 pub mod role;
 pub mod state;
 
@@ -25,5 +26,10 @@ pub use aegis_version as version;
 
 pub use self::role::{
     adjudicate, adjudicate_all, Confidence, InterfaceRole, RoleDecision, RolePolicy, RoleTable,
+};
+pub use self::guard::{
+    evaluate, Assertion, GuardAction, GuardFacts, GuardPolicy, GuardTracker, GuardVerdict,
+    ProxyMode, DEFAULT_COOLDOWN_MS, DEFAULT_FAILURE_THRESHOLD, DEFAULT_FLAP_LIMIT_PER_HOUR,
+    FLAP_WINDOW_MS,
 };
 pub use self::state::{awaits_user, insulation, Event, Insulation, State};

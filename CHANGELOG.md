@@ -231,6 +231,23 @@
     "把规则注入下游软件"对应可插拔适配器 SPI（`design-spec §2A`）
     → DNS 漏斗降级为**可选**，只在无代理的纯校园网模式下才是刚需
 
+- **`aegis-core::guard`（新模块，21 项单测）："规则生效吗"的可执行判决**
+  - `evaluate(GuardFacts) -> GuardVerdict`：`Effective` / `Ineffective{failed,reason}` /
+    **`Unknown{reason}`**。拆成断言 A 进程在 / B 承载体在 / **C 默认出口==承载体 LUID**
+  - ⚠ **判不了 ≠ 通过**（命门）：没配 TUN LUID / 读不到默认出口 / 系统代理模式
+    下还没有可用断言 → 一律 `Unknown`，**不是** `Effective`。写成"通过"的话，
+    守卫会在完全没有验证能力时宣称一切正常，比没有守卫更危险
+  - `GuardTracker::observe` 把防抖/冷却/反复故障写成可执行逻辑：
+    连续 3 次失败才收紧（误报=整机断网）、中途成功清零、
+    放宽须过冷却期（含 `<`/`<=` 边界测试）、1 小时内自动收紧 3 次后转 `NeedsHuman`
+  - ⚠ `Unknown` **永不改变状态**，这是刻意的：判不了就收紧会变成
+    "SPI 没实现 → 一进受控态就永久断网"，那不是 fail-closed 是**自锁死**
+  - `Event::ProxyRulesIneffective`（新）：与 `ProxyUnhealthy` **落到同一个
+    `Degraded`**（防护强度一致，被 `both_proxy_failure_events_land_on_the_same_insulation`
+    钉死），但**事件分开**——恢复动作不同，GUI 才能说清"到底为什么断"
+  - `ineffective_downstream_rules_end_up_fully_insulated` 端到端钉死需求：
+    从 `Controlled` 收到该事件后，绝缘等级必须是 `Full`（全都拒绝）
+
 - **`docs/DOWNSTREAM-GUARD.md`：下游规则失效时的兜底方案**
   - 需求：**"检测到规则未生效 → 帮下游软件兜底，全都拒绝掉"**
   - ⚠ **兜底那一半早就有了**：`next(Controlled, ProxyUnhealthy) = Degraded`，
@@ -251,7 +268,10 @@
     "重启无效"的后果
   - 四个陷阱：误报=整机断网（需连续 N 次+冷却）、用户不知为什么断会**卸掉
     Aegis**（必须可观测）、收紧自动放宽受控、**不可达与未生效不能共用一个事件**
-  - 开放问题：兜底与"认证沙盒"冲突吗（全拒绝会让用户连认证页都打不开）
+  - ✅ 已定：兜底与认证页的冲突用**「始终白名单」**解决（做 UI 时加）。
+    ⚠ 它**必然**破坏"只有走对网卡才放行"这条判据（认证页只能走校园物理卡），
+    所以它是**受控后门**不是普通放行规则：只能用户手工加、作用域钉到
+    `网关IP + 80/443`、权重须高于所有阻断并纳入 verify 不变量、每次命中写审计
 
 ### Fixed
 

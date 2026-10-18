@@ -170,25 +170,88 @@ v0 可以先由用户在配置里显式给几个。
 
 ## 6. 最小实现路径
 
-| 优先级 | 内容 | 落在哪 | 依赖 |
+| 优先级 | 内容 | 落在哪 | 状态 |
 |---|---|---|---|
-| P0 | 拆出 `ProxyRulesIneffective` 事件（与 `ProxyUnhealthy` 并列，同样 → `Degraded`） | `aegis-core::state` | 无（纯逻辑 + 单测） |
-| P0 | 断言 B/C 的检测器：TUN 在不在 + 默认出口是不是它 | `aegis-sense` + `aegis-core` 裁决 | 已有能力 |
-| P1 | 防抖 / 冷却 / 反复故障计数的纯逻辑 + 单测 | `aegis-core` | 无 |
-| P1 | 配置面 `proxy.tun_luid` / `proxy.mode` / `guard.canaries` | `aegis-config` | HOURGLASS §5.1 |
-| P2 | 断言 A/D：进程探测、路由试算 canary | `aegis-sense` + SPI | SPI 未实现 |
-| P2 | GUI 展示"为什么断" | Tauri | — |
+| P0 | 拆出 `ProxyRulesIneffective` 事件（与 `ProxyUnhealthy` 并列，同样 → `Degraded`） | `aegis-core::state` | ✅ 已落地 |
+| P0 | 断言 A/B/C 的裁决 + 防抖/冷却/反复故障 | `aegis-core::guard` | ✅ 已落地 |
+| P1 | 断言 B/C 的**采集**：TUN 在不在 + 默认出口是不是它 | `aegis-sense` → 填 `GuardFacts` | ⬜ 待做 |
+| P1 | 配置面 `proxy.tun_luid` / `proxy.mode` / `always_allow` | `aegis-config` | ⬜ 待做（见 §7.1） |
+| P2 | 断言 D：路由试算 canary（`GetBestRoute2`） | `aegis-sense` + SPI | ⬜ SPI 未实现 |
+| P2 | GUI 展示"为什么断" + 始终白名单管理 | Tauri | ⬜ |
 
-⚠ P0 的两条**不需要任何提权、不需要 SPI**，可以先做完并单测覆盖。
+### 6.1 已落地的部分长什么样
+
+`aegis-core::guard`（纯逻辑，56 项单测里的 21 项归它）：
+
+```rust
+pub fn evaluate(facts: GuardFacts) -> GuardVerdict;   // 判"规则生效吗"
+pub enum GuardVerdict { Effective, Ineffective { failed, reason }, Unknown { reason } }
+
+pub struct GuardTracker;   // 带时间记忆
+impl GuardTracker {
+    pub fn observe(&mut self, v: &GuardVerdict, now_ms: u64, policy: GuardPolicy)
+        -> GuardAction;    // Nothing / Tighten / Relax / NeedsHuman
+}
+```
+
+三条被写成测试钉死的铁律：
+
+| 铁律 | 测试 |
+|---|---|
+| **判不了 ≠ 通过**：没配 TUN LUID / 读不到默认出口 / 系统代理模式下没有可用断言 → `Unknown`，**不是** `Effective` | `a_missing_tun_config_is_unknown_not_effective` 等 4 条 |
+| **单次失败不收紧**：连续 3 次才动作，中途成功清零 | `a_single_failure_does_not_tighten` / `one_success_resets_the_streak` |
+| **收紧自动、放宽过冷却**：且 1 小时内自动收紧 3 次后转人工 | `the_cooldown_boundary_is_inclusive_of_the_deadline` / `flapping_beyond_the_limit_stops_and_asks_for_a_human` |
+
+⚠ **`Unknown` 永远不改变状态**，这是刻意的：判不了的时候收紧，会变成
+"SPI 还没实现 → 一进受控态就永久断网"。那不是 fail-closed，是**自锁死**。
+`Unknown` 要当成已知的能力缺口去补（SPI），而不是当成"先断为敬"的理由。
 
 ---
 
-## 7. 需要用户拍板的开放问题
+## 7. 开放问题与已定的答案
 
-1. **兜底到什么粒度？**「全都拒绝」（本次需求）与「认证沙盒」
-   （放行浏览器→校园网关 80/443，用来完成校园网认证）冲突吗？
-   如果兜底时校园网还没认证，全拒绝会让用户**连认证页都打不开**。
-2. **冷却期与阈值**：N=3、冷却 30s、1 小时内 3 次转人工 —— 这组数合适吗？
-3. **canary 列表**由用户配，还是等 SPI 自动从代理规则里抽？
-4. **要不要给用户一个"我知道风险，强制放行"的紧急出口**？
-   （`EMERGENCY-TEARDOWN.md` 里已有强拆通道，要不要复用它。）
+### 7.1 ✅ 已定：「全都拒绝」与认证页的冲突 → 用**始终白名单**解决
+
+> 用户决定：之后做 UI 时加一个"**始终白名单**"功能，用于放行校园网认证页。
+
+这条解法是对的，但有个代价必须**先写出来**，否则做的时候会把它做成暗门：
+
+> ⚠ **始终白名单必然破坏"只有走对网卡才放行"这条判据。**
+> 校园网认证页只能从校园物理网卡访问 —— 而那正是平时要砍的那条路。
+> 所以它不是"又一条放行规则"，而是一个**受控后门**。
+
+于是实现时必须满足：
+
+| 约束 | 理由 |
+|---|---|
+| **只能由用户显式添加**，任何自动流程 / SPI 都不许加 | 自动加 = 后门可被诱导打开 |
+| **作用域钉到最小**：`目的 IP = 校园网关` + `端口 80/443`，不要写成"网关 IP 全端口" | 白名单越宽，沙漏下层的洞越大 |
+| **权重必须高于所有阻断**，且纳入 `aegis-wfp::verify` 的不变量 | 权重写反 = 白名单静默失效（不报错，只是拦着） |
+| **每次命中都写审计** | 后门必须可追溯，否则变暗门 |
+| **兜底收紧时它仍然生效** | 这正是它存在的意义——否则用户永远出不来 |
+| GUI 上标注为"永久放行"，并显示条目数 | 用户要能一眼看到自己开了几个洞 |
+
+与认证沙盒的关系（两者并存，不冲突）：
+
+| | 认证沙盒 `CaptivePortal` | 始终白名单 |
+|---|---|---|
+| 谁加的 | 系统自动（检测到未认证） | **用户手工** |
+| 存续 | 临时，有租约超时 | 永久 |
+| 范围 | 浏览器 → 网关 80/443 | 用户指定 |
+
+配置面形态（`aegis-config`，待做）：
+
+```yaml
+always_allow:
+  - name: 校园网认证页
+    remote_ip: 10.0.0.1      # 校园网关
+    ports: [80, 443]
+```
+
+### 7.2 仍然开放的三个问题
+
+1. **阈值这组数**：N=3、冷却 30s、1 小时内 3 次转人工 —— 先用默认值跑，
+   等真机用起来再调（已做成 `GuardPolicy`，改起来不用动逻辑）。
+2. **canary 列表**由用户配，还是等 SPI 自动从代理规则里抽？
+3. **要不要给用户一个"我知道风险，强制放行"的紧急出口**？
+   （`EMERGENCY-TEARDOWN.md` 里已有强拆通道，可复用。）

@@ -80,8 +80,15 @@ pub enum Event {
     AcknowledgeTopology,
     /// 网口变动
     TopologyChanged,
-    /// 上层代理不健康
+    /// 上层代理**不可达**（进程没了 / 控制端口连不上）
     ProxyUnhealthy,
+    /// 上层代理**可达但它的规则没生效**（`docs/DOWNSTREAM-GUARD.md`）
+    ///
+    /// 与 [`Self::ProxyUnhealthy`] 的区别不是措辞：两者恢复动作不同
+    /// （前者等它起来，后者通常要人去改配置），混在一个事件里
+    /// GUI 就说不清"到底为什么断"。这里**落到同一个 `Degraded` 状态**——
+    /// 状态不变，原因可辨。
+    ProxyRulesIneffective,
     /// 代理恢复
     ProxyRecovered,
     /// 检测到校园网未认证
@@ -148,6 +155,10 @@ pub fn next(state: State, event: Event) -> Option<State> {
         (S::Airgap, E::AcknowledgeTopology) => S::Preflight,
 
         (S::Controlled, E::ProxyUnhealthy) => S::Degraded,
+        // 兜底：下游软件自己漏了（规则没生效），Aegis 替它把门关上。
+        // 与 ProxyUnhealthy 落到同一个状态——`insulation(Degraded) = Full`，
+        // 也就是"全都拒绝"（见 `docs/DOWNSTREAM-GUARD.md` §1）。
+        (S::Controlled, E::ProxyRulesIneffective) => S::Degraded,
         (S::Controlled, E::CaptiveDetected) => S::CaptivePortal,
         (S::Controlled, E::TopologyChanged) => S::Airgap,
         (S::Controlled, E::FatalFailure) => S::Bricked,
@@ -210,7 +221,7 @@ mod tests {
         ]
     }
 
-    fn all_events() -> [Event; 15] {
+    fn all_events() -> [Event; 16] {
         [
             Event::PreflightPassed,
             Event::RequireManualApproval,
@@ -220,6 +231,7 @@ mod tests {
             Event::AcknowledgeTopology,
             Event::TopologyChanged,
             Event::ProxyUnhealthy,
+            Event::ProxyRulesIneffective,
             Event::ProxyRecovered,
             Event::CaptiveDetected,
             Event::CaptiveSolved,
@@ -273,6 +285,11 @@ mod tests {
         (State::Airgap, Event::TopologyUntrusted, State::Locked),
         (State::Airgap, Event::AcknowledgeTopology, State::Preflight),
         (State::Controlled, Event::ProxyUnhealthy, State::Degraded),
+        (
+            State::Controlled,
+            Event::ProxyRulesIneffective,
+            State::Degraded,
+        ),
         (
             State::Controlled,
             Event::CaptiveDetected,
@@ -454,6 +471,30 @@ mod tests {
     fn degraded_stays_fully_insulated() {
         assert_eq!(insulation(State::Degraded), Insulation::Full);
         assert_eq!(insulation(State::Controlled), Insulation::None);
+    }
+
+    /// **需求「下游规则未生效 → 全都拒绝」的端到端钉死**
+    /// （`docs/DOWNSTREAM-GUARD.md`）。
+    ///
+    /// 只断言"状态是 Degraded"是不够的：真正要的是**从受控放行出发收到这个
+    /// 事件之后，绝缘等级变成全部拒绝**。中间任何一环被改动，这条就红。
+    #[test]
+    fn ineffective_downstream_rules_end_up_fully_insulated() {
+        let after = next(State::Controlled, Event::ProxyRulesIneffective)
+            .expect("受控放行态下必须能响应『规则未生效』");
+        assert_eq!(after, State::Degraded);
+        assert_eq!(insulation(after), Insulation::Full);
+    }
+
+    /// 「不可达」与「未生效」是两个事件，但落到**同一个状态**——
+    /// 区别只体现在原因上，防护强度必须一样。改成一个强一个弱是危险的。
+    #[test]
+    fn both_proxy_failure_events_land_on_the_same_insulation() {
+        let a = next(State::Controlled, Event::ProxyUnhealthy).unwrap();
+        let b = next(State::Controlled, Event::ProxyRulesIneffective).unwrap();
+        assert_eq!(a, b);
+        assert_eq!(insulation(a), insulation(b));
+        assert_ne!(Event::ProxyUnhealthy, Event::ProxyRulesIneffective);
     }
 
     #[test]
