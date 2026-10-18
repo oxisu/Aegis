@@ -267,6 +267,48 @@ mod tests {
         assert!(FilterFlags(FLAG_PERSISTENT | FLAG_DISABLED).survives_reboot());
     }
 
+    /// `disabled()` 之前一个测试都没碰过，变异测试一口气放了 5 个变异体
+    /// 全活下来。位运算必须**两个方向**都钉住：置位为真、未置位为假。
+    #[test]
+    fn disabled_flag_is_read_exactly() {
+        assert!(FilterFlags(FLAG_DISABLED).disabled());
+        assert!(!FilterFlags(0).disabled());
+        assert!(!FilterFlags(FLAG_PERSISTENT).disabled());
+        assert!(!FilterFlags(FLAG_BOOTTIME).disabled());
+        // 组合位不能被别的标志带偏
+        assert!(FilterFlags(FLAG_PERSISTENT | FLAG_DISABLED).disabled());
+        assert!(!FilterFlags(FLAG_PERSISTENT | FLAG_BOOTTIME).disabled());
+    }
+
+    #[test]
+    fn provider_persistent_flag_is_read_exactly() {
+        let p = |flags: u32| ProviderSummary {
+            name: "p".into(),
+            service: "s".into(),
+            raw_flags: flags,
+        };
+        assert!(p(FLAG_PERSISTENT).persistent());
+        assert!(!p(0).persistent());
+        assert!(!p(FLAG_BOOTTIME).persistent(), "boottime 不等于 persistent");
+        assert!(!p(FLAG_DISABLED).persistent());
+        assert!(p(FLAG_PERSISTENT | FLAG_DISABLED).persistent());
+    }
+
+    /// 非持久 Provider 不能被算进"持久背板"候选里。
+    #[test]
+    fn non_persistent_provider_is_not_counted() {
+        let snap = Snapshot {
+            filters: Vec::new(),
+            providers: vec![ProviderSummary {
+                name: "p".into(),
+                service: "s".into(),
+                raw_flags: 0,
+            }],
+        };
+        assert_eq!(snap.persistent_providers().count(), 0);
+        assert_eq!(audit_backbone(&snap), Risk::Clean);
+    }
+
     #[test]
     fn empty_snapshot_is_clean() {
         assert_eq!(audit_backbone(&Snapshot::default()), Risk::Clean);

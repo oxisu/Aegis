@@ -134,6 +134,33 @@ mod tests {
         assert!(names.contains(&"OUTBOUND_TRANSPORT_V6"));
     }
 
+    /// 已知层必须都有用途说明——之前只测了"未知层返回 None"，
+    /// 于是"恒返回 None"这个变异活了下来（变异测试实锤）。
+    #[test]
+    fn known_layers_all_have_a_purpose() {
+        for (g, n) in watched_layers() {
+            let p = layer_purpose(&g);
+            assert!(p.is_some(), "{n} 缺用途说明");
+            assert!(!p.unwrap().is_empty(), "{n} 用途说明为空");
+        }
+    }
+
+    #[test]
+    fn layer_purpose_of_a_known_layer_describes_it() {
+        let p = layer_purpose(&wfp::FWPM_LAYER_ALE_AUTH_CONNECT_V4).unwrap();
+        assert!(p.contains("出站"), "{p}");
+        assert_eq!(layer_purpose(&GUID::zeroed()), None);
+    }
+
+    #[test]
+    fn action_names_cover_every_callout_type() {
+        assert_eq!(
+            action_name(wfp::FWP_ACTION_CALLOUT_INSPECTION),
+            "检查型 Callout"
+        );
+        assert_eq!(action_name(wfp::FWP_ACTION_CALLOUT_UNKNOWN), "未知 Callout");
+    }
+
     #[test]
     fn action_names_are_chinese_and_stable() {
         assert_eq!(action_name(wfp::FWP_ACTION_BLOCK), "阻断");

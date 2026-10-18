@@ -671,6 +671,239 @@ mod tests {
         }
     }
 
+    /// `verify` 产生的**去重后**结论码集合。
+    ///
+    /// 断言"含某个码"是不够的：变异测试里出现过把 `>` 改成 `>=`、
+    /// 把 `==` 改成 `!=` 之后，结论码多出一个而测试照样通过——
+    /// 因为测试只检查了"我要的那个码在不在"。要抓这类偏差，
+    /// 必须断言**整个集合**。
+    fn codes(plan: &[FilterSpec]) -> Vec<&'static str> {
+        let mut v: Vec<&'static str> = verify(plan).iter().map(|f| f.code).collect();
+        v.sort_unstable();
+        v.dedup();
+        v
+    }
+
+    /// 一份只覆盖 IPv4 的最小可用计划（回环 + DHCP + 默认拒绝）。
+    fn minimal_v4_plan() -> Vec<FilterSpec> {
+        vec![
+            FilterSpec {
+                name: "回环放行",
+                layer: Layer::AleAuthConnectV4,
+                action: Action::Permit,
+                weight: W_LOOPBACK,
+                conditions: vec![Condition::Loopback],
+                tier: Tier::Runtime,
+            },
+            FilterSpec {
+                name: "DHCP 放行·服务端67",
+                layer: Layer::AleAuthConnectV4,
+                action: Action::Permit,
+                weight: W_DHCP,
+                conditions: vec![
+                    Condition::ServicePid(DHCP_SERVICE),
+                    Condition::RemotePort(67),
+                ],
+                tier: Tier::Runtime,
+            },
+            spec(
+                "默认拒绝",
+                Layer::AleAuthConnectV4,
+                Action::Block,
+                W_DEFAULT_DENY,
+            ),
+        ]
+    }
+
+    /// 只建 V4 的计划不该被要求"V6 层也得有回环放行和默认拒绝"。
+    ///
+    /// 这对 `==` / `!=` 的变异很敏感：一旦层的匹配条件写反，
+    /// 这个计划会凭空多出两条关于 V6 的结论。
+    #[test]
+    fn single_layer_plan_is_not_asked_about_the_other_layer() {
+        assert_eq!(
+            codes(&minimal_v4_plan()),
+            Vec::<&str>::new(),
+            "{:?}",
+            verify(&minimal_v4_plan())
+        );
+    }
+
+    /// 无条件的**放行**不算默认拒绝：兜底必须是阻断。
+    #[test]
+    fn catch_all_permit_does_not_count_as_default_deny() {
+        let plan = vec![
+            FilterSpec {
+                name: "回环放行",
+                layer: Layer::AleAuthConnectV4,
+                action: Action::Permit,
+                weight: W_LOOPBACK,
+                conditions: vec![Condition::Loopback],
+                tier: Tier::Runtime,
+            },
+            spec("全放行", Layer::AleAuthConnectV4, Action::Permit, 10),
+            FilterSpec {
+                name: "DHCP 放行·服务端67",
+                layer: Layer::AleAuthConnectV4,
+                action: Action::Permit,
+                weight: W_DHCP,
+                conditions: vec![
+                    Condition::ServicePid(DHCP_SERVICE),
+                    Condition::RemotePort(67),
+                ],
+                tier: Tier::Runtime,
+            },
+        ];
+        assert!(
+            codes(&plan).contains(&"NO_DEFAULT_DENY"),
+            "只有无条件放行时绝缘笼等于没关：{:?}",
+            codes(&plan)
+        );
+    }
+
+    /// **同权重**不是"遮蔽"，是"顺序不确定"：只该报 DUPLICATE_WEIGHT，
+    /// 不该同时报一堆 SHADOWED。这条专门盯 `>` 被改成 `>=` / `==` 的变异。
+    #[test]
+    fn equal_weight_is_ambiguity_not_shadowing() {
+        let plan = vec![
+            FilterSpec {
+                name: "回环放行",
+                layer: Layer::AleAuthConnectV4,
+                action: Action::Permit,
+                weight: 10,
+                conditions: vec![Condition::Loopback],
+                tier: Tier::Runtime,
+            },
+            spec("默认拒绝", Layer::AleAuthConnectV4, Action::Block, 10),
+            FilterSpec {
+                name: "DHCP 放行·服务端67",
+                layer: Layer::AleAuthConnectV4,
+                action: Action::Permit,
+                weight: 11,
+                conditions: vec![
+                    Condition::ServicePid(DHCP_SERVICE),
+                    Condition::RemotePort(67),
+                ],
+                tier: Tier::Runtime,
+            },
+        ];
+        // 先确认"真的被遮蔽"这个判据本身还灵，否则下面三条否定断言
+        // 可能只是因为判据整个失效才通过的
+        let mut shadowed = plan.clone();
+        shadowed[2].weight = 9;
+        assert!(
+            codes(&shadowed).contains(&"PERMIT_SHADOWED"),
+            "DHCP 权重低于默认拒绝时确实应报遮蔽：{:?}",
+            codes(&shadowed)
+        );
+
+        let c = codes(&plan);
+        assert!(c.contains(&"DUPLICATE_WEIGHT"), "{c:?}");
+        assert!(!c.contains(&"LOOPBACK_SHADOWED"), "同权重不是遮蔽：{c:?}");
+        assert!(!c.contains(&"PERMIT_SHADOWED"), "同权重不是遮蔽：{c:?}");
+        assert!(!c.contains(&"DHCP_SHADOWED"), "同权重不是遮蔽：{c:?}");
+    }
+
+    /// `is_safe` 必须真的能返回 false——之前只断言了结论码，
+    /// 导致"恒返回 true"这个变异活了下来。
+    #[test]
+    fn is_safe_returns_false_for_a_self_locking_plan() {
+        assert!(!is_safe(&[spec(
+            "默认拒绝",
+            Layer::AleAuthConnectV4,
+            Action::Block,
+            W_DEFAULT_DENY
+        )]));
+        assert!(is_safe(&minimal_v4_plan()));
+        assert!(is_safe(&[]));
+    }
+
+    #[test]
+    fn survives_reboot_is_exactly_the_boot_tier() {
+        let mut boot = spec("b", Layer::AleAuthConnectV4, Action::Block, 5);
+        boot.tier = Tier::Boot;
+        assert!(boot.survives_reboot());
+        let mut runtime = spec("r", Layer::AleAuthConnectV4, Action::Block, 5);
+        runtime.tier = Tier::Runtime;
+        assert!(!runtime.survives_reboot());
+        // 生成的默认计划里一条都不该留下
+        assert!(cage_plan(CagePolicy::default())
+            .iter()
+            .all(|f| !f.survives_reboot()));
+    }
+
+    #[test]
+    fn is_catch_all_is_exactly_empty_conditions() {
+        let catch = spec("c", Layer::AleAuthConnectV4, Action::Block, 5);
+        assert!(catch.is_catch_all());
+        let mut cond = catch.clone();
+        cond.conditions = vec![Condition::RemotePort(53)];
+        assert!(!cond.is_catch_all());
+    }
+
+    /// 名字要能区分端口：`AND` 语义下 67 和 68 必须是两条规则，
+    /// 同名会让排查时看到两条一模一样的条目。
+    #[test]
+    fn dhcp_permit_names_distinguish_the_ports() {
+        assert_eq!(dhcp_permit_name(PORT_DHCP_SERVER), "DHCP 放行·服务端67");
+        assert_eq!(dhcp_permit_name(PORT_DHCP_CLIENT), "DHCP 放行·客户端68");
+        assert_ne!(
+            dhcp_permit_name(PORT_DHCP_SERVER),
+            dhcp_permit_name(PORT_DHCP_CLIENT)
+        );
+        let plan = cage_plan(CagePolicy::default());
+        let names: Vec<&str> = plan
+            .iter()
+            .filter(|f| f.name.starts_with("DHCP"))
+            .map(|f| f.name)
+            .collect();
+        assert_eq!(names.len(), 2);
+        assert_ne!(names[0], names[1], "{names:?}");
+    }
+
+    /// 结论的 detail 必须指名哪条条件不合规，否则运维看到
+    /// "BOOT_CONDITION_NOT_STATIC" 也不知道该改什么。
+    #[test]
+    fn boot_violation_detail_names_the_offending_condition() {
+        let plan = vec![FilterSpec {
+            name: "DHCP 放行(引导时间)",
+            layer: Layer::AleAuthConnectV4,
+            action: Action::Permit,
+            weight: 14,
+            conditions: vec![Condition::ProcessId(1234), Condition::RemotePort(67)],
+            tier: Tier::Boot,
+        }];
+        let f = verify(&plan);
+        let bad = f
+            .iter()
+            .find(|x| x.code == "BOOT_CONDITION_NOT_STATIC")
+            .expect("应报出非静态条件");
+        assert!(
+            bad.detail.contains("1234") || bad.detail.contains("进程ID"),
+            "detail 必须点名违规条件：{}",
+            bad.detail
+        );
+        assert!(
+            !bad.detail.contains("目的端口"),
+            "不该把静态条件报成违规：{}",
+            bad.detail
+        );
+    }
+
+    /// 权重**等于**上限是合法的：只有超过才该报。
+    #[test]
+    fn weight_exactly_at_max_is_accepted() {
+        let mut plan = minimal_v4_plan();
+        plan[0].weight = WEIGHT_MAX;
+        assert!(
+            !codes(&plan).contains(&"WEIGHT_OUT_OF_RANGE"),
+            "{:?}",
+            codes(&plan)
+        );
+        plan[0].weight = WEIGHT_MAX + 1;
+        assert!(codes(&plan).contains(&"WEIGHT_OUT_OF_RANGE"));
+    }
+
     // ── 权重关系：本模块最重要的不变量 ──────────────────────────────
 
     /// 放行必须严格高于默认拒绝，且回环最高、DHCP 次之。
