@@ -46,8 +46,10 @@ rust-version = "1.85"
 license      = "AGPL-3.0-or-later"
 authors      = ["Aegis Contributors"]
 description  = "Aegis（宙斯的神盾）：本地零信任网络编排守护进程 —— WFP 绝缘底座 + 可插拔适配器"
-homepage     = "https://github.com/aegis-net/aegis"
-repository   = "https://github.com/aegis-net/aegis"
+# ⚠ 这两个 URL 曾指向不存在的 `aegis-net/aegis`（项目早期占位，一直没改）。
+# 它们会被写进 crates.io 的元数据，指错等于把人和 issue 都引到空地。
+homepage     = "https://github.com/oxisu/Aegis"
+repository   = "https://github.com/oxisu/Aegis"
 
 # ── 可插拔依赖（仅声明版本，具体 features 由各 crate 按需开启，避免全量编译）──
 [workspace.dependencies]
