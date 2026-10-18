@@ -90,6 +90,7 @@ version = "0.1.0-alpha.2"
 name = "aegis-wfp"
 version = "0.1.0-alpha.2"
 dependencies = [
+ "aegis-sense",
  "aegis-version",
  "mutants",
  "thiserror",
