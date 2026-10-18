@@ -103,6 +103,45 @@ mod tests {
         assert!(e.to_string().contains("0x00000005"));
     }
 
+    /// 每一个登记过的错误码都要有自己的处置建议，且各不相同。
+    ///
+    /// "需要 UAC 提升"和"BFE 没运行"是两种完全不同的失败，共用一条提示
+    /// 会让用户照着错误的方向排查。变异测试曾把其中三条 match arm
+    /// 整条删掉而测试仍然全绿——因为原测试只断言了错误码 5 那一条。
+    #[test]
+    fn every_documented_code_has_its_own_hint() {
+        let cases: &[(u32, &str)] = &[(5, "管理员"), (740, "UAC"), (1060, "BFE"), (1757, "BFE")];
+        let mut seen: std::collections::BTreeSet<&str> = std::collections::BTreeSet::new();
+        for (code, keyword) in cases {
+            let hint = WfpError::EngineOpen(*code)
+                .hint()
+                .unwrap_or_else(|| panic!("错误码 {code} 缺少处置建议"));
+            assert!(
+                hint.contains(keyword),
+                "错误码 {code} 的提示应提到 {keyword}：{hint}"
+            );
+            assert!(
+                seen.insert(hint),
+                "错误码 {code} 的提示与其他码重复：{hint}"
+            );
+        }
+    }
+
+    /// 提示必须与"哪个码"绑死：删掉任意一条 match arm 都要被抓到。
+    #[test]
+    fn hints_differ_per_code() {
+        assert_ne!(
+            WfpError::EngineOpen(1060).hint(),
+            WfpError::EngineOpen(1757).hint()
+        );
+        assert_ne!(
+            WfpError::EngineOpen(5).hint(),
+            WfpError::EngineOpen(740).hint()
+        );
+        assert!(WfpError::EngineOpen(1060).hint().unwrap().contains("服务"));
+        assert!(WfpError::EngineOpen(1757).hint().unwrap().contains("引擎"));
+    }
+
     #[test]
     fn unknown_codes_have_no_hint_but_still_print() {
         let e = WfpError::Enumerate(0x8032_0009);

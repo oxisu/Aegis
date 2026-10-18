@@ -46,3 +46,21 @@ use aegis_version as version;
 pub fn full_version() -> String {
     version::full()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 版本号是运维排障时第一个要看的东西，串了会直接误导。
+    /// 变异测试曾把它整个替换成空串/占位串而无人发现。
+    #[test]
+    fn full_version_is_the_project_version_not_a_placeholder() {
+        let v = full_version();
+        assert!(!v.is_empty(), "版本号不得为空");
+        assert_ne!(v, "xyzzy", "版本号不得是占位串");
+        assert_eq!(v, version::full(), "必须与 aegis-version 单一事实来源一致");
+        // 形如 0.1.0-alpha.2+g<hash>
+        assert!(v.starts_with("0."), "{v}");
+        assert!(v.contains("alpha"), "{v}");
+    }
+}
