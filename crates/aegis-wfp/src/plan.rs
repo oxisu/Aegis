@@ -216,6 +216,46 @@ pub enum Condition {
     /// 理论上仍可借 67/68 端口外联。这比"任何进程都能借"好得多，
     /// 但不是零。彻底解决要靠 ALE callout 在内核里按 PID 判，那是后续工作。
     SystemServiceHost,
+
+    /// 数据包要从**这张网卡**出去（`NET_LUID`，值来自 `aegis-sense`）。
+    ///
+    /// # 这是沙漏模型第二层漏斗的原语
+    ///
+    /// 代理软件（Clash / sing-box）跑在用户态、懂域名；Aegis 在内核里
+    /// **不懂域名也不需要懂**——它只认一件事：
+    ///
+    /// > 这一跳是不是从**该走的网卡**出去的？不是就截掉。
+    ///
+    /// 于是"域名该怎么走"交给代理规则，"走错网卡一律砍"交给 Aegis。
+    /// 两层各自只做自己擅长的事，合起来才是纵深防御。
+    ///
+    /// # 为什么必须按网卡、不能按进程
+    ///
+    /// **TUN 模式**下，应用自己的 socket 连的仍然是真实远端 IP，
+    /// 系统只是按路由把包送进 TUN；随后由代理进程另起一条连接出去。
+    /// 于是一条"只放行代理进程"的规则会把应用自己的 socket 一起拦掉，
+    /// TUN 模式直接废掉。按出口网卡放行才是 TUN 模式的正确原语。
+    ///
+    /// 反过来，**系统代理模式**（SOCKS/HTTP）下应用连的是 127.0.0.1，
+    /// 此时按进程放行代理进程才是对的。两种模式要的原语不同。
+    ///
+    /// # 实测依据
+    ///
+    /// 用 `Session::fields` 问引擎（见 `examples/egress_probe`），
+    /// `ALE_AUTH_CONNECT_V4` 的 41 个字段里有：
+    ///
+    /// ```text
+    /// ✅ IP_LOCAL_INTERFACE  值类型 FWP_UINT64   ← 就是 NET_LUID
+    /// ✅ INTERFACE_INDEX     值类型 FWP_UINT32
+    /// ✅ IP_NEXTHOP_INTERFACE / NEXTHOP_INTERFACE_INDEX …
+    /// ```
+    ///
+    /// 选 `IP_LOCAL_INTERFACE` 是因为 `aegis-sense` 产出的正是网卡
+    /// **LUID**（`default_egress_luid`），两边是同一个标识，不用再做一次转换。
+    ///
+    /// ⚠ **字段在 ≠ 分类时带着正确的值。** 值对不对由
+    /// `examples/iface_probe` 做行为实验（含阴性对照）判定。
+    EgressInterfaceLuid(u64),
 }
 
 impl Condition {
@@ -227,7 +267,12 @@ impl Condition {
     pub fn is_static(self) -> bool {
         !matches!(
             self,
-            Self::ProcessId(_) | Self::SystemServiceHost | Self::RemoteName(_)
+            Self::ProcessId(_)
+                | Self::SystemServiceHost
+                | Self::RemoteName(_)
+                // 网卡 LUID 也是运行期才有的：引导时间网卡还没枚举出来，
+                // 写上去就是一条永不匹配的死规则（开机即断网且没有界面能救）
+                | Self::EgressInterfaceLuid(_)
         )
     }
 
@@ -252,6 +297,7 @@ impl fmt::Display for Condition {
             Self::ProcessId(p) => write!(f, "进程ID={p}"),
             Self::RemoteName(n) => write!(f, "远端主机名={n}"),
             Self::SystemServiceHost => write!(f, "进程=系统服务宿主(svchost)"),
+            Self::EgressInterfaceLuid(l) => write!(f, "出口网卡=LUID {l:#x}"),
         }
     }
 }

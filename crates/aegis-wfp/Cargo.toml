@@ -29,5 +29,9 @@ thiserror     = { workspace = true }
 # 详见 src/session.rs 模块头的"变异测试怎么对待本模块"。
 mutants = { workspace = true }
 
+# 取"默认出口网卡的 LUID"要用感知层——沙漏第二层的规则要钉在具体网卡上。
+# 只给 example 用，**不是**正式依赖：底座层本身仍然不认识感知层。
+aegis-sense = { workspace = true }
+
 # 刻意不依赖 aegis-core：底座层（OS Level）不关心上层的角色策略，
 # 否则"换一套策略"会牵动最靠近内核的那一层。

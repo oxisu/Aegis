@@ -191,6 +191,7 @@ pub fn mappable(cond: &Condition) -> bool {
             | Condition::RemoteAddrV4(_)
             | Condition::Loopback
             | Condition::SystemServiceHost
+            | Condition::EgressInterfaceLuid(_)
     )
     // ⛔ `RemoteName` 刻意**不**在白名单里：实测证明它装得上但拦不住
     // （见 [`Condition::RemoteName`] 的注释与 `examples/name_probe`）。
@@ -364,6 +365,10 @@ fn add_one(session: &Session, spec: &FilterSpec) -> Result<u64, WfpError> {
     let mut owned_blobs: Vec<*mut wfp::FWP_BYTE_BLOB> = Vec::new();
     // 自己构造的 blob，数据缓冲区同样要活到调用之后
     let mut owned_bytes: Vec<Box<[u8]>> = Vec::new();
+    // `FWP_UINT64` 在 `FWP_CONDITION_VALUE0` 里是 **\*mut u64**（不是内联值）。
+    // 于是得自己持有这个 u64，并且必须活到 `FwpmFilterAdd0` 返回之后——
+    // 条件数组里存的是指向它的裸指针，提前释放就是悬垂指针。
+    let mut owned_u64: Vec<Box<u64>> = Vec::new();
     // 区分"谁分配的"：释放方式不同，混起来会炸（拿 WFP 的指针去 Box::from_raw）
     let mut wfp_allocated: Vec<*mut wfp::FWP_BYTE_BLOB> = Vec::new();
     for cond in &spec.conditions {
@@ -388,6 +393,15 @@ fn add_one(session: &Session, spec: &FilterSpec) -> Result<u64, WfpError> {
                 wfp::FWPM_CONDITION_IP_REMOTE_ADDRESS,
                 wfp::FWP_MATCH_EQUAL,
                 FwpValue::Uint32(u32::from(*a)),
+            )),
+            // ⚠ `IP_LOCAL_INTERFACE` 的值是 **UINT64 的 NET_LUID**，不是
+            // 接口 Index。两者长得很像，填错类型内核照样可能接受（它只看到
+            // 一个数字），但规则永远不匹配——"装了、没报错、没生效"。
+            // 类型是用 `Session::fields` 问出来的（见 `examples/egress_probe`）。
+            Condition::EgressInterfaceLuid(luid) => translated.push((
+                wfp::FWPM_CONDITION_IP_LOCAL_INTERFACE,
+                wfp::FWP_MATCH_EQUAL,
+                FwpValue::Uint64(*luid),
             )),
             // 回环用 FLAGS 字段判 IS_LOOPBACK，比"目的地址是 127.0.0.0/8"精确：
             // 后者在 IPv6 与部分隧道场景下判不准，而判不准的下场是把自己锁在门外。
@@ -455,6 +469,12 @@ fn add_one(session: &Session, spec: &FilterSpec) -> Result<u64, WfpError> {
                 cv.r#type = wfp::FWP_UINT32;
                 cv.Anonymous.uint32 = *v;
             },
+            FwpValue::Uint64(v) => {
+                let mut cell = Box::new(*v);
+                cv.r#type = wfp::FWP_UINT64;
+                cv.Anonymous.uint64 = cell.as_mut();
+                owned_u64.push(cell);
+            },
             FwpValue::Blob(p) => {
                 cv.r#type = wfp::FWP_BYTE_BLOB_TYPE;
                 cv.Anonymous.byteBlob = *p;
@@ -511,6 +531,8 @@ fn add_one(session: &Session, spec: &FilterSpec) -> Result<u64, WfpError> {
         }
     }
     drop(owned_bytes);
+    // 同上：u64 的缓冲区也必须活过 FwpmFilterAdd0
+    drop(owned_u64);
 
     if rc != 0 {
         return Err(WfpError::FilterAdd(rc));
@@ -589,6 +611,8 @@ fn name_blob(name: &str) -> (Box<[u8]>, *mut wfp::FWP_BYTE_BLOB) {
 enum FwpValue {
     Uint16(u16),
     Uint32(u32),
+    /// `IP_LOCAL_INTERFACE`（`NET_LUID`）是 UINT64。
+    Uint64(u64),
     /// `ALE_APP_ID` 用的字节 blob。指针归 `owned_blobs` 管理。
     Blob(*mut wfp::FWP_BYTE_BLOB),
 }
@@ -745,15 +769,39 @@ mod tests {
         );
     }
 
+    /// 白名单里多一个/少一个都会改变"哪些计划能下发"，必须钉死。
+    ///
+    /// `EgressInterfaceLuid` 是沙漏第二层的原语（`IP_LOCAL_INTERFACE`，
+    /// UINT64 的 `NET_LUID`）——它的存在与否决定了"按出口网卡砍流量"
+    /// 到底能不能做。真机判决见 `examples/iface_probe`。
     #[test]
-    fn mappable_conditions_are_exactly_the_five_we_can_translate() {
+    fn mappable_conditions_are_exactly_the_six_we_can_translate() {
         assert!(mappable(&Condition::RemotePort(53)));
         assert!(mappable(&Condition::LocalPort(68)));
         assert!(mappable(&Condition::RemoteAddrV4(std::net::Ipv4Addr::new(127, 0, 0, 1))));
         assert!(mappable(&Condition::Loopback));
         assert!(mappable(&Condition::SystemServiceHost));
+        assert!(mappable(&Condition::EgressInterfaceLuid(0x600_8008_0000_0000)));
         assert!(!mappable(&Condition::ProcessId(1)));
         assert!(!mappable(&Condition::PhysicalInterface));
+    }
+
+    /// **回归**：网卡 LUID 是运行期才有的东西，绝不能出现在 Boot 层。
+    /// 引导时间网卡还没枚举出来，写上去就是一条永不匹配的死规则——
+    /// 而 Boot 层规则重启都清不掉，那等于把机器永久锁死。
+    #[test]
+    fn an_interface_luid_is_not_static_so_it_cannot_go_on_the_boot_tier() {
+        assert!(!Condition::EgressInterfaceLuid(1).is_static());
+        assert!(Condition::RemotePort(53).is_static(), "端口不依赖运行期");
+    }
+
+    /// 给运维看的条件描述要说清是 LUID 还是 Index——两者长得很像，
+    /// 填错类型内核照样接受（只看到个数字），但规则永不匹配。
+    #[test]
+    fn the_egress_condition_names_itself_as_a_luid() {
+        let s = Condition::EgressInterfaceLuid(0x600_8008_0000_0000).to_string();
+        assert!(s.contains("LUID"), "{s}");
+        assert!(s.contains("0x6008008000000"), "{s}");
     }
 
     /// **回归**：`ServicePid` 那个版本把 `ALE_APP_ID` 填成了 `UINT64(pid)`，
