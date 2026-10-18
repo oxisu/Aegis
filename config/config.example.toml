@@ -37,6 +37,33 @@ rescue_exe_path         = "C:\\Program Files\\Aegis\\aegis-rescue.exe"
 proxy_provider    = "generic"    # generic | clash_verge | sing_box | command_hooks | none
 multiwan_provider = "none"       # hypomux | command_hooks | none
 
+# ── 下游代理与守卫（docs/DOWNSTREAM-GUARD.md）──
+# Aegis 不管域名，只保证"流量只能从被批准的那条路出去"。
+# 但下游代理**自己漏了**（规则没生效）时，Aegis 必须替它把门关上。
+#
+# ⚠ mode 是**必填的语义**：两种模式的守卫判据完全不同，
+# 不配 = 守卫不工作（见 guard_gap），Aegis **不会**替你猜一个模式。
+# 猜错的后果比不守卫严重：TUN 的判据用在系统代理模式上会永远失败
+# → 守卫持续收紧 → 永久断网。
+[proxy]
+mode     = "tun"                  # tun | system_proxy
+# TUN 模式下代理虚拟网卡的 LUID（TOML 支持十六进制字面量）
+# 取值方式：Get-NetAdapter 或 aegis-sense 拓扑快照里的 luid
+tun_luid = 0                      # 0 = 未配置；此时守卫会如实报告"无法验证"
+
+# ── 永久放行名单（**受控后门**，不是普通放行规则）──
+# 它必然破坏"只有走对网卡才放行"这条判据——校园网认证页只能从校园物理
+# 网卡访问，而那正是平时要砍的路。所以约束很硬：
+#   · 只能由用户手工添加，任何自动流程 / 适配器 SPI 都不许加
+#   · 作用域钉到最小：单个目的 IP + 显式列出的端口（空 ports 会被拒绝加载）
+#   · 生成的规则权重必须高于所有阻断，否则静默失效
+#   · 每次命中都写审计——后门必须可追溯
+#
+# [[always_allow]]
+# name      = "校园网认证页"
+# remote_ip = "10.254.1.1"
+# ports     = [80, 443]
+
 [topology]
 trusted_fingerprint = ""          # 空值表示首次开机需人工分配角色
 last_confirmed_at   = ""

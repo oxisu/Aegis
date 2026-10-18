@@ -174,8 +174,9 @@ v0 可以先由用户在配置里显式给几个。
 |---|---|---|---|
 | P0 | 拆出 `ProxyRulesIneffective` 事件（与 `ProxyUnhealthy` 并列，同样 → `Degraded`） | `aegis-core::state` | ✅ 已落地 |
 | P0 | 断言 A/B/C 的裁决 + 防抖/冷却/反复故障 | `aegis-core::guard` | ✅ 已落地 |
-| P1 | 断言 B/C 的**采集**：TUN 在不在 + 默认出口是不是它 | `aegis-sense` → 填 `GuardFacts` | ⬜ 待做 |
-| P1 | 配置面 `proxy.tun_luid` / `proxy.mode` / `always_allow` | `aegis-config` | ⬜ 待做（见 §7.1） |
+| P1 | 配置面 `proxy.tun_luid` / `proxy.mode` / `always_allow` | `aegis-config` | ✅ 已落地（见 §7.1） |
+| P1 | 断言 B/C 的**采集**：TUN 在不在 + 默认出口是不是它 | `aegis-core::guard::topology_inputs` | ✅ 已落地 |
+| P1 | 编排器接线：定时采拓扑 → 判 → 喂 `GuardTracker` | `aegis-orchestrator` | ⬜ 待做 |
 | P2 | 断言 D：路由试算 canary（`GetBestRoute2`） | `aegis-sense` + SPI | ⬜ SPI 未实现 |
 | P2 | GUI 展示"为什么断" + 始终白名单管理 | Tauri | ⬜ |
 
@@ -205,6 +206,48 @@ impl GuardTracker {
 ⚠ **`Unknown` 永远不改变状态**，这是刻意的：判不了的时候收紧，会变成
 "SPI 还没实现 → 一进受控态就永久断网"。那不是 fail-closed，是**自锁死**。
 `Unknown` 要当成已知的能力缺口去补（SPI），而不是当成"先断为敬"的理由。
+
+### 6.2 采集：拓扑快照 → 事实
+
+`aegis-core::guard::topology_inputs(&TopologySnapshot)` 取出
+`(存在的网卡 LUID 列表, 默认出口 LUID)`，编排器的入口是：
+
+```rust
+let facts = cfg.guard_facts_from(&snap, proxy_reachable)?;   // None = 没配 mode
+let verdict = aegis_core::guard::evaluate(facts);
+match tracker.observe(&verdict, now_ms, GuardPolicy::default()) {
+    GuardAction::Tighten(ev)  => /* 撤掉放行 → 全都拒绝 */,
+    GuardAction::Relax(ev)    => /* 恢复按角色放行 */,
+    GuardAction::NeedsHuman{r} => /* 停在收紧态，通知用户 */,
+    GuardAction::Nothing      => {},
+}
+```
+
+⚠ 两个"0 不是网卡"的坑（都已写进测试）：
+
+- `TopologySnapshot::default_egress_luid` 用 **0 表示"没有默认路由"**，
+  直接当 LUID 传会把"整机离线"误判成"出口是 LUID 0"；
+- 配置里的 `tun_luid = 0` 同理，加载时**翻成 `None`**。否则守卫会拿 0 去
+  跟真实默认出口比，永远不等 → 判定"未生效" → 持续收紧 → **永久断网**。
+  （样例配置 `config.example.toml` 里写的就是 0。）
+
+### 6.3 配置面（`aegis-config`，已落地）
+
+```toml
+[proxy]
+mode     = "tun"          # tun | system_proxy，必填语义：不配 = 守卫不工作
+tun_luid = 0x6008008000000000
+
+[[always_allow]]          # 受控后门，见 §7.1
+name      = "校园网认证页"
+remote_ip = "10.254.1.1"
+ports     = [80, 443]
+```
+
+`Config::guard_gap()` 用来回答"守卫现在能不能工作"，三种缺口如实报告：
+未配 `mode` / TUN 模式缺 `tun_luid` / 系统代理模式等 SPI。
+**缺配置不等于配置错**：前者照常加载 + 报告缺口，后者（例如白名单条目
+`ports = []`）才按 Fail-Closed 拒绝加载。
 
 ---
 

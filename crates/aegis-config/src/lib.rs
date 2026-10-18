@@ -20,6 +20,9 @@
 //! 与 IPC 版本握手共用同一套规则，避免"IPC 认为不兼容、配置却放行了"。
 //! 特别注意本项目处于 0.x：**MINOR 不同即破坏性变更**。
 
+use std::net::Ipv4Addr;
+
+use aegis_core::guard::{collect, GuardFacts, ProxyMode};
 use aegis_version::compat::{check_compat, ParseError, Verdict, VersionTriple};
 use serde::Deserialize;
 
@@ -54,6 +57,8 @@ pub enum ConfigError {
         supported: String,
         reason: String,
     },
+    #[error("[[always_allow]] 第 {index} 条不合法：{reason}")]
+    InvalidAlwaysAllow { index: usize, reason: String },
 }
 
 /// `[meta]` 段。
@@ -77,6 +82,46 @@ pub struct Topology {
     pub last_confirmed_at: String,
 }
 
+/// `[proxy]` 段：谁是下游代理、它当前工作在哪种模式。
+///
+/// 两种模式的守卫判据**完全不同**（`docs/HOURGLASS.md` §4），
+/// 所以模式必须是显式配置，**不能猜**——见 [`Config::guard_facts`]。
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct Proxy {
+    /// 工作模式：`tun` 或 `system_proxy`。**未配置时守卫不工作**
+    /// （而不是挑一个默认值）。
+    pub mode: Option<ProxyMode>,
+    /// TUN 模式下代理虚拟网卡的 LUID。
+    ///
+    /// TOML 支持十六进制整数字面量，写 `0x6008008000000000` 更接近
+    /// `netsh` / `Get-NetAdapter` 里看到的形式。
+    pub tun_luid: Option<u64>,
+}
+
+/// `[[always_allow]]` 一条**永久放行**条目。
+///
+/// # ⚠ 这是受控后门，不是普通放行规则
+///
+/// `docs/DOWNSTREAM-GUARD.md` §7.1：它**必然**破坏"只有走对网卡才放行"
+/// 这条判据——校园网认证页只能从校园物理网卡访问，而那正是平时要砍的路。
+/// 因此约束（由 [`validate_always_allow`] 与后续 GUI 共同保证）：
+///
+/// - 只能由**用户手工**添加，任何自动流程 / 适配器 SPI 都不许加；
+/// - 作用域钉到最小：单个目的 IP + 明确列出的端口，不是"整个网段全端口"；
+/// - 生成的规则**权重必须高于所有阻断**，否则会静默失效；
+/// - 每次命中都要写审计——后门必须可追溯，否则变成暗门。
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AlwaysAllow {
+    /// 给人看的名字，会进审计与 GUI。
+    pub name: String,
+    /// 目的 IP（例如校园网认证网关）。**不是网段。**
+    pub remote_ip: Ipv4Addr,
+    /// 放行的端口。必须显式列出，空列表不合法。
+    pub ports: Vec<u16>,
+}
+
 /// 完整配置。
 #[derive(Debug, Clone)]
 pub struct Config {
@@ -85,8 +130,105 @@ pub struct Config {
     /// 不另建 DTO——两个结构必然各自漂移。
     pub roles: aegis_core::role::RolePolicy,
     pub topology: Topology,
+    /// 下游代理的工作模式与承载体（`docs/DOWNSTREAM-GUARD.md`）。
+    pub proxy: Proxy,
+    /// 永久放行名单（受控后门）。
+    pub always_allow: Vec<AlwaysAllow>,
     /// 加载过程中产生的非致命提示（补丁版本不同、涉及预发布等）。
     pub warnings: Vec<String>,
+}
+
+impl Config {
+    /// 守卫能不能工作；不能时返回缺什么。
+    ///
+    /// 与"加载失败"分开：**缺配置不等于配置错**。缺了只是守卫不工作
+    /// （并且必须让用户知道），错的才拒绝加载。
+    pub fn guard_gap(&self) -> Option<String> {
+        match self.proxy.mode {
+            None => Some("未配置 proxy.mode：不知道代理工作在哪种模式，\
+                          守卫无法选择断言"
+                .to_string()),
+            Some(ProxyMode::Tun) if self.proxy.tun_luid.is_none() => {
+                Some("已配置为 TUN 模式但缺少 proxy.tun_luid：\
+                      无法验证默认出口是不是代理承载体"
+                    .to_string())
+            },
+            Some(ProxyMode::SystemProxy) => {
+                Some("系统代理模式的守卫断言需要适配器 SPI（读系统代理开关），\
+                      尚未实现"
+                    .to_string())
+            },
+            Some(ProxyMode::Tun) => None,
+        }
+    }
+
+    /// 把配置 + 感知事实组装成守卫的事实集。
+    ///
+    /// **返回 `None` 而不是猜一个模式**：TUN 的判据是"默认出口是不是 TUN"，
+    /// 把它用在系统代理模式上会**永远失败** → 守卫持续收紧 → **永久断网**。
+    /// 猜错模式的后果比不守卫严重得多，所以这里宁可返回 `None`。
+    ///
+    /// 调用方（编排器）拿到 `None` 应当保持现状并提示用户，
+    /// 而不是自行挑一个默认值。
+    pub fn guard_facts(
+        &self,
+        proxy_reachable: bool,
+        present_luids: &[u64],
+        default_egress_luid: Option<u64>,
+    ) -> Option<GuardFacts> {
+        let mode = self.proxy.mode?;
+        Some(collect(
+            mode,
+            proxy_reachable,
+            self.proxy.tun_luid,
+            present_luids,
+            default_egress_luid,
+        ))
+    }
+
+    /// 编排器真正会用的入口：**配置 + 一次拓扑快照 → 守卫事实集**。
+    ///
+    /// `TopologySnapshot` 来自 `aegis-sense::snapshot()`（只读，不需特权）。
+    /// 有了这个入口，"采一次拓扑 → 判一次"就是一行代码，调用方不需要
+    /// 知道 `default_egress_luid` 用 0 表示离线这种内部约定。
+    pub fn guard_facts_from(
+        &self,
+        snap: &aegis_core::model::TopologySnapshot,
+        proxy_reachable: bool,
+    ) -> Option<GuardFacts> {
+        let (present, egress) = aegis_core::guard::topology_inputs(snap);
+        self.guard_facts(proxy_reachable, &present, egress)
+    }
+}
+
+/// 校验永久放行名单。**Fail-Closed：不合法就拒绝加载，绝不静默丢弃条目。**
+///
+/// 静默丢弃的后果是"用户以为加了一条白名单，其实没生效"——
+/// 而这条白名单存在的唯一理由就是让用户能打开认证页，失效等于把人锁在外面。
+fn validate_always_allow(items: &[AlwaysAllow]) -> Result<(), ConfigError> {
+    for (index, item) in items.iter().enumerate() {
+        if item.name.trim().is_empty() {
+            return Err(ConfigError::InvalidAlwaysAllow {
+                index,
+                reason: "name 不能为空（它要进审计，必须能追溯是谁开的）".to_string(),
+            });
+        }
+        if item.ports.is_empty() {
+            return Err(ConfigError::InvalidAlwaysAllow {
+                index,
+                reason: "ports 不能为空：请显式列出端口，\
+                         空列表的语义是'全端口'，那是把后门开到最大"
+                    .to_string(),
+            });
+        }
+        if item.ports.contains(&0) {
+            return Err(ConfigError::InvalidAlwaysAllow {
+                index,
+                reason: "ports 里不能出现 0（端口 0 不是合法的目的端口）".to_string(),
+            });
+        }
+    }
+    Ok(())
 }
 
 /// 反序列化用的原始结构。顶层**不** `deny_unknown_fields`：
@@ -99,6 +241,10 @@ struct Raw {
     roles: aegis_core::role::RolePolicy,
     #[serde(default)]
     topology: Topology,
+    #[serde(default)]
+    proxy: Proxy,
+    #[serde(default)]
+    always_allow: Vec<AlwaysAllow>,
 }
 
 /// 把 `MAJOR.MINOR` 补成 `MAJOR.MINOR.0` 以复用三段式版本比较。
@@ -132,6 +278,19 @@ pub fn load_str(text: &str) -> Result<Config, ConfigError> {
         message: e.to_string(),
     })?;
 
+    // 白名单要在**返回之前**校验：让它带着"看起来加成功了其实没生效"
+    // 的状态进入运行期，是最难排查的一类故障。
+    validate_always_allow(&raw.always_allow)?;
+
+    // ⚠ 0 **不是**一个合法的 LUID（与 `TopologySnapshot::default_egress_luid`
+    // 用 0 表示"无默认路由"是同一套约定）。样例配置里写 `tun_luid = 0`
+    // 表示"还没填"，必须翻成 `None`：否则守卫会拿 0 去跟真实的默认出口比，
+    // 永远不等 → 判定"规则未生效" → 持续收紧 → **永久断网**。
+    let mut proxy = raw.proxy;
+    if proxy.tun_luid == Some(0) {
+        proxy.tun_luid = None;
+    }
+
     let found = &raw.meta.config_schema_version;
     match check_schema(found)? {
         Verdict::Reject(reason) => Err(ConfigError::SchemaRejected {
@@ -148,6 +307,8 @@ pub fn load_str(text: &str) -> Result<Config, ConfigError> {
                 meta: raw.meta,
                 roles: raw.roles,
                 topology: raw.topology,
+                proxy,
+                always_allow: raw.always_allow,
                 warnings,
             })
         },
@@ -166,6 +327,7 @@ pub fn load_file(path: &std::path::Path) -> Result<Config, ConfigError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use aegis_core::guard::GuardVerdict;
     use aegis_core::role::{Confidence, InterfaceRole};
 
     const OK: &str = r#"
@@ -338,11 +500,223 @@ known_free_ssids = ["MMi"]
         assert!(c.roles.known_free_ssids.is_empty());
         assert_eq!(c.roles.fallback_role, InterfaceRole::Isolated);
         assert!(c.topology.trusted_fingerprint.is_empty());
+
+        // 样例里 `tun_luid = 0` 表示"还没填"，不能让守卫拿着 0 去比对
+        assert_eq!(c.proxy.mode, Some(ProxyMode::Tun));
+        assert_eq!(c.proxy.tun_luid, None, "0 必须被翻成未配置");
+        assert!(c.always_allow.is_empty(), "样例不应自带任何后门条目");
     }
 
     #[test]
     fn missing_file_is_an_error_not_a_default() {
         let err = load_file(std::path::Path::new("no/such/config.toml")).unwrap_err();
         assert!(matches!(err, ConfigError::Io { .. }));
+    }
+
+    // ── [proxy] / [[always_allow]]（docs/DOWNSTREAM-GUARD.md）────────────
+
+    fn with(body: &str) -> String {
+        format!("[meta]\nconfig_schema_version = \"0.1\"\n{body}")
+    }
+
+    /// 没配 `[proxy]` 的老配置必须**照常能加载**（段是可选的），
+    /// 但守卫要如实报告"缺模式"。拒绝加载旧配置是破坏性变更；
+    /// 悄悄当成"已配好"才是真危险。
+    #[test]
+    fn a_config_without_a_proxy_section_still_loads_but_reports_the_gap() {
+        let c = load_str(OK).unwrap();
+        assert!(c.proxy.mode.is_none());
+        assert!(c.proxy.tun_luid.is_none());
+        let gap = c.guard_gap().expect("未配置模式时必须报告缺口");
+        assert!(gap.contains("proxy.mode"));
+    }
+
+    #[test]
+    fn tun_mode_without_a_luid_reports_the_gap_but_still_loads() {
+        let c = load_str(&with("[proxy]\nmode = \"tun\"\n")).unwrap();
+        assert_eq!(c.proxy.mode, Some(ProxyMode::Tun));
+        assert!(c.guard_gap().unwrap().contains("proxy.tun_luid"));
+    }
+
+    /// TOML 支持十六进制字面量，LUID 用十六进制写更接近 `netsh` 里的形式。
+    #[test]
+    fn tun_luid_accepts_a_hex_literal() {
+        let c = load_str(&with("[proxy]\nmode = \"tun\"\ntun_luid = 0x6008008000000000\n")).unwrap();
+        assert_eq!(c.proxy.tun_luid, Some(0x6008_0080_0000_0000));
+        assert!(c.guard_gap().is_none(), "配齐了就不该有缺口");
+    }
+
+    /// ⚠ **`tun_luid = 0` 表示"还没填"，必须翻成 `None`**，与
+    /// `TopologySnapshot::default_egress_luid` 是同一套约定。
+    /// 若当成 `Some(0)`，守卫会永远判定"默认出口不是 TUN" → 持续收紧
+    /// → **永久断网**。样例配置里写的就是 0。
+    #[test]
+    fn a_zero_tun_luid_means_unconfigured_not_a_nic_called_zero() {
+        let c = load_str(&with("[proxy]\nmode = \"tun\"\ntun_luid = 0\n")).unwrap();
+        assert_eq!(c.proxy.tun_luid, None);
+        assert!(c.guard_gap().unwrap().contains("proxy.tun_luid"));
+    }
+
+    /// ⚠ 系统代理模式下守卫**没有可用断言**（要 SPI 读系统代理开关）。
+    /// 这里必须如实报告，不能假装能守卫。
+    #[test]
+    fn system_proxy_mode_admits_it_cannot_guard_yet() {
+        let c = load_str(&with("[proxy]\nmode = \"system_proxy\"\n")).unwrap();
+        assert!(c.guard_gap().unwrap().contains("适配器 SPI"));
+    }
+
+    /// **猜模式的后果比不守卫严重**：TUN 的判据用在系统代理模式上会永远
+    /// 失败 → 守卫持续收紧 → 永久断网。所以未配模式时返回 `None`。
+    #[test]
+    fn guard_facts_refuses_to_guess_the_mode() {
+        let c = load_str(OK).unwrap();
+        assert!(c.guard_facts(true, &[1], Some(1)).is_none());
+    }
+
+    /// 端到端：配置 → 事实 → 判决。配齐且一切吻合 → 生效。
+    #[test]
+    fn a_fully_configured_tun_proxy_yields_an_effective_verdict() {
+        let c = load_str(&with("[proxy]\nmode = \"tun\"\ntun_luid = 7\n")).unwrap();
+        let facts = c.guard_facts(true, &[1, 7], Some(7)).unwrap();
+        assert_eq!(aegis_core::guard::evaluate(facts), GuardVerdict::Effective);
+    }
+
+    /// 端到端：**默认出口不是 TUN** → 未生效（那条最值钱的静默失效）。
+    #[test]
+    fn a_default_egress_that_is_not_the_tun_is_caught_by_the_config() {
+        let c = load_str(&with("[proxy]\nmode = \"tun\"\ntun_luid = 7\n")).unwrap();
+        let facts = c.guard_facts(true, &[1, 7], Some(1)).unwrap();
+        match aegis_core::guard::evaluate(facts) {
+            GuardVerdict::Ineffective { failed, .. } => assert_eq!(
+                failed,
+                vec![aegis_core::guard::Assertion::EgressIsBearer]
+            ),
+            other => panic!("期望 Ineffective，得到 {other:?}"),
+        }
+    }
+
+    #[test]
+    fn always_allow_deserializes_into_entries() {
+        let c = load_str(&with(
+            "[[always_allow]]\nname = \"校园网认证页\"\nremote_ip = \"10.0.0.1\"\nports = [80, 443]\n",
+        ))
+        .unwrap();
+        assert_eq!(c.always_allow.len(), 1);
+        assert_eq!(c.always_allow[0].name, "校园网认证页");
+        assert_eq!(c.always_allow[0].remote_ip, Ipv4Addr::new(10, 0, 0, 1));
+        assert_eq!(c.always_allow[0].ports, vec![80, 443]);
+    }
+
+    /// ⚠ 空 ports 的语义会被理解成"全端口"，那是把后门开到最大 —— 必须拒。
+    #[test]
+    fn an_always_allow_without_ports_is_rejected() {
+        let err = load_str(&with(
+            "[[always_allow]]\nname = \"x\"\nremote_ip = \"10.0.0.1\"\nports = []\n",
+        ))
+        .unwrap_err();
+        match err {
+            ConfigError::InvalidAlwaysAllow { index, reason } => {
+                assert_eq!(index, 0);
+                assert!(reason.contains("全端口"));
+            },
+            other => panic!("期望 InvalidAlwaysAllow，得到 {other}"),
+        }
+    }
+
+    #[test]
+    fn an_always_allow_without_a_name_is_rejected() {
+        let err = load_str(&with(
+            "[[always_allow]]\nname = \"  \"\nremote_ip = \"10.0.0.1\"\nports = [80]\n",
+        ))
+        .unwrap_err();
+        assert!(matches!(err, ConfigError::InvalidAlwaysAllow { index: 0, .. }));
+    }
+
+    #[test]
+    fn port_zero_in_always_allow_is_rejected() {
+        let err = load_str(&with(
+            "[[always_allow]]\nname = \"x\"\nremote_ip = \"10.0.0.1\"\nports = [0]\n",
+        ))
+        .unwrap_err();
+        assert!(matches!(err, ConfigError::InvalidAlwaysAllow { index: 0, .. }));
+    }
+
+    /// 后门条目里的拼写错误也必须报错（`deny_unknown_fields`），
+    /// 否则用户以为自己钉死了目的 IP，实际那个字段压根没被读。
+    #[test]
+    fn a_typo_in_always_allow_is_rejected() {
+        let err = load_str(&with(
+            "[[always_allow]]\nname = \"x\"\nremote = \"10.0.0.1\"\nports = [80]\n",
+        ))
+        .unwrap_err();
+        assert!(matches!(err, ConfigError::Parse { .. }));
+    }
+
+    // ── 拓扑 → 事实（编排器的真实入口）────────────────────────────────
+
+    fn snap(egress: u64, luids: &[u64]) -> aegis_core::model::TopologySnapshot {
+        use aegis_core::model::{
+            if_flags, if_type, FingerprintScope, InterfaceInfo, OperStatus, TopologySnapshot,
+        };
+        TopologySnapshot {
+            interfaces: luids
+                .iter()
+                .map(|l| InterfaceInfo {
+                    luid: *l,
+                    index: 0,
+                    alias: String::new(),
+                    description: String::new(),
+                    mac: None,
+                    if_type: if_type::ETHERNET_CSMACD,
+                    flags: if_flags::HARDWARE,
+                    access_type: 2,
+                    tunnel_type: 0,
+                    oper_status: OperStatus::Up,
+                    ipv4: Vec::new(),
+                    gateway: Vec::new(),
+                    dhcp_server: None,
+                    ssid: None,
+                })
+                .collect(),
+            default_egress_luid: egress,
+            fingerprint: String::new(),
+            fingerprint_scope: FingerprintScope::Physical,
+            fingerprint_participants: 0,
+        }
+    }
+
+    /// 端到端：配置里写的 TUN LUID + 一次拓扑快照 → 判决。
+    /// 这是"配置 → 感知 → 守卫"整条链路的钉子。
+    #[test]
+    fn config_plus_topology_yields_the_verdict() {
+        use aegis_core::guard::{evaluate, Assertion};
+
+        let c = load_str(&with("[proxy]\nmode = \"tun\"\ntun_luid = 7\n")).unwrap();
+
+        // TUN 在，且默认出口就是它
+        let ok = c.guard_facts_from(&snap(7, &[1, 7]), true).unwrap();
+        assert_eq!(evaluate(ok), GuardVerdict::Effective);
+
+        // TUN 还在，但默认出口跑到了别的卡上（那条最阴的静默失效）
+        let drifted = c.guard_facts_from(&snap(1, &[1, 7]), true).unwrap();
+        match evaluate(drifted) {
+            GuardVerdict::Ineffective { failed, .. } => {
+                assert_eq!(failed, vec![Assertion::EgressIsBearer])
+            },
+            other => panic!("期望 Ineffective，得到 {other:?}"),
+        }
+    }
+
+    /// 整机离线（`default_egress_luid == 0`）不能被当成"出口是 LUID 0"。
+    #[test]
+    fn an_offline_topology_is_not_treated_as_a_valid_egress() {
+        use aegis_core::guard::evaluate;
+
+        let c = load_str(&with("[proxy]\nmode = \"tun\"\ntun_luid = 7\n")).unwrap();
+        let f = c.guard_facts_from(&snap(0, &[1, 7]), true).unwrap();
+        assert!(
+            !evaluate(f).is_effective(),
+            "没有默认路由时不该判为规则生效"
+        );
     }
 }

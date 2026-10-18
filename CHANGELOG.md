@@ -248,6 +248,29 @@
   - `ineffective_downstream_rules_end_up_fully_insulated` 端到端钉死需求：
     从 `Controlled` 收到该事件后，绝缘等级必须是 `Full`（全都拒绝）
 
+- **`aegis-config`：守卫的配置面 `[proxy]` + `[[always_allow]]`**
+  - `[proxy] mode` 是**必填语义**：两种模式判据完全不同，不配 = 守卫不工作，
+    `guard_facts` 返回 `None` 而**不猜**模式。猜错比不守卫更严重——
+    TUN 的判据用在系统代理模式上会永远失败 → 持续收紧 → **永久断网**
+  - `Config::guard_gap()` 如实报告三种缺口（未配 mode / TUN 模式缺 tun_luid /
+    系统代理模式等 SPI）。**缺配置 ≠ 配置错**：前者照常加载 + 报告，
+    后者（白名单 `ports = []` 等）按 Fail-Closed 拒绝加载
+  - ⚠ `tun_luid = 0` 加载时**翻成 `None`**（与 `default_egress_luid` 用 0 表示
+    离线同一套约定）。否则守卫拿 0 去跟真实默认出口比 → 永远不等 → 永久断网
+  - `guard_facts_from(&TopologySnapshot, ..)`：编排器一行拿到"配置+拓扑→事实"
+  - `[[always_allow]]` 校验：name 非空、ports 非空（空=全端口，把后门开到最大）、
+    不允许 0 端口、字段拼错报错。**不允许静默丢弃条目**——白名单存在的唯一
+    理由就是让人能打开认证页，静默失效等于把人锁在外面
+
+- **`aegis-core::guard::topology_inputs`：拓扑快照 → 守卫事实**
+  - ⚠ `default_egress_luid` 用 **0 表示"无默认路由"**，不是合法 LUID。
+    直接当 LUID 传会把"整机离线"误判成"出口是 LUID 0"
+  - `collect()` 把 `bearer_present`（派生量）收在一处，避免各调用方各算一遍
+    （典型错误：`expected` 为 None 时仍拿默认值比对，凭空造出"承载体在"）
+
+- **`config.example.toml`**：补上 `[proxy]` 与注释掉的 `[[always_allow]]`，
+  写清 mode 为什么不能猜、后门为什么受控
+
 - **`docs/DOWNSTREAM-GUARD.md`：下游规则失效时的兜底方案**
   - 需求：**"检测到规则未生效 → 帮下游软件兜底，全都拒绝掉"**
   - ⚠ **兜底那一半早就有了**：`next(Controlled, ProxyUnhealthy) = Degraded`，

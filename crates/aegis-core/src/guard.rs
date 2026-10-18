@@ -34,7 +34,11 @@ use std::fmt;
 use crate::state::Event;
 
 /// 当前代理的工作模式。两种模式要的判据**不同**（HOURGLASS §4）。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+///
+/// `Deserialize` 是为了让 `aegis-config` 直接把它反序列化进配置，
+/// 不另建一个必然漂移的镜像枚举（与 `role::RolePolicy` 的做法一致）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum ProxyMode {
     /// TUN 模式：应用 socket 仍连真实远端 IP，系统按路由把包送进 TUN。
     /// 判据是"默认出口是不是 TUN"。
@@ -114,6 +118,47 @@ impl GuardVerdict {
             Self::Ineffective { reason, .. } => reason.clone(),
             Self::Unknown { reason } => reason.clone(),
         }
+    }
+}
+
+/// 从拓扑快照里取出守卫需要的两项原始事实：
+/// `(当前存在的网卡 LUID 列表, 系统默认出口 LUID)`。
+///
+/// ⚠ **`default_egress_luid` 用 `0` 表示"没有默认路由"**，它**不是**一张
+/// 合法网卡的 LUID。直接把 0 当 LUID 传下去，"整机离线"会被误判成
+/// "默认出口是 LUID 0"，进而得出一个看起来正常的结论——而实际是
+/// 根本没有出口。这里显式把 0 翻成 `None`。
+pub fn topology_inputs(snap: &crate::model::TopologySnapshot) -> (Vec<u64>, Option<u64>) {
+    let present = snap.interfaces.iter().map(|i| i.luid).collect();
+    let egress = if snap.default_egress_luid == 0 {
+        None
+    } else {
+        Some(snap.default_egress_luid)
+    };
+    (present, egress)
+}
+
+/// 从采集到的原始值组装事实集。
+///
+/// 单独提供一个构造函数、而不是让调用方直接填 [`GuardFacts`]，是为了把
+/// `bearer_present` 这个**派生量**收在一处：它的含义是"期望的 LUID 在不在
+/// 当前拓扑里"，让每个调用方各算一遍，必然有人算错（典型错误是在
+/// `expected` 为 `None` 时照样拿一个默认值去比对，凭空造出"承载体在"）。
+pub fn collect(
+    mode: ProxyMode,
+    proxy_reachable: bool,
+    expected_bearer_luid: Option<u64>,
+    present_luids: &[u64],
+    default_egress_luid: Option<u64>,
+) -> GuardFacts {
+    GuardFacts {
+        mode,
+        proxy_reachable,
+        expected_bearer_luid,
+        bearer_present: expected_bearer_luid
+            .map(|want| present_luids.contains(&want))
+            .unwrap_or(false),
+        default_egress_luid,
     }
 }
 
@@ -317,6 +362,97 @@ mod tests {
             GuardVerdict::Ineffective { failed, .. } => failed.clone(),
             _ => panic!("期望 Ineffective，得到 {v:?}"),
         }
+    }
+
+    // ── topology_inputs：0 不是一张网卡 ───────────────────────────────
+
+    fn snap(egress: u64, luids: &[u64]) -> crate::model::TopologySnapshot {
+        use crate::model::{if_flags, if_type, FingerprintScope, InterfaceInfo, OperStatus};
+        crate::model::TopologySnapshot {
+            interfaces: luids
+                .iter()
+                .map(|l| InterfaceInfo {
+                    luid: *l,
+                    index: 0,
+                    alias: String::new(),
+                    description: String::new(),
+                    mac: None,
+                    if_type: if_type::ETHERNET_CSMACD,
+                    flags: if_flags::HARDWARE,
+                    access_type: 2,
+                    tunnel_type: 0,
+                    oper_status: OperStatus::Up,
+                    ipv4: Vec::new(),
+                    gateway: Vec::new(),
+                    dhcp_server: None,
+                    ssid: None,
+                })
+                .collect(),
+            default_egress_luid: egress,
+            fingerprint: String::new(),
+            fingerprint_scope: FingerprintScope::Physical,
+            fingerprint_participants: 0,
+        }
+    }
+
+    /// ⚠ 这条是 `topology_inputs` 存在的全部理由：0 表示"无默认路由"，
+    /// 必须翻成 `None`；传成 `Some(0)` 会让"离线"被当成"出口是 LUID 0"。
+    #[test]
+    fn a_zero_default_egress_means_none_not_a_nic_called_zero() {
+        let (_, egress) = topology_inputs(&snap(0, &[1, 7]));
+        assert_eq!(egress, None);
+    }
+
+    #[test]
+    fn topology_inputs_report_present_luids_and_the_real_egress() {
+        let (present, egress) = topology_inputs(&snap(7, &[1, 7, 9]));
+        assert_eq!(present, vec![1, 7, 9]);
+        assert_eq!(egress, Some(7));
+    }
+
+    /// 端到端：拓扑 → 事实 → 判决。整机离线（没有默认路由）时
+    /// 不该给出"生效"的结论。
+    #[test]
+    fn an_offline_machine_is_not_reported_as_effective() {
+        let (present, egress) = topology_inputs(&snap(0, &[1, 7]));
+        let f = collect(ProxyMode::Tun, true, Some(7), &present, egress);
+        assert!(!evaluate(f).is_effective());
+    }
+
+    // ── collect：派生量只算一次 ───────────────────────────────────────
+
+    #[test]
+    fn collect_marks_the_bearer_present_only_when_the_luid_is_in_the_topology() {
+        let f = collect(
+            ProxyMode::Tun,
+            true,
+            Some(7),
+            &[1, 7, 9],
+            Some(7),
+        );
+        assert!(f.bearer_present);
+        assert_eq!(evaluate(f), GuardVerdict::Effective);
+    }
+
+    /// TUN 没了之后"默认出口 == TUN"也必然不成立，所以**两条都会失败**。
+    /// 只报第一条会让运维以为只是网卡掉了、而路由没改——信息量就丢了。
+    #[test]
+    fn collect_marks_the_bearer_absent_when_its_luid_vanished() {
+        let f = collect(ProxyMode::Tun, true, Some(7), &[1, 9], Some(1));
+        assert!(!f.bearer_present);
+        assert_eq!(
+            failed_of(&evaluate(f)),
+            vec![Assertion::BearerPresent, Assertion::EgressIsBearer]
+        );
+    }
+
+    /// 没有期望的 LUID 时**不能**凭空声称"承载体在"——那会让守卫在
+    /// 完全没配好的情况下少报一条失败。
+    #[test]
+    fn collect_without_an_expected_luid_cannot_claim_presence() {
+        let f = collect(ProxyMode::Tun, true, None, &[1, 7], Some(1));
+        assert!(!f.bearer_present);
+        assert!(!evaluate(f).is_effective(), "没配置就该是 Unknown");
     }
 
     // ── 评估：明确失败 ────────────────────────────────────────────────
