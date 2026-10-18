@@ -26,7 +26,7 @@ pub mod plan;
 pub mod session;
 
 pub use apply::{
-    apply, has_boot_rules, mappable, preflight, probe_add_then_remove, rollback,
+    add_persistent, apply, has_boot_rules, mappable, preflight, probe_add_then_remove, rollback,
     unmappable_conditions, ApplyReceipt, ApplyTicket, ConfirmError, Phase, ProbeResult,
     RefuseReason, CONFIRM_WINDOW_MS,
 };

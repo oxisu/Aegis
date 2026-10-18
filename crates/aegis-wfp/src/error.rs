@@ -24,6 +24,10 @@ pub enum WfpError {
     EngineClose(u32),
     /// `FwpmFilterAdd0` 失败
     FilterAdd(u32),
+    /// `FwpmFilterDeleteById0` / `FwpmProviderDeleteByKey0` 失败
+    Delete(u32),
+    /// `FwpmProviderAdd0` 失败
+    ProviderAdd(u32),
     /// 遇到了无法精确映射成 WFP 字段的条件。
     ///
     /// ⚠ 出现这个错误意味着**没有下发任何规则**——宁可不装，
@@ -43,7 +47,9 @@ impl WfpError {
             | Self::EnumHandle(c)
             | Self::Enumerate(c)
             | Self::EngineClose(c)
-            | Self::FilterAdd(c) => c,
+            | Self::FilterAdd(c)
+            | Self::Delete(c)
+            | Self::ProviderAdd(c) => c,
             Self::UnsupportedCondition { .. } => 0,
         }
     }
@@ -76,6 +82,8 @@ impl fmt::Display for WfpError {
             Self::Enumerate(_) => "枚举",
             Self::EngineClose(_) => "关闭 WFP 引擎",
             Self::FilterAdd(_) => "下发 WFP 规则",
+            Self::Delete(_) => "删除 WFP 对象",
+            Self::ProviderAdd(_) => "注册 WFP Provider",
             Self::UnsupportedCondition { name } => {
                 return write!(f, "条件无法精确映射到 WFP 字段：{name}（本次未下发任何规则）")
             },

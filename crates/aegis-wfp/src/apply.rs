@@ -356,7 +356,40 @@ pub fn rollback(session: &Session, filter_ids: &[u64]) -> Result<usize, WfpError
 }
 
 #[cfg_attr(test, mutants::skip)]
+/// 装一条**持久化**过滤器（P0 验证实验专用，尚未进入正式下发路径）。
+///
+/// # ⚠ 这是本项目第一次有能力装"进程死了还在"的东西
+///
+/// [docs/PERSISTENT-CAGE.md](../docs/PERSISTENT-CAGE.md) 论证了持久化底板
+/// 是"别人杀了我也不放开"的唯一可行解，但代价是**装错了要重启才救得回来**。
+/// 所以在它进入正式下发路径之前，必须先回答三件事，而这三件事只有装上才知道：
+///
+/// 1. 本机到底让不让装（`FWPM_FILTER_FLAG_PERSISTENT` 需要非动态会话）；
+/// 2. 进程退出后它是不是**真的还在**；
+/// 3. 能不能可靠地**再删掉**（删不掉就是变砖）。
+///
+/// 只有 `examples/persist_probe` 调它。正式路径仍然只走 [`apply`]（动态会话）。
+///
+/// ⚠ **调用方必须自己保证删除路径先于安装路径存在。**
+/// 这个函数不提供任何兜底清理——它无法提供：持久对象的意义就是不受进程生死影响。
+pub fn add_persistent(
+    session: &Session,
+    spec: &FilterSpec,
+    provider_key: Option<GUID>,
+) -> Result<u64, WfpError> {
+    add_one_with_flags(session, spec, wfp::FWPM_FILTER_FLAG_PERSISTENT.0, provider_key)
+}
+
 fn add_one(session: &Session, spec: &FilterSpec) -> Result<u64, WfpError> {
+    add_one_with_flags(session, spec, 0, None)
+}
+
+fn add_one_with_flags(
+    session: &Session,
+    spec: &FilterSpec,
+    extra_flags: u32,
+    provider_key: Option<GUID>,
+) -> Result<u64, WfpError> {
     let mut name_w: Vec<u16> = spec.name.encode_utf16().chain(std::iter::once(0)).collect();
 
     // ── 第一遍：把每条条件翻译成 (字段 GUID, 匹配类型, 值) ──────────────
@@ -501,6 +534,16 @@ fn add_one(session: &Session, spec: &FilterSpec) -> Result<u64, WfpError> {
     filter.displayData.name = PWSTR(name_w.as_mut_ptr());
     filter.layerKey = spec.layer.guid();
     filter.subLayerKey = GUID::zeroed();
+    // 归属 Provider：只有持久化实验会传。逃生舱要能"按 Provider 找到自己装的
+    // 全部对象"，所以装的时候就得打上标记。
+    // ⚠ `providerKey` 是 `*mut GUID`（**不是内联值**），所以得自己持有这块
+    // 内存并活到 `FwpmFilterAdd0` 返回之后——和 blob / uint64 一个道理。
+    let mut owned_provider_key = provider_key.unwrap_or_else(GUID::zeroed);
+    filter.providerKey = &mut owned_provider_key;
+    // `extra_flags` 只会是 `PERSISTENT`（持久化实验）或 0（常规动态下发）。
+    // 刻意**不做** `BOOTTIME`：那是唯一能跨 BFE 启动生效的标志，代价是装错即砖，
+    // 见 docs/PERSISTENT-CAGE.md §9。
+    filter.flags = wfp::FWPM_FILTER_FLAGS(extra_flags);
     filter.weight = weight;
     filter.numFilterConditions = conds.len() as u32;
     filter.filterCondition = conds.as_mut_ptr();

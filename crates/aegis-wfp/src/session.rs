@@ -64,6 +64,32 @@ impl Session {
     /// 需要提权，无法在单测里覆盖，故跳过变异（理由见模块头）。
     #[cfg_attr(test, mutants::skip)]
     pub fn open(session_name: &str) -> Result<Self, WfpError> {
+        Self::open_with_flags(session_name, wfp::FWPM_SESSION_FLAG_DYNAMIC)
+    }
+
+    /// 打开一个**非动态**会话。只有这种会话才装得了持久化对象。
+    ///
+    /// # ⚠ 这是本项目第一次有能力装"进程死了还在"的东西
+    ///
+    /// 动态会话不是"倾向临时"，而是**结构上禁止**持久化——微软文档写明
+    /// "对象仅在使用动态会话句柄添加时才是动态的"，也就是动态会话里的对象
+    /// 根本进不了 BFE 的持久存储。所以想要"死了也不放开"，第一步就是开一个
+    /// 不带 `FWPM_SESSION_FLAG_DYNAMIC` 的会话。
+    ///
+    /// 代价也随之而来：**这个会话里装的东西不会随进程退出而消失**。
+    /// 所以它是 P0 验证实验专用（`examples/persist_probe`），
+    /// 正式下发路径仍然只走 [`Self::open`]。
+    #[cfg_attr(test, mutants::skip)]
+    pub fn open_persistent(session_name: &str) -> Result<Self, WfpError> {
+        Self::open_with_flags(session_name, 0)
+    }
+
+    /// ⚠ `flags` 是裸 `u32`：windows crate 既没生成 `FWPM_SESSION_FLAGS`
+    /// 这个 newtype，也没有 `FWPM_SESSION_FLAG_NONE`。
+    /// 于是"非动态会话"就是 **flags = 0** —— 这个 0 不是"没填"，
+    /// 它是一个有意义的取值，别把它当成默认值随手改掉。
+    #[cfg_attr(test, mutants::skip)]
+    fn open_with_flags(session_name: &str, flags: u32) -> Result<Self, WfpError> {
         let mut name_w: Vec<u16> = session_name
             .encode_utf16()
             .chain(std::iter::once(0))
@@ -75,7 +101,7 @@ impl Session {
                 name: PWSTR(name_w.as_mut_ptr()),
                 description: PWSTR::null(),
             },
-            flags: wfp::FWPM_SESSION_FLAG_DYNAMIC,
+            flags,
             txnWaitTimeoutInMSec: 0,
             processId: 0,
             sid: ptr::null_mut(),
@@ -105,6 +131,81 @@ impl Session {
         } else {
             Err(kind(rc))
         }
+    }
+
+    /// 注册一个 Provider，可选地**绑定一个 Windows 服务名**。
+    ///
+    /// # 为什么这个参数值得单独存在
+    ///
+    /// 微软文档里有一条此前没被记录、但几乎是为本项目量身定做的机制：
+    ///
+    /// > 服务启动时，BFE 只在以下情况才把持久对象加进系统——
+    /// > 该对象没有关联 Provider，**或**关联的 Provider 没有服务名，
+    /// > **或关联的服务被设为自动启动（auto-start）**。
+    ///
+    /// 也就是说，把持久化底板挂到"serviceName = aegisd"的 Provider 上，
+    /// **禁用 aegisd 服务 + 重启**就是一条文档化的、自带的逃生通道，
+    /// 顺带还给了干净的卸载语义（不会出现"卸载了但网还是断"）。
+    ///
+    /// ⚠ 这条语义是本次调研挖出来的，**必须实测确认**（P0 第 2 项），
+    /// 因为它要重启才能验证，不能只凭文档写进代码。
+    #[cfg_attr(test, mutants::skip)]
+    pub fn add_provider(
+        &self,
+        key: GUID,
+        name: &str,
+        service_name: Option<&str>,
+        persistent: bool,
+    ) -> Result<(), WfpError> {
+        let mut name_w: Vec<u16> = name.encode_utf16().chain(std::iter::once(0)).collect();
+        let mut svc_w: Option<Vec<u16>> = service_name
+            .map(|s| s.encode_utf16().chain(std::iter::once(0)).collect());
+
+        let flags = if persistent {
+            wfp::FWPM_PROVIDER_FLAG_PERSISTENT
+        } else {
+            0
+        };
+
+        let provider = wfp::FWPM_PROVIDER0 {
+            providerKey: key,
+            displayData: wfp::FWPM_DISPLAY_DATA0 {
+                name: PWSTR(name_w.as_mut_ptr()),
+                description: PWSTR::null(),
+            },
+            flags,
+            providerData: wfp::FWP_BYTE_BLOB::default(),
+            serviceName: match &mut svc_w {
+                Some(v) => PWSTR(v.as_mut_ptr()),
+                None => PWSTR::null(),
+            },
+        };
+
+        let rc = unsafe { wfp::FwpmProviderAdd0(self.handle(), &provider, None) };
+        Self::check(rc, WfpError::ProviderAdd)
+    }
+
+    /// 删除一个 Provider。
+    ///
+    /// ⚠ 微软文档明确：**必须先删掉所有引用它的对象，才能删它**（不级联）。
+    /// 而若干第三方代码注释声称"删 Provider 会级联删掉它的过滤器"——两者矛盾。
+    /// 因此我们的逃生舱一律按**先删 filter 再删 provider** 的顺序实现，
+    /// 绝不依赖级联。P0 第 3 项就是来实测这件事的。
+    #[cfg_attr(test, mutants::skip)]
+    pub fn delete_provider(&self, key: GUID) -> Result<(), WfpError> {
+        let rc = unsafe { wfp::FwpmProviderDeleteByKey0(self.handle(), &key) };
+        Self::check(rc, WfpError::Delete)
+    }
+
+    /// 列出名字里带 `needle` 的过滤器（用于逃生舱的"删完再复核一遍"）。
+    #[cfg_attr(test, mutants::skip)]
+    pub fn filters_named(&self, needle: &str) -> Result<Vec<crate::model::FilterSummary>, WfpError> {
+        Ok(self
+            .snapshot()?
+            .filters
+            .into_iter()
+            .filter(|f| f.name.contains(needle))
+            .collect())
     }
 
     /// 采集一份只读快照。
@@ -175,10 +276,19 @@ impl Session {
             Self::check(rc, WfpError::Enumerate)?;
 
             let rows = rows_of(entries, count);
+            // ⚠ **必须先翻译成自有数据，再释放。**
+            // `rows` 是**借用**（`Vec<Option<&FWPM_PROVIDER0>>`），指向引擎
+            // 分配的那一块内存。先 free 再 collect 就是 use-after-free——
+            // 真机上的表现是 `snapshot()` 直接段错误。
+            //
+            // 这个 bug 潜伏到 P0 持久化实验才暴露：因为在那之前没有任何路径
+            // 真的调过 `snapshot()`，而"看起来能编译、单测覆盖的是翻译层、
+            // 胶水层跳过变异"三重因素把它盖住了。
+            let out = collect_providers(&rows);
             if !entries.is_null() {
                 wfp::FwpmFreeMemory0(&mut entries as *mut _ as *mut *mut core::ffi::c_void);
             }
-            Ok(collect_providers(&rows))
+            Ok(out)
         }
     }
 
@@ -203,10 +313,12 @@ impl Session {
             Self::check(rc, WfpError::Enumerate)?;
 
             let rows = rows_of(entries, count);
+            // 同上：**先翻译再释放**。`rows` 是借用，free 之后它就悬垂了。
+            let out = collect_filters(&rows, providers);
             if !entries.is_null() {
                 wfp::FwpmFreeMemory0(&mut entries as *mut _ as *mut *mut core::ffi::c_void);
             }
-            Ok(collect_filters(&rows, providers))
+            Ok(out)
         }
     }
 }
