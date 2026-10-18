@@ -229,6 +229,56 @@ fn main() {
     println!("   {:?}", aegis_audit::read_records(&path).err());
     println!();
 
+    // ── 10. 证据导出：CSV ────────────────────────────────────────────
+    println!("10. 证据导出 —— CSV（自证用）：");
+    // 用内存里那份干净的：文件在上一步已被故意改坏，读回来是空的
+    let records: Vec<aegis_audit::Record> = events
+        .iter()
+        .zip(links.iter())
+        .map(|(e, l)| aegis_audit::Record {
+            event: e.clone(),
+            link: *l,
+        })
+        .collect();
+    let head = records.last().map(|r| r.link.hash).unwrap_or(chain::GENESIS);
+    println!("   {}", "─".repeat(60));
+    for line in aegis_audit::to_csv(&records).trim_end().split('\n') {
+        // 列很多，只打前几列，能看清结构就行
+        let short: Vec<&str> = line.split(',').take(6).collect();
+        println!("   {}", short.join(","));
+    }
+    println!("   {}（后略：链节哈希等列）", "─".repeat(60));
+    println!();
+
+    // ── 11. 证据包：自带校验结论 ─────────────────────────────────────
+    println!("11. 证据包（自带链头与校验结论，对外给得出手）：");
+    let pkg = aegis_audit::EvidencePackage::build(records, head, 1_760_779_587_000);
+    println!("   Aegis 版本：{}", pkg.aegis_version);
+    println!("   链头      ：{}…", &chain::hex(&pkg.chain_head)[..16]);
+    println!("   条数      ：{}", pkg.chain_len);
+    println!("   校验      ：{}", if pkg.verified { "通过" } else { "**未通过**" });
+    let json = aegis_audit::to_json(&pkg);
+    println!("   JSON {} 字节，前 2 行：", json.len());
+    for line in json.lines().take(2) {
+        println!("     {}", line.trim());
+    }
+    println!();
+
+    // ── 12. 只导出被拦下的 ───────────────────────────────────────────
+    println!("12. 自证场景常用：只导出被本地拦下的");
+    let all = sample_events();
+    let kept: Vec<_> = all
+        .iter()
+        .filter(|e| aegis_audit::ExportFilter::blocked_only().keep(e))
+        .collect();
+    println!(
+        "   {} 条里有 {} 条是被拦下的（放行 {} 条）",
+        all.len(),
+        kept.len(),
+        all.len() - kept.len()
+    );
+    println!();
+
     let _ = std::fs::remove_dir_all(&dir);
     println!("   临时目录已清理：{}", dir.display());
     println!();

@@ -37,6 +37,7 @@ pub mod chain;
 pub mod decode;
 pub mod encode;
 pub mod event;
+pub mod export;
 pub mod ring;
 pub mod store;
 
@@ -45,6 +46,7 @@ pub use decode::{decode, DecodeError};
 pub use encode::{canonical_bytes, CANONICAL_VERSION};
 pub use event::{Action, AuditEvent, Protocol};
 pub use ring::AuditRing;
+pub use export::{iso8601_utc, to_csv, to_json, EvidencePackage, ExportFilter};
 pub use store::{
     read_records, read_records_with, AuditLog, ReadCtx, ReadError, Record, LOG_MAGIC, LOG_VERSION,
 };
