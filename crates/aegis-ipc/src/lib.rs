@@ -35,10 +35,12 @@
 //! ```
 
 pub mod endpoint;
+pub mod ctl;
 pub mod pipe;
 pub mod token;
 pub mod version;
 
+pub use ctl::{Status, StatusError, REQ_PING, REQ_STATUS, STATUS_V1};
 pub use endpoint::{PIPE_NAME, PIPE_SDDL, TOKEN_FILE_SDDL};
 pub use pipe::{PipeClient, PipeEnd, PipeError, PipeServer};
 pub use token::{constant_time_eq, IpcToken, TokenError, TOKEN_BYTES, TOKEN_HEX_LEN};

@@ -1,0 +1,21 @@
+[package]
+name        = "aegisd"
+description = "Aegis 守护进程：最小可运行链路（配置 → IPC → 感知 → 裁决 → 审计），WFP 只干跑不下发"
+version.workspace      = true
+edition.workspace      = true
+rust-version.workspace = true
+license.workspace      = true
+authors.workspace      = true
+
+[dependencies]
+aegis-version = { workspace = true }
+aegis-model   = { workspace = true }
+aegis-config  = { workspace = true }
+aegis-core    = { workspace = true }
+aegis-sense   = { workspace = true }
+aegis-wfp     = { workspace = true }
+aegis-audit   = { workspace = true }
+aegis-ipc     = { workspace = true }
+
+[dev-dependencies]
+mutants = { workspace = true }

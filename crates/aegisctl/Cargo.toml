@@ -1,0 +1,15 @@
+[package]
+name        = "aegisctl"
+description = "Aegis 控制端：经命名管道与 aegisd 握手、鉴权并查询状态"
+version.workspace      = true
+edition.workspace      = true
+rust-version.workspace = true
+license.workspace      = true
+authors.workspace      = true
+
+[dependencies]
+aegis-version = { workspace = true }
+aegis-ipc     = { workspace = true }
+
+[dev-dependencies]
+mutants = { workspace = true }
