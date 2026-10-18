@@ -8,11 +8,28 @@ license.workspace      = true
 authors.workspace      = true
 
 [dependencies]
-# 感知层提供拓扑事实；本 crate 只在其之上做策略裁决，不重复采集
-aegis-sense   = { workspace = true }
+# ⚠ 只依赖**数据模型**，不依赖 aegis-sense。
+#
+# 本 crate 是纯策略层，只需要 InterfaceInfo / InterfaceKind / if_flags 等几个
+# 类型。原先为了这几个类型依赖了整个 aegis-sense，结果把 windows crate
+# （WFP + IP Helper 全量绑定）拖进策略层的依赖图：改一行代码的增量构建
+# 从 0.7s 涨到 22.5s，而且"策略层可在普通用户下干跑"这条硬约束名存实亡
+# ——光是编译就要先把 Win32 绑定编一遍。
+#
+# 反过来也一样成立：aegis-sense 绝不依赖本 crate（事实不依赖策略）。
+aegis-model   = { workspace = true }
 aegis-version = { workspace = true }
 thiserror     = { workspace = true }
 serde         = { workspace = true }
+
+[dev-dependencies]
+# 只有 example `plan` 需要真的采一次本机拓扑——那是"接线演示"，不是库逻辑。
+# 放在 dev-dependencies 里，是为了让**库与单测**永不碰 Win32：
+# aegis-core 的正式依赖只有零依赖的 aegis-model。
+#
+# ⚠ 别把它挪回 [dependencies]：那会把 windows crate 拉回策略层，
+#   增量构建 0.7s → 22.5s，且"策略层可只读干跑"再次名存实亡。
+aegis-sense = { workspace = true }
 
 [[example]]
 name = "plan"

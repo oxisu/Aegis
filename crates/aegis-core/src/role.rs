@@ -13,8 +13,8 @@
 
 use std::fmt;
 
-use aegis_sense::model::InterfaceInfo;
-use aegis_sense::model::InterfaceKind;
+use aegis_model::InterfaceInfo;
+use aegis_model::InterfaceKind;
 
 /// 网卡角色（§20.5）。
 ///
@@ -323,7 +323,7 @@ impl RoleTable {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use aegis_sense::model::{if_flags, if_type, OperStatus};
+    use aegis_model::{if_flags, if_type, OperStatus};
 
     fn nic(
         luid: u64,

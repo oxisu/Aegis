@@ -21,9 +21,11 @@
 //! 既不含 `hotspot` 关键字，网关也不在校园网段。声明权留给用户，
 //! 代码不替用户猜。
 
+// 采集侧单独引：aegis-core 本身只依赖零依赖的数据模型，不碰 Win32。
 use aegis_core::role::{adjudicate_all, Confidence, RolePolicy, RoleTable};
 use aegis_core::state::{insulation, next, Event, State};
 use aegis_core::version;
+use aegis_sense::snapshot;
 
 fn main() {
     println!("╔══════════════════════════════════════════════════════════════╗");
@@ -55,7 +57,7 @@ fn main() {
         }
     }
 
-    let snap = match aegis_core::sense::snapshot() {
+    let snap = match snapshot() {
         Ok(s) => s,
         Err(e) => {
             eprintln!("[FATAL] 拓扑采集失败: {e}");

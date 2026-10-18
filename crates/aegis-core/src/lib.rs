@@ -18,7 +18,9 @@
 pub mod role;
 pub mod state;
 
-pub use aegis_sense as sense;
+// 数据模型随本 crate 一起透出：调用方拿到策略裁决所需的类型，
+// 不必再单独依赖 aegis-model，也不会因此碰到 aegis-sense / windows。
+pub use aegis_model as model;
 pub use aegis_version as version;
 
 pub use self::role::{

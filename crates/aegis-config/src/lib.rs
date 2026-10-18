@@ -296,7 +296,7 @@ allow_multiple_free = false
     /// 这条把"配置文件 → 策略 → 裁决"整条链路钉死，避免任何一环被改坏。
     #[test]
     fn declared_hotspot_ssid_reaches_adjudication() {
-        use aegis_core::sense::model::{if_flags, if_type, InterfaceInfo, OperStatus};
+        use aegis_core::model::{if_flags, if_type, InterfaceInfo, OperStatus};
 
         let nic = InterfaceInfo {
             luid: 1,
