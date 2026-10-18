@@ -171,7 +171,12 @@ cargo mutants --file crates/aegis-core/src/state.rs -v
   根本不需要它。注意 `profile` 写在配置文件里也会被忽略，只能走命令行。
 - **要压墙钟时间只能换机器并行**：CI 的 mutation job 用
   `matrix.shard: [1..8]` + `--shard k/8`，8 个 runner 各跑一份。
-- 本地只想验证刚改的文件时，用 `--file` 限定，或用 `--shard 1/8` 先跑一小批。
+- **限定范围要用 `-F` 正则，不要用 `--file`**。配置里的 `examine_globs`
+  会把 `--file` 覆盖掉，传了跟没传一样（实测 `--file plan.rs` 仍是 193 个
+  变异体；`-F 'plan\.rs'` 才真的限定到 94 个）。
+- **日常就用 `tools/mutate-changed.sh`**：它自动取 `git diff` 里改动的
+  源码文件拼成正则，只跑那几个文件，通常几分钟。
+  全工作区 572 个变异体留给 CI 分片去跑。
 
 ### CI 中的变异测试
 

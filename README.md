@@ -44,7 +44,7 @@ Aegis 建立一张**独立于任何上层代理软件的 OS 级安全底座**：
 | `aegis-sense` | ✅ 可用 | 感知层：拓扑采集 / 接口分类 / 默认出口裁决 / SSID / 拓扑指纹 / 拓扑差分 |
 | `aegis-core` | ✅ 可用 | 角色裁决（§20.5）+ 状态机（§26） |
 | `aegis-wfp` | 🚧 只读 + 干跑 | WFP 状态勘察（枚举 / Provider / **持久背板审计**）+ **绝缘笼规则计划与静态自检**（未下发） |
-| `aegis-fuse` | ⬜ 待建 | 微秒级网络端口熔断器 |
+| `aegis-fuse` | 🚧 纯逻辑阶段 | 拓扑震荡熔断器：去抖 + **先熔断后分析**（`NotifyIpInterfaceChange` 待接） |
 | `aegis-audit` | ⬜ 待建 | 审计与证据链落盘 |
 | `aegis-ipc` | ✅ 可用 | 本地 IPC 帧编解码 + 版本握手（未建管道） |
 | `aegis-config` | ✅ 可用 | 配置加载与 schema 版本校验（Fail-Closed） |
@@ -74,6 +74,10 @@ FwpmEngineOpen0（动态会话）+ FwpmFilterEnum0 / FwpmProviderEnum0
 绝缘笼（纯逻辑，**不下发任何东西**）：
 CagePolicy ──cage_plan()──▶ Vec<FilterSpec> ──verify()──▶ 结论
         └─ 先回答"这份规则会不会把我自己锁死"，再谈下发
+
+拓扑震荡熔断（纯逻辑，时间从外部注入）：
+网口变动 ──ShockDebouncer::on_change()──▶ 立刻熔断（不等去抖）
+        └─ 去抖窗口过后 ──▶ 只叫醒异步 Worker **一次**去重算
 ```
 
 ## 目录结构
@@ -98,6 +102,7 @@ Aegis/
     │   └── examples/dry_run.rs
     ├── aegis-core/         # 编排核心（纯逻辑）：角色裁决 / 状态机
     │   └── examples/plan.rs
+    ├── aegis-fuse/         # 拓扑震荡熔断器（纯逻辑）：去抖 + 先熔断后分析
     ├── aegis-wfp/          # OS 级底座（只读勘察 + 规则计划）：枚举 / 持久背板审计 / 绝缘笼计划
     │   ├── examples/wfp_inspect.rs   # 只读勘察（需管理员）
     │   └── examples/wfp_plan.rs      # 绝缘笼干跑（无需管理员，不装任何规则）
