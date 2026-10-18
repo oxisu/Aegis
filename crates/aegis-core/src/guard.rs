@@ -61,9 +61,12 @@ pub enum Assertion {
 impl fmt::Display for Assertion {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let s = match self {
-            Self::ProxyReachable => "代理可达",
-            Self::BearerPresent => "承载体在",
-            Self::EgressIsBearer => "默认出口指向承载体",
+        // ⚠ 这些是**检查项的名字**，会被拼进"未通过 [..] [..]"里。
+        // 别写成"承载体在"这种看上去像结论的说法——它会让
+        // "未生效：承载体在、默认出口指向承载体 断言失败"读成"承载体在（是好的）"。
+        Self::ProxyReachable => "代理可达",
+        Self::BearerPresent => "承载体存在",
+        Self::EgressIsBearer => "默认出口=承载体",
         };
         f.write_str(s)
     }
@@ -209,9 +212,18 @@ pub fn evaluate(facts: GuardFacts) -> GuardVerdict {
     GuardVerdict::Effective
 }
 
+/// 把失败的检查项拼成人话。
+///
+/// ⚠ 刻意用 `[..]` 把每一项框起来并带上条数：
+/// "未生效：承载体存在、默认出口=承载体 断言失败"这种写法会被读成
+/// "承载体存在（是好事）"——而它其实是**失败项**的清单。
 fn describe(failed: &[Assertion]) -> String {
-    let names: Vec<String> = failed.iter().map(|a| a.to_string()).collect();
-    format!("下游规则未生效：{} 断言失败", names.join("、"))
+    let names: Vec<String> = failed.iter().map(|a| format!("[{}]", a)).collect();
+    format!(
+        "下游规则未生效：{} 项未通过 {}",
+        failed.len(),
+        names.join(" ")
+    )
 }
 
 // ── 防抖 / 冷却 / 反复故障 ────────────────────────────────────────────
@@ -567,11 +579,28 @@ mod tests {
     #[test]
     fn each_assertion_has_a_human_readable_name() {
         assert_eq!(Assertion::ProxyReachable.to_string(), "代理可达");
-        assert_eq!(Assertion::BearerPresent.to_string(), "承载体在");
-        assert_eq!(
-            Assertion::EgressIsBearer.to_string(),
-            "默认出口指向承载体"
-        );
+        assert_eq!(Assertion::BearerPresent.to_string(), "承载体存在");
+        assert_eq!(Assertion::EgressIsBearer.to_string(), "默认出口=承载体");
+    }
+
+    /// ⚠ 失败清单必须一眼看出是"**未通过**的项"。
+    /// 写成"承载体在、默认出口指向承载体 断言失败"会被读成"承载体在（好的）"。
+    #[test]
+    fn the_failure_list_reads_as_failed_items_not_passing_ones() {
+        let v = evaluate(GuardFacts {
+            bearer_present: false,
+            default_egress_luid: Some(1),
+            ..ok()
+        });
+        match v {
+            GuardVerdict::Ineffective { reason, .. } => {
+                assert!(reason.contains("2 项未通过"), "{reason}");
+                assert!(reason.contains("[承载体存在]"), "{reason}");
+                assert!(reason.contains("[默认出口=承载体]"), "{reason}");
+                assert!(!reason.contains("断言失败"), "别再用歧义的『断言失败』：{reason}");
+            },
+            other => panic!("期望 Ineffective，得到 {other:?}"),
+        }
     }
 
     // ── 防抖：单次失败不收紧（模块头第 2 条）──────────────────────────

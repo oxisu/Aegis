@@ -49,8 +49,12 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use std::fs::OpenOptions;
+use std::io::Write as _;
+
 use aegis_audit::{Action, AuditEvent, AuditLog, InterfaceRole, Protocol};
-use aegis_config::load_file;
+use aegis_config::{load_file, Config};
+use aegis_core::guard::{evaluate, GuardPolicy, GuardVerdict};
 use aegis_core::role::{adjudicate_all, Confidence};
 use aegis_core::state::{insulation, State};
 use aegis_ipc::{
@@ -77,6 +81,21 @@ mod exit {
 /// 所以可以跨线程共享；真正不能跨线程的是 WFP 会话句柄，它**永远待在
 /// 看门狗线程里**（见 [`watch`]）。
 type TicketSlot = std::sync::Arc<std::sync::Mutex<Option<ApplyTicket>>>;
+
+/// 守卫观测的默认周期（秒）。
+///
+/// 依据：泄漏窗口 ≈ `failure_threshold × 周期` = 3 × 3 = **9 秒**。
+/// 更快会常驻占用（每次巡检要跑一遍 `GetIfTable2` + `GetAdaptersAddresses`），
+/// 更慢则漏的时间太长。先跑起来再调。
+const DEFAULT_GUARD_INTERVAL_SECS: u64 = 3;
+
+/// ⚠ **断言 A 的占位值**：v1 还没接适配器 SPI，`proxy_reachable` 无法真判，
+/// 暂时一律按"可达"处理。
+///
+/// 后果要说清楚：断言 A 永远不会失败，守卫只看 **B（TUN 在不在）** 与
+/// **C（默认出口是不是它）**。也就是说**"代理进程死了"这一条目前抓不到**。
+/// 接上 SPI 之后改用它返回的 `Op::Health` / `Op::RulesEffective` 的真实结果。
+const PROXY_REACHABLE_PLACEHOLDER: bool = true;
 
 fn main() {
     let args = Args::parse(std::env::args().skip(1));
@@ -332,6 +351,35 @@ fn main() {
         *slot = Some(status);
     }
 
+    // ── 守卫观测（步 1：**只判不动手**）─────────────────────────────
+    //
+    // 为什么先做这一步：`Tighten` 的代价是**整机断网**，所以在真的接上动作
+    // 之前，必须先确认这套判据在真机上不会平白无故报 `Ineffective`。
+    // 方案见 docs/GUARD-WIRING.md §5；步 2 才会把动作接上去。
+    println!("守卫：下游规则生效性观测（步 1，只观测不动手）");
+    match config.guard_gap() {
+        Some(gap) => {
+            println!("  ⚠ 未启用：{gap}");
+            println!("  配置 proxy.mode 与 proxy.tun_luid 之后才会开始观测。");
+        },
+        None if args.guard_interval_secs == 0 => {
+            println!("  已关闭（--guard-interval-secs 0）。");
+        },
+        None => {
+            let log = args.data_dir.join("guard-observe.log");
+            println!("  周期      : {} 秒", args.guard_interval_secs);
+            println!("  断言      : B 承载体在 / C 默认出口指向承载体");
+            println!("  ⚠ 断言 A（代理可达）尚未接 SPI，暂按可达处理");
+            println!("  日志      : {}", log.display());
+            spawn_guard_observer(
+                config.clone(),
+                Duration::from_secs(args.guard_interval_secs),
+                log,
+            );
+        },
+    }
+    println!();
+
     println!("启动完成。IPC 已在 {} 上应答。", args.pipe);
     if args.serve_secs == 0 {
         println!("--serve-secs 0：不等客户端，直接退出。");
@@ -350,6 +398,97 @@ fn main() {
                 println!("⚠ 已确认的规则会随本进程退出而清空（动态会话）——这是兜底，不是 bug。");
             }
         }
+    }
+}
+
+// ── 守卫观测（步 1：只判不动手）─────────────────────────────────────
+
+/// 起一个观测线程。**它不碰 WFP、不改任何票据、不做任何动作。**
+///
+/// 进程退出时线程随之消失——不需要 join，也不需要停止标志：
+/// 守卫只在 aegisd 存活期间有意义，这正是动态会话的兜底性质。
+fn spawn_guard_observer(cfg: Config, interval: Duration, log: PathBuf) {
+    thread::spawn(move || {
+        let threshold = GuardPolicy::default().failure_threshold;
+        let mut ticks = 0u64;
+        let mut streak = 0u32;
+        loop {
+            thread::sleep(interval);
+            ticks += 1;
+            let line = observe_once(&cfg, ticks, &mut streak, threshold);
+            println!("{line}");
+            append_guard_line(&log, &line);
+        }
+    });
+}
+
+/// 连续失败计数规则。
+///
+/// ⚠ 必须与 [`aegis_core::guard::GuardTracker`] **逐条一致**，否则
+/// "步 1 从没报过要收紧"就推不出"步 2 接上也不会收紧"——那这一步白跑了：
+///
+/// - `Effective` → 清零（中途好一次就不算连续）
+/// - `Ineffective` → 累加
+/// - `Unknown` → **不动**。判不了不等于好，也不等于坏；清零会漏掉真实的
+///   连续失败，累加又会凭空制造失败。
+fn next_streak(verdict: &GuardVerdict, streak: u32) -> u32 {
+    match verdict {
+        GuardVerdict::Effective => 0,
+        GuardVerdict::Ineffective { .. } => streak.saturating_add(1),
+        GuardVerdict::Unknown { .. } => streak,
+    }
+}
+
+/// 把一次观测拼成一行日志。`streak` 是**更新后**的连续失败次数。
+fn format_observation(tick: u64, verdict: &GuardVerdict, streak: u32, threshold: u32) -> String {
+    match verdict {
+        GuardVerdict::Effective => format!("[守卫 #{tick}] 生效"),
+        GuardVerdict::Unknown { reason } => {
+            format!("[守卫 #{tick}] 判不了（{reason}）→ 不动手")
+        },
+        GuardVerdict::Ineffective { reason, .. } => {
+            // 超过阈值后不再显示 "5/3" 这种怪数字，只报连续次数与阈值
+            let would = if streak >= threshold {
+                " ⚠ **若已接线，此刻会收紧**（撤掉放行 → 全都拒绝）"
+            } else {
+                ""
+            };
+            format!(
+                "[守卫 #{tick}] 未生效（{reason}）连续 {} 次（阈值 {}）{}",
+                streak, threshold, would
+            )
+        },
+    }
+}
+
+/// 观测一次，返回一行日志。
+fn observe_once(cfg: &Config, tick: u64, streak: &mut u32, threshold: u32) -> String {
+    let snap = match snapshot() {
+        Ok(s) => s,
+        Err(e) => {
+            // 采不到拓扑就没有事实，此时**不能**当成"生效"
+            return format!("[守卫 #{tick}] 拓扑采集失败：{e} → Unknown，不动手");
+        },
+    };
+
+    let facts = match cfg.guard_facts_from(&snap, PROXY_REACHABLE_PLACEHOLDER) {
+        Some(f) => f,
+        None => return format!("[守卫 #{tick}] 配置缺 proxy.mode，无法构造事实，跳过"),
+    };
+
+    let verdict = evaluate(facts);
+    *streak = next_streak(&verdict, *streak);
+    format_observation(tick, &verdict, *streak, threshold)
+}
+
+/// 观测日志落盘。"跑一段时间确认无误报"这件事，光看终端是不行的——
+/// 终端随会话一起没了。
+fn append_guard_line(path: &PathBuf, line: &str) {
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    if let Ok(mut f) = OpenOptions::new().create(true).append(true).open(path) {
+        let _ = writeln!(f, "{line}");
     }
 }
 
@@ -705,6 +844,8 @@ struct Args {
     token_file: PathBuf,
     data_dir: PathBuf,
     serve_secs: u64,
+    /// 守卫观测周期（秒）。**0 = 关闭观测**。
+    guard_interval_secs: u64,
 }
 
 impl Args {
@@ -714,6 +855,7 @@ impl Args {
         let mut token_file: Option<PathBuf> = None;
         let mut data_dir: Option<PathBuf> = None;
         let mut serve_secs: u64 = 30;
+        let mut guard_interval_secs: u64 = DEFAULT_GUARD_INTERVAL_SECS;
         let mut args = argv;
 
         while let Some(a) = args.next() {
@@ -724,6 +866,12 @@ impl Args {
                 "--data-dir" => data_dir = args.next().map(PathBuf::from),
                 "--serve-secs" => {
                     serve_secs = args.next().and_then(|v| v.parse().ok()).unwrap_or(serve_secs)
+                },
+                "--guard-interval-secs" => {
+                    guard_interval_secs = args
+                        .next()
+                        .and_then(|v| v.parse().ok())
+                        .unwrap_or(guard_interval_secs)
                 },
                 "--help" | "-h" => {
                     print_usage();
@@ -752,6 +900,7 @@ impl Args {
             token_file,
             data_dir,
             serve_secs,
+            guard_interval_secs,
         }
     }
 }
@@ -764,7 +913,13 @@ fn print_usage() {
     println!("  --token-file <path>  IPC token 落盘路径（默认 <data-dir>/ipc.token）");
     println!("  --data-dir <dir>     运行数据目录（默认 .aegis-run）");
     println!("  --serve-secs <n>     IPC 服务时长（默认 30，0 = 启动完就退出）");
+    println!(
+        "  --guard-interval-secs <n>  守卫观测周期（默认 {}，0 = 关闭）",
+        DEFAULT_GUARD_INTERVAL_SECS
+    );
     println!();
+    println!("守卫当前处于**步 1（只观测不动手）**：只判『下游规则生效吗』并记日志，");
+    println!("不会收紧也不会放宽。日志落在 <data-dir>/guard-observe.log。");
     println!("启动过程不下发任何 WFP 规则。下发要由 `aegisctl apply` 发起，");
     println!("且该命令要求：持有 token + 控制端已提权 + 10 秒内 confirm。");
 }
@@ -772,6 +927,58 @@ fn print_usage() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn ineffective(reason: &str) -> GuardVerdict {
+        GuardVerdict::Ineffective {
+            failed: Vec::new(),
+            reason: reason.to_string(),
+        }
+    }
+
+    fn unknown(reason: &str) -> GuardVerdict {
+        GuardVerdict::Unknown {
+            reason: reason.to_string(),
+        }
+    }
+
+    /// 步 1 的全部价值都押在这条上：计数规则必须和 `GuardTracker` 一致，
+    /// 否则"观测期没报警"推不出"接上动作也不会误收紧"。
+    #[test]
+    fn the_streak_rule_matches_the_guard_tracker() {
+        assert_eq!(next_streak(&GuardVerdict::Effective, 5), 0, "好一次就清零");
+        assert_eq!(next_streak(&ineffective("x"), 2), 3, "失败累加");
+        assert_eq!(
+            next_streak(&unknown("y"), 2),
+            2,
+            "⚠ 判不了既不清零也不累加"
+        );
+    }
+
+    #[test]
+    fn the_streak_never_overflows() {
+        assert_eq!(next_streak(&ineffective("x"), u32::MAX), u32::MAX);
+    }
+
+    /// "若已接线，此刻会收紧"这句话只在**达到阈值之后**出现——
+    /// 它要是提前出现，观测结论就会被误读成"已经在收紧了"。
+    #[test]
+    fn the_would_tighten_note_appears_only_at_the_threshold() {
+        let below = format_observation(1, &ineffective("r"), 2, 3);
+        assert!(!below.contains("会收紧"), "{below}");
+
+        let at = format_observation(1, &ineffective("r"), 3, 3);
+        assert!(at.contains("会收紧"), "{at}");
+        assert!(at.contains("连续 3 次（阈值 3）"), "{at}");
+        assert!(!at.contains("3/3"), "'N/M' 的写法会被读成分数：{at}");
+    }
+
+    #[test]
+    fn an_unknown_verdict_is_reported_without_any_action() {
+        let s = format_observation(7, &unknown("读不到默认出口"), 0, 3);
+        assert!(s.contains("判不了"), "{s}");
+        assert!(s.contains("读不到默认出口"), "{s}");
+        assert!(!s.contains("会收紧"), "{s}");
+    }
 
     #[test]
     fn truncate_keeps_short_strings_intact() {

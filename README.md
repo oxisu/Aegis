@@ -51,7 +51,7 @@ Aegis 建立一张**独立于任何上层代理软件的 OS 级安全底座**：
 | `aegis-ipc` | ✅ 可用 | 本地 IPC：帧编解码 + 版本握手 + **命名管道（显式 DACL）+ 一次性 token 鉴权** |
 | `aegis-config` | ✅ 可用 | 配置加载与 schema 版本校验（Fail-Closed）+ `[proxy]` / `[[always_allow]]` + `guard_facts` |
 | `aegis-orchestrator` | ✅ 可用 | 适配器 SPI：**能力接口** `Capability` + 逐能力失败模式（写死）+ 能力矩阵 + 声明自检 + **契约测试夹具** + 参考适配器；能力含 **`RuleEffectiveness`（规则是否真的生效）** |
-| `aegisd` | ✅ 最小链路 | 配置（失败即退）→ IPC 命名管道 → 拓扑快照 → 角色裁决 → **WFP 仅干跑** → 审计落盘 |
+| `aegisd` | ✅ 最小链路 | 配置（失败即退）→ IPC 命名管道 → 拓扑快照 → 角色裁决 → **WFP 仅干跑** → 审计落盘 → **守卫观测（步 1：只判不动手）** |
 | `aegisctl` | ✅ 可用 | 控制端：握手 → token 鉴权 → 状态查询 / 心跳 + `apply` / `confirm` / `rollback` |
 
 **工程状态**：508 项单元测试 + `clippy -D warnings` 全工作区干净；
