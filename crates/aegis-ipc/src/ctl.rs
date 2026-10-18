@@ -15,6 +15,47 @@ use std::fmt;
 pub const REQ_STATUS: &str = "status";
 /// 请求：心跳（只验证链路与鉴权是否还活着）。
 pub const REQ_PING: &str = "ping";
+/// 请求：下发绝缘笼（**危险**：会改变本机网络状态）。
+pub const REQ_APPLY: &str = "apply";
+/// 请求：确认刚才那次下发（两阶段确认的第二段）。
+pub const REQ_CONFIRM: &str = "confirm";
+/// 请求：立即拆除（**危险**）。
+pub const REQ_ROLLBACK: &str = "rollback";
+
+/// 一个请求词属于哪个风险等级。
+///
+/// ⚠ **新加请求词必须同时在这里登记**，否则它会落到 [`Risk::ReadOnly`]，
+/// 于是"有 token 就能干"——而危险命令要求对端进程已提权（见 [`crate::peer`]）。
+/// 这里用穷举而不是默认放行，正是为了让漏登记变成编译期可见的事。
+pub fn risk_of(word: &str) -> crate::peer::Risk {
+    match word {
+        REQ_APPLY | REQ_CONFIRM | REQ_ROLLBACK => crate::peer::Risk::Dangerous,
+        _ => crate::peer::Risk::ReadOnly,
+    }
+}
+
+/// 应答前缀：成功。
+///
+/// ⚠ 控制端靠这两个前缀判断成败，**不靠猜正文里有没有"失败"两个字**。
+/// 靠猜的下场是：某天服务端把"拒绝"的原因写成了"未执行"，
+/// 控制端就当成功了，而人拿着一个绿色的结果以为规则已经装上。
+pub const OK_PREFIX: &str = "ok ";
+/// 应答前缀：拒绝（后面跟原因）。
+pub const DENY_PREFIX: &str = "denied ";
+
+/// 判定一段应答文本是成功还是拒绝，返回去掉前缀的原因/正文。
+///
+/// 两个前缀都不是时按**成功**处理：历史客户端发来的旧格式应答
+/// 没有前缀，不该因此被判成失败。
+pub fn classify(text: &str) -> Result<&str, &str> {
+    if let Some(rest) = text.strip_prefix(OK_PREFIX) {
+        Ok(rest)
+    } else if let Some(rest) = text.strip_prefix(DENY_PREFIX) {
+        Err(rest)
+    } else {
+        Ok(text)
+    }
+}
 
 /// 状态文档的**第一行**必须是这个串。
 ///
@@ -299,6 +340,53 @@ mod tests {
     fn request_words_are_distinct_and_stable() {
         assert_eq!(REQ_STATUS, "status");
         assert_eq!(REQ_PING, "ping");
-        assert_ne!(REQ_STATUS, REQ_PING);
+        assert_eq!(REQ_APPLY, "apply");
+        assert_eq!(REQ_CONFIRM, "confirm");
+        assert_eq!(REQ_ROLLBACK, "rollback");
+        let all = [REQ_STATUS, REQ_PING, REQ_APPLY, REQ_CONFIRM, REQ_ROLLBACK];
+        let mut seen = Vec::new();
+        for w in all {
+            assert!(!seen.contains(&w), "请求词重复：{w}");
+            seen.push(w);
+        }
+    }
+
+    #[test]
+    fn responses_are_classified_by_prefix_not_by_guessing_the_text() {
+        assert_eq!(classify("ok 已装 10 条"), Ok("已装 10 条"));
+        assert_eq!(classify("denied 需要管理员"), Err("需要管理员"));
+    }
+
+    /// 带前缀时，`ok` 不能被 `denied` 的判据吃掉，反之亦然。
+    #[test]
+    fn the_two_prefixes_do_not_overlap() {
+        assert!(!OK_PREFIX.starts_with(DENY_PREFIX));
+        assert!(!DENY_PREFIX.starts_with(OK_PREFIX));
+        assert_ne!(OK_PREFIX, DENY_PREFIX);
+    }
+
+    /// 旧格式（无前缀）按成功处理：老客户端不该因为格式演进就被判失败。
+    #[test]
+    fn a_legacy_response_without_prefix_counts_as_ok() {
+        assert_eq!(classify("pong"), Ok("pong"));
+        assert!(classify("").is_ok());
+    }
+
+    /// 危险命令必须真的是"危险"——漏登记就会变成"有 token 就能干"。
+    #[test]
+    fn dangerous_commands_are_classified_as_dangerous() {
+        use crate::peer::Risk;
+        assert_eq!(risk_of(REQ_APPLY), Risk::Dangerous);
+        assert_eq!(risk_of(REQ_CONFIRM), Risk::Dangerous);
+        assert_eq!(risk_of(REQ_ROLLBACK), Risk::Dangerous);
+    }
+
+    #[test]
+    fn read_only_commands_stay_read_only() {
+        use crate::peer::Risk;
+        assert_eq!(risk_of(REQ_STATUS), Risk::ReadOnly);
+        assert_eq!(risk_of(REQ_PING), Risk::ReadOnly);
+        // 未知请求词按只读处理：它根本不会被识别，不该顺带获得更高权限
+        assert_eq!(risk_of("whatever"), Risk::ReadOnly);
     }
 }

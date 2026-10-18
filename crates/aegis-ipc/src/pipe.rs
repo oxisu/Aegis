@@ -268,6 +268,25 @@ pub struct PipeEnd {
 }
 
 impl PipeEnd {
+    /// 仅供测试：用一个**不拥有所有权**的句柄包出 `PipeEnd`。
+    ///
+    /// 存在的理由是要能测 Fail-Closed：给一个根本不是管道句柄的值，
+    /// [`crate::peer::is_elevated`] 必须返回 `false` 而不是"查不清就算了"。
+    /// 这条路径不会真的被读写——`as_raw_handle` 只是把值传出去。
+    #[cfg(test)]
+    #[must_use]
+    pub(crate) fn from_raw_for_test(handle: HANDLE) -> Self {
+        Self { handle }
+    }
+
+    /// 底层句柄。**只为 [`crate::peer`] 的对端身份检查而开**——
+    /// 它需要靠这个句柄调 `GetNamedPipeClientProcessId`。
+    /// 刻意不给 `&mut`，也不交出所有权：句柄的生命周期仍归
+    /// [`PipeServer`] / [`PipeClient`]。
+    pub fn as_raw_handle(&self) -> HANDLE {
+        self.handle
+    }
+
     /// 发一帧。
     pub fn send(&self, msg_type: u8, flags: u8, seq: u32, payload: &[u8]) -> Result<(), PipeError> {
         let bytes = encode(msg_type, flags, seq, payload)?;

@@ -34,6 +34,8 @@ windows = { workspace = true, features = [
     "Win32_Storage_FileSystem",
     "Win32_System_IO",
     "Win32_System_Pipes",
+    # 对端身份检查：OpenProcess（按 PID 开进程句柄）
+    "Win32_System_Threading",
 ] }
 
 # 刻意不依赖任何序列化库：帧格式必须完全由本项目掌控，
