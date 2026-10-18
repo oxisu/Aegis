@@ -43,7 +43,7 @@ Aegis 建立一张**独立于任何上层代理软件的 OS 级安全底座**：
 | `aegis-version` | ✅ 可用 | 版本标识单一事实来源（零依赖） |
 | `aegis-sense` | ✅ 可用 | 感知层：拓扑采集 / 接口分类 / 默认出口裁决 / SSID / 拓扑指纹 / 拓扑差分 |
 | `aegis-core` | ✅ 可用 | 角色裁决（§20.5）+ 状态机（§26） |
-| `aegis-wfp` | 🚧 只读阶段 | WFP 状态勘察：枚举过滤器 / Provider、**持久背板审计**；规则下发待建 |
+| `aegis-wfp` | 🚧 只读 + 干跑 | WFP 状态勘察（枚举 / Provider / **持久背板审计**）+ **绝缘笼规则计划与静态自检**（未下发） |
 | `aegis-fuse` | ⬜ 待建 | 微秒级网络端口熔断器 |
 | `aegis-audit` | ⬜ 待建 | 审计与证据链落盘 |
 | `aegis-ipc` | ✅ 可用 | 本地 IPC 帧编解码 + 版本握手（未建管道） |
@@ -70,6 +70,10 @@ FwpmEngineOpen0（动态会话）+ FwpmFilterEnum0 / FwpmProviderEnum0
         ▼  aegis-wfp::Session::snapshot()
    过滤器的层 / 动作 / 归属 / persistent-boottime 标志
         └─ 持久背板审计：区分"系统自带底板"与"第三方持久阻断"
+
+绝缘笼（纯逻辑，**不下发任何东西**）：
+CagePolicy ──cage_plan()──▶ Vec<FilterSpec> ──verify()──▶ 结论
+        └─ 先回答"这份规则会不会把我自己锁死"，再谈下发
 ```
 
 ## 目录结构
@@ -94,8 +98,9 @@ Aegis/
     │   └── examples/dry_run.rs
     ├── aegis-core/         # 编排核心（纯逻辑）：角色裁决 / 状态机
     │   └── examples/plan.rs
-    ├── aegis-wfp/          # OS 级底座（当前仅只读）：WFP 枚举 + 持久背板审计
-    │   └── examples/wfp_inspect.rs
+    ├── aegis-wfp/          # OS 级底座（只读勘察 + 规则计划）：枚举 / 持久背板审计 / 绝缘笼计划
+    │   ├── examples/wfp_inspect.rs   # 只读勘察（需管理员）
+    │   └── examples/wfp_plan.rs      # 绝缘笼干跑（无需管理员，不装任何规则）
     ├── aegis-ipc/          # IPC 帧编解码 + 版本握手（纯逻辑）
     └── aegis-config/       # 配置加载 + schema 版本校验（Fail-Closed）
 ```
@@ -171,7 +176,31 @@ cargo run -p aegis-sense --example dry_run   # 感知层：拓扑 + 指纹 + 稳
 cargo run -p aegis-core  --example plan      # 编排核心：角色裁决 + 状态机推演
 cargo run -p aegis-core  --example plan -- --free MMi   # 声明手机热点后再裁决
 cargo run -p aegis-wfp   --example wfp_inspect # WFP 只读勘察：枚举 + 持久背板审计（需管理员）
+cargo run -p aegis-wfp   --example wfp_plan    # 绝缘笼干跑：打印要装什么，一条都不装
+cargo run -p aegis-wfp   --example wfp_plan -- --campus-strict --boot-backbone
 ```
+
+### 绝缘笼：为什么先做"计划"而不是直接下发
+
+绝缘笼是 Aegis 里唯一一个**装错了就断整机网**的部件，而两条最致命的失败
+路径**都不会报错**，只会表现为"网不通了"：
+
+| 漏掉的东西 | 后果 |
+|---|---|
+| 回环放行 | 非提权 GUI 连不上 SYSTEM 服务——用户失去**唯一能把笼子拆掉**的界面 |
+| DHCP 放行 | 开机拿不到 IP，而此时任何界面都还没起来——**永久锁死** |
+
+所以规则集合先做成可静态验证的纯数据，`verify()` 在**不下发**的前提下
+回答"会不会把自己锁死"：
+
+- 权重关系（放行必须严格高于默认拒绝，否则放行规则是一张废纸，静默失效）
+- 回环 / DHCP 放行是否存在、**是否被更高权重的默认拒绝遮蔽**
+- 每层是否有无条件兜底阻断
+- Boot-Time 层规则的条件是否**全部静态可判定**（引导时间没有进程，
+  写成"匹配 Dhcp 服务 PID"就是一条永不匹配的死规则 → 开机即断网）
+
+Boot-Time 持久背板默认关闭。启用后 `verify()` 会给出 `Warn`：
+这类规则进程退出、重启都不会消失，装错即变砖，必须显式确认。
 
 本机实测输出（节选）：
 
