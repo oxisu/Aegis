@@ -137,6 +137,34 @@
     断电 / 蓝屏本身**没在这台机器上实测**（不该为验证而弄崩正在用的机器）
   - 也写清了代价：**掉电会丢最后几条审计记录**（定期 sync 的取舍）。
 
+- **`docs/HOURGLASS.md`：沙漏模型落成工程语言 —— 代理管域名，Aegis 管网卡**
+  - 上层（Clash/sing-box）懂域名做精细分流；底层（Aegis/WFP）**不懂也不需要
+    懂**域名，只判"这一跳从哪张网卡出去，走错就砍"。两层判据不重叠、覆盖互补
+  - 三条实测依据，都能复现：
+
+    | 命题 | 结果 | 复现 |
+    |---|---|---|
+    | WFP 能按域名过滤吗 | **不能**（`ALE_EFFECTIVE_NAME` 装得上但拦不住） | `examples/name_probe` |
+    | ALE 层有没有出口网卡字段 | **有**：`IP_LOCAL_INTERFACE`（UINT64 = `NET_LUID`） | `examples/egress_probe` |
+    | 分类时带着正确的值吗 | **带**（真 LUID 断 / 假 LUID 通 / 传输层亦可） | `examples/iface_probe` |
+
+  - ⚠ 补上原讨论漏掉的一条：**TUN 模式与系统代理模式要的原语不同**。
+    TUN 模式下应用 socket 仍连真实远端 IP，必须按**出口网卡**放行——按
+    "放行代理进程"会把应用自己的 socket 一起拦掉，TUN 模式直接废掉。
+    系统代理模式才按**进程**（AppId blob）放行
+  - ⚠ 网卡 LUID **会变**（禁用/启用、驱动重载、USB 重插）→ 第二层不能在配置里
+    写死一个 LUID，必须靠 `aegis-sense::delta` 拓扑差分驱动重算，
+    重算失败按 Fail-Closed（全断，不是全放行）
+  - 还列出"今天还没装上"的清单：配置面（`campus.luid` / `proxy.mode` /
+    `proxy.tun_luid` / `proxy.image_path`）、把无条件默认拒绝改成"走错网卡
+    才拒绝"、适配器 SPI 读代理规则给 GUI
+
+- `aegis-wfp` 新增条件 `Condition::EgressInterfaceLuid(u64)`
+  - 翻译成 `FWPM_CONDITION_IP_LOCAL_INTERFACE` + `FWP_UINT64`（`NET_LUID`）
+  - ⚠ `FWP_UINT64` 在 `FWP_CONDITION_VALUE0` 里是 `*mut u64`（**不是内联值**），
+    得自己持有缓冲区并活到 `FwpmFilterAdd0` 返回之后（和 blob 一样的道理）
+  - ⚠ 它不是 `is_static`：引导时间网卡还没枚举出来，Boot 层写上就是死规则
+
 ### Fixed
 
 - **一次掉电会让 `aegisd` 永久起不来（崩溃安全，实测 `exit 5`）**

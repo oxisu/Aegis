@@ -1483,6 +1483,31 @@ GUI（普通用户、不提权）与 Rust 服务（SYSTEM）之间唯一通道�
 3. **`Aggregated` 卡的路由明示**：给 HypoMux 源绑定网卡加最具体路由，或让 Clash TUN 对 HypoMux 进程/源 IP 放行，避免 TUN 把 HypoMux 包吸进环（§20.8 #2）。
 4. **角色变更即重算**：AssignRoles 后服务重算 WFP + 调 Clash API + 启停 HypoMux，原子提交；任一步失败回滚到 Airgap。
 
+### 24.1 沙漏模型：代理管域名，Aegis 管网卡（含实测）
+
+上层（Clash/sing-box）懂域名、按规则分流；底层（Aegis/WFP）**不懂也不需要懂**
+域名，只判"这一跳从哪张网卡出去，走错就砍"。两层判据不重叠、覆盖互补——
+第一层漏掉的（流氓软件绕过代理、代理进程崩了），第二层不看它是哪个软件，
+只看走没走对网卡。完整论述见 **`docs/HOURGLASS.md`**。
+
+**实测依据（三条，都能复现）：**
+
+| 命题 | 结果 | 复现 |
+|---|---|---|
+| WFP 能按域名过滤吗 | **不能**。`ALE_EFFECTIVE_NAME` 装得上但拦不住 | `examples/name_probe` |
+| ALE 层有没有出口网卡字段 | **有**。`IP_LOCAL_INTERFACE`（`FWP_UINT64` = `NET_LUID`）在 `ALE_AUTH_CONNECT_V4` 的 41 个字段里 | `examples/egress_probe` |
+| 分类时它带着正确的值吗 | **带**。真 LUID → 断；假 LUID → 通（**阴性对照**）；传输层亦可用 | `examples/iface_probe` |
+
+⚠ **两种代理模式要的原语不同**（§24 原表未区分）：
+
+- **TUN 模式** → 应用 socket 仍连真实远端 IP，必须按**出口网卡**放行；
+  按"放行代理进程"会把应用自己的 socket 一起拦掉，TUN 模式直接废掉。
+- **系统代理模式** → 应用连 127.0.0.1，必须按**进程**（AppId blob）放行。
+
+⚠ **网卡 LUID 会变**（禁用/启用、驱动重载、USB 重插）。所以沙漏第二层
+**不能**在配置里写死一个 LUID，必须靠 `aegis-sense::delta` 的拓扑差分驱动
+规则重算；重算失败按 Fail-Closed 处理（变成全断，不是全放行）。
+
 ---
 
 ## 25. 审计数据库 Schema（SQLite）
