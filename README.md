@@ -47,7 +47,7 @@ Aegis 建立一张**独立于任何上层代理软件的 OS 级安全底座**：
 | `aegis-wfp` | 🚧 只读 + 干跑 | WFP 状态勘察（枚举 / Provider / **持久背板审计**）+ **绝缘笼规则计划与静态自检**（未下发） |
 | `aegis-fuse` | ✅ 感知侧已通 | 拓扑震荡熔断器：去抖 + **先熔断后分析**；`NotifyIpInterfaceChange` 已接（回调只做一次 `fetch_add`），**拉绝缘动作本身尚未接 WFP** |
 | `aegis-audit` | ⬜ 待建 | 审计与证据链落盘 |
-| `aegis-ipc` | ✅ 可用 | 本地 IPC 帧编解码 + 版本握手（未建管道） |
+| `aegis-ipc` | ✅ 可用 | 本地 IPC：帧编解码 + 版本握手 + **命名管道（显式 DACL）+ 一次性 token 鉴权** |
 | `aegis-config` | ✅ 可用 | 配置加载与 schema 版本校验（Fail-Closed） |
 | `aegis-orchestrator` | ⬜ 待建 | 应用层代理适配器（SPI，可插拔） |
 | `aegisd` / `aegisctl` | ⬜ 待建 | 守护进程 / 控制端二进制 |
@@ -95,6 +95,15 @@ CagePolicy ──cage_plan()──▶ Vec<FilterSpec> ──verify()──▶ �
         │
         ▼  Worker 取走计数 ──ShockDebouncer::on_change()──▶ 立刻熔断（不等去抖）
         └─ 去抖窗口过后 ──▶ 只叫醒异步 Worker **一次**去重算
+
+本地 IPC（无需管理员即可验证；`cargo run -p aegis-ipc --example ipc_dryrun`）：
+PipeServer::bind（显式 DACL + FIRST_PIPE_INSTANCE，句柄不可继承）
+        │
+        ▼  ConnectNamedPipe
+    帧握手（版本三元组）──▶ token 鉴权（32 字节随机，常量时间比对）
+        │
+        ▼  FrameReader 解帧（字节流模式下负责分片 / 粘包）
+    请求 / 响应
 ```
 
 ## 目录结构
@@ -126,7 +135,9 @@ Aegis/
     ├── aegis-wfp/          # OS 级底座（只读勘察 + 规则计划）：枚举 / 持久背板审计 / 绝缘笼计划
     │   ├── examples/wfp_inspect.rs   # 只读勘察（需管理员）
     │   └── examples/wfp_plan.rs      # 绝缘笼干跑（无需管理员，不装任何规则）
-    ├── aegis-ipc/          # IPC 帧编解码 + 版本握手（纯逻辑）
+    ├── aegis-ipc/          # IPC：帧编解码 / 版本握手（纯逻辑）
+    │   │                   #   + 命名管道（显式 DACL）与 token 鉴权
+    │   └── examples/ipc_dryrun.rs   # 全链路干跑（无需管理员）
     └── aegis-config/       # 配置加载 + schema 版本校验（Fail-Closed）
 ```
 
@@ -204,6 +215,7 @@ cargo run -p aegis-core  --example plan -- --free MMi   # 声明手机热点后�
 cargo run -p aegis-wfp   --example wfp_inspect # WFP 只读勘察：枚举 + 持久背板审计（需管理员）
 cargo run -p aegis-wfp   --example wfp_plan    # 绝缘笼干跑：打印要装什么，一条都不装
 cargo run -p aegis-wfp   --example wfp_plan -- --campus-strict --boot-backbone
+cargo run -p aegis-ipc   --example ipc_dryrun  # IPC 全链路：握手 + token 鉴权（无需管理员）
 ```
 
 ### 绝缘笼：为什么先做"计划"而不是直接下发

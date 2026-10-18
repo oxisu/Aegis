@@ -34,6 +34,25 @@
 
 ### Added
 
+- **`aegis-ipc` 命名管道本体 + 显式 DACL + 一次性 token 鉴权**（§23.1 落地）
+  - **显式 DACL**：建管道必传 SDDL（`SY`/`BA` 完全控制，`AU` 读写）。
+    传 `NULL` 会继承 SYSTEM 的默认 DACL，GUI 不提权就**连不上**，而失败
+    表现只是"连接被拒绝"，看不出是 ACL 的锅——正是 §16/§20 修正 #5 那件事
+  - **`FILE_FLAG_FIRST_PIPE_INSTANCE`**：少了它，任何进程都能抢先建同名
+    管道冒充服务（squatting）。GUI 不提权，它无法区分真假服务，
+    这是第一个能被提权的口子
+  - **句柄不可继承**（`bInheritHandle = false`）：否则服务启动的子进程会
+    继承管道句柄，鉴权等于开了后门
+  - 字节流模式而非消息模式：帧本就带长度前缀，分片/粘包由 `FrameReader`
+    负责；消息模式会多引入 `ERROR_MORE_DATA` 半截读语义，反而多一处错点
+  - `IpcToken`：32 字节 `BCryptGenRandom`，**常量时间比对**（`acc |= x ^ y`
+    累积而非覆盖），`Debug` 只打印 `IpcToken(..)` 防日志泄露
+  - `unsafe` 只出现在 `pipe.rs` 一个文件里；端点常量、帧、版本、token
+    全部零 Win32 依赖，可完整单测
+  - `examples/ipc_dryrun`：进程内真实命名管道跑通
+    建管道 → 连接 → 握手 → 鉴权 → 伪造 token 被拒 → 篡改帧被校验和抓住，
+    无需管理员权限
+
 - **`aegis-fuse` 接上 `NotifyIpInterfaceChange`**（FFI 层落地）
   - 模块分层：`debounce` / `notify` / `signal` **零 Win32 依赖**（可完整单测），
     `unsafe` 只出现在 `watch.rs` 一个文件里
@@ -93,6 +112,15 @@
 
 ### Fixed
 
+- **对端关闭被误判成协议故障**：客户端 `CloseHandle` 后，阻塞中的 `ReadFile`
+  **不会**返回 `got == 0`，而是直接以 `ERROR_BROKEN_PIPE`（109）失败。
+  原先只认 `got == 0`，于是"客户端正常退出"被当成读失败上报，服务会去
+  告警、去重连。已把 109 / `ERROR_PIPE_NOT_CONNECTED`（233）归一到
+  `Disconnected`。
+- **`ConnectNamedPipe` 的两个合法失败被当成故障**：`ERROR_PIPE_CONNECTED`
+  （535，客户端在 `CreateNamedPipeW` 与 `ConnectNamedPipe` 之间就连上）是
+  **成功**；`ERROR_NO_DATA`（232，连上又立刻断开）是 `Disconnected`。
+  一律报 `AcceptFailed` 会让服务在竞态窗口里随机拒绝合法客户端。
 - **持久背板审计的首版是假警报**
   只要见到 persistent/boottime + 阻断就报"可导致变砖"，本机实测立刻翻车：
   48 条持久 / 引导时间过滤器**全是 Windows 自带的引导时间底板**

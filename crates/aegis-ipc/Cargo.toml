@@ -1,6 +1,6 @@
 [package]
 name        = "aegis-ipc"
-description = "本地 IPC：协议帧编解码 + 版本握手（纯逻辑，不创建管道、不做任何特权操作）"
+description = "本地 IPC：定长帧编解码 + 版本握手 + 命名管道（显式 DACL）+ 一次性 token 鉴权"
 version.workspace      = true
 edition.workspace      = true
 rust-version.workspace = true
@@ -13,5 +13,32 @@ aegis-version = { workspace = true }
 thiserror     = { workspace = true }
 serde         = { workspace = true }
 
+# Win32：**只有 src/pipe.rs 与 src/token.rs 用得上**
+#
+#   Security                 —— ConvertStringSecurityDescriptorToSecurityDescriptorW
+#                              （SDDL → 安全描述符，建管道时给显式 DACL）
+#   Security_Cryptography    —— BCryptGenRandom（token 的随机源）
+#   System_Pipes             —— CreateNamedPipeW / ConnectNamedPipe / DisconnectNamedPipe
+#   Storage_FileSystem       —— CreateFileW / ReadFile / WriteFile / FlushFileBuffers
+#
+# ⚠ 帧格式与版本判定一律不碰这些 API —— 它们必须能脱离权限环境被完整测试。
+#   Security_Authorization —— SDDL → 安全描述符（不开就没有
+#                             ConvertStringSecurityDescriptorToSecurityDescriptorW）
+#   System_IO              —— ReadFile / WriteFile / ConnectNamedPipe 的签名里
+#                             带 OVERLAPPED，不开这个 feature 它们不会出现在作用域
+windows = { workspace = true, features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_Security_Authorization",
+    "Win32_Security_Cryptography",
+    "Win32_Storage_FileSystem",
+    "Win32_System_IO",
+    "Win32_System_Pipes",
+] }
+
 # 刻意不依赖任何序列化库：帧格式必须完全由本项目掌控，
 # 不允许外部 crate 的版本升级悄悄改变线上帧布局（IPC 两端版本可能不同）。
+
+[[example]]
+name = "ipc_dryrun"
+path = "examples/ipc_dryrun.rs"

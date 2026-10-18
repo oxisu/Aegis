@@ -1,10 +1,19 @@
 //! Aegis 本地 IPC：协议帧编解码 + 版本握手。
 //!
 //! # 边界
-//! 本 crate **只做纯逻辑**：把字节切成帧、校验、比对版本。
-//! 它不创建命名管道、不设置 ACL、不碰任何特权对象——
-//! 那些属于 `aegisd` 的职责。这样划分是为了让帧格式可以脱离 Windows
-//! 权限环境被完整测试（CI 上跑不了 SYSTEM 权限，但必须能验证帧格式）。
+//!
+//! | 模块 | 依赖 Win32 | 职责 |
+//! |---|---|---|
+//! | 帧编解码 / 版本握手（本文件） | 否 | 定长头 + 校验和 + 版本兼容判定 |
+//! | [`endpoint`] | 否 | 管道名与 SDDL 常量 |
+//! | [`token`] | 部分（仅随机数） | 一次性 token 与**常量时间**比对 |
+//! | [`pipe`] | **是** | 建管道 / 连管道 / 收发帧 |
+//!
+//! 帧格式、版本判定、token 比对都不碰 Win32，因此能脱离权限环境完整测试；
+//! `unsafe` 压在 [`pipe`] 一个文件里。
+//!
+//! ⚠ 管道**鉴权流程**（收到 AUTH 帧后校验 token、失败即断开）属于
+//! `aegisd` 的服务端主循环，不在本 crate —— 这里只提供零件。
 //!
 //! # 为什么刻意不用 serde / bincode
 //! 帧布局是**跨进程二进制契约**：`aegisd`（SYSTEM）与 `aegisctl`（普通权限）
@@ -25,8 +34,14 @@
 //! 16+N 4  载荷校验和（FNV-1a 32）
 //! ```
 
+pub mod endpoint;
+pub mod pipe;
+pub mod token;
 pub mod version;
 
+pub use endpoint::{PIPE_NAME, PIPE_SDDL, TOKEN_FILE_SDDL};
+pub use pipe::{PipeClient, PipeEnd, PipeError, PipeServer};
+pub use token::{constant_time_eq, IpcToken, TokenError, TOKEN_BYTES, TOKEN_HEX_LEN};
 pub use version::{
     check_compat, HandshakePayload, Note, ParseError, RejectReason, Verdict, VersionTriple,
 };
@@ -57,6 +72,11 @@ pub mod msg_type {
     pub const PING: u8 = 5;
     /// 心跳应答
     pub const PONG: u8 = 6;
+    /// 鉴权：载荷为 [`crate::token::IpcToken`] 的 hex 文本（64 字节 ASCII）。
+    /// 服务端校验失败必须**立刻断开**，不回任何响应。
+    pub const AUTH: u8 = 7;
+    /// 鉴权结果
+    pub const AUTH_RESULT: u8 = 8;
 }
 
 /// 帧错误。
