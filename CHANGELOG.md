@@ -38,6 +38,20 @@
     放行规则装上去等于什么都没变，但能验证"会话能开 → 翻译得对 → 内核接受 →
     按 id 删得回去"。**它一条阻断规则都不装**
   - `examples/probe_appid`：只读探针，实测 `FwpmGetAppIdFromFileName0` 的语义
+  - `examples/name_probe`：**"按域名拦"到底能不能做到**，两幕
+    - 第一幕（真能用）：把域名解析成 IP 集合，逐 IP 装 Block。
+      实测 `www.baidu.com:443` 断、`www.qq.com:443` **仍通**、拆掉后恢复。
+      但这是**代换**：CDN/轮询 DNS 换 IP 就 silently 失效、共享 IP 误伤、
+      V4 层管不到 AAAA
+    - 第二幕（此路不通）：`FWPM_CONDITION_ALE_EFFECTIVE_NAME` 确实在这一层的
+      字段表里、名字听着就像"远端主机名"，但把主机名塞进 blob 装一条 Block，
+      **装住不拆**地测 —— 目标仍然可达
+    - ⚠ **装得上 ≠ 拦得住**，这已经是第三次撞到了（blob 类型 → 字节序 →
+      名字匹配）。内核接受一条规则只证明参数合法
+    - 结论印证 §2 的分工：**域名是 App Level 的概念**，底座只认 IP。
+      所以 `Condition::RemoteName` 刻意**不在** `mappable` 白名单里，
+      `preflight` 会拒绝任何含它的计划
+
   - `examples/block_probe`：**阻断规则真机自证**。解析百度拿到真实 IP，
     装一条只拦"这个 IP 的 443"的规则，自己做前后对照：
 
