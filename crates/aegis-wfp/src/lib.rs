@@ -21,6 +21,7 @@
 pub mod error;
 pub mod layers;
 pub mod model;
+pub mod plan;
 pub mod session;
 
 pub use error::WfpError;
@@ -30,6 +31,12 @@ pub use layers::{
 pub use model::{
     audit_backbone, FilterFlags, FilterSummary, ProviderSummary, Risk, Snapshot, FLAG_BOOTTIME,
     FLAG_PERSISTENT,
+};
+pub use plan::{
+    apply_order, cage_plan, is_safe, needs_confirmation, verify, Action, CagePolicy, Condition,
+    FilterSpec, Finding, Layer, Severity, Tier, BROADCAST_V4, PORTS_BROADCAST_LEAK,
+    PORT_DHCP_CLIENT, PORT_DHCP_SERVER, PORT_DNS, WEIGHT_MAX, W_BROADCAST_LOCK, W_DEFAULT_DENY,
+    W_DHCP, W_DNS_LOCK, W_FLOW_DROP, W_LOOPBACK,
 };
 pub use session::{Session, SESSION_PREFIX};
 
