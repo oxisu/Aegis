@@ -41,6 +41,7 @@ Aegis 建立一张**独立于任何上层代理软件的 OS 级安全底座**：
 | Crate | 状态 | 说明 |
 |---|---|---|
 | `aegis-version` | ✅ 可用 | 版本标识单一事实来源（零依赖） |
+| `aegis-model` | ✅ 可用 | 拓扑事实的共享类型（**零依赖**，感知层产出 / 策略层消费） |
 | `aegis-sense` | ✅ 可用 | 感知层：拓扑采集 / 接口分类 / 默认出口裁决 / SSID / 拓扑指纹 / 拓扑差分 |
 | `aegis-core` | ✅ 可用 | 角色裁决（§20.5）+ 状态机（§26） |
 | `aegis-wfp` | 🚧 只读 + 干跑 | WFP 状态勘察（枚举 / Provider / **持久背板审计**）+ **绝缘笼规则计划与静态自检**（未下发） |
@@ -50,6 +51,20 @@ Aegis 建立一张**独立于任何上层代理软件的 OS 级安全底座**：
 | `aegis-config` | ✅ 可用 | 配置加载与 schema 版本校验（Fail-Closed） |
 | `aegis-orchestrator` | ⬜ 待建 | 应用层代理适配器（SPI，可插拔） |
 | `aegisd` / `aegisctl` | ⬜ 待建 | 守护进程 / 控制端二进制 |
+
+### 依赖方向铁律
+
+```text
+aegis-version ──▶ 所有层
+aegis-model   ──▶ aegis-sense（产出）、aegis-core / aegis-config（消费）
+aegis-sense   ──▶ 只有"真要读 Win32"的层才碰它
+```
+
+⚠ **策略层（`aegis-core` / `aegis-config`）只依赖 `aegis-model`，绝不依赖
+`aegis-sense`。** `aegis-sense` 会拉进 `windows` crate（WFP + IP Helper 全量
+绑定）；一旦策略层碰它，纯逻辑的增量构建会从约 3s 涨到约 22s，而且
+「策略层可在普通用户下只读干跑」这条硬约束就名存实亡——光编译就得先
+把 WFP 绑定编一遍。
 
 已完成的决策链路（全部只读、无需管理员权限）：
 
@@ -98,6 +113,7 @@ Aegis/
 │   └── clean-ghost-nics.ps1# 幽灵网卡盘点与清理（默认只读）
 └── crates/
     ├── aegis-version/      # 版本标识（零依赖）
+    ├── aegis-model/        # 共享数据模型（零依赖）：拓扑事实的类型
     ├── aegis-sense/        # 感知层（纯只读）：采集 / 分类 / 指纹 / 差分
     │   └── examples/dry_run.rs
     ├── aegis-core/         # 编排核心（纯逻辑）：角色裁决 / 状态机

@@ -9,6 +9,29 @@
 
 ## [Unreleased]
 
+### Changed
+
+- **架构：新增 `aegis-model`，策略层彻底脱离 Win32**（性能 + 分层双修）
+  - 把 `aegis-sense/src/model.rs` 整块下沉为独立的 `aegis-model` crate
+    （该文件本身只用 `serde` + `std`，grep 不到任何 `windows::`）
+  - `aegis-core` 的依赖从 `aegis-sense` 换成 `aegis-model`。原来为了拿
+    `InterfaceInfo` / `InterfaceKind` / `if_flags` 这 3 个类型，策略层被迫
+    依赖整个感知层，把 `windows` crate 拖进了纯逻辑的依赖图
+  - 实测（改一行代码后 `cargo test -p X`，含 examples，稳态第 2 轮）：
+
+    | crate | 改前 | 改后 |
+    |---|---|---|
+    | aegis-core | 7.4–22.5s | **3.9s** |
+    | aegis-config | 13.8–16.3s | **3.6s** |
+    | aegis-sense | 6.7–14.9s | **3.6s** |
+    | aegis-wfp | 4.1–19.7s | 4.0s（未动） |
+
+    现在全部 crate 都落在 2–4s 区间。`cargo tree -p aegis-core | grep -c windows` = 0
+  - 顺带把「策略层必须能在普通用户下只读干跑」从口号变成事实：
+    原来光是编译策略层就得先把 WFP 绑定编一遍
+  - `example plan` 需要真的采一次拓扑，属接线演示，故 `aegis-sense`
+    降级为 `[dev-dependencies]`——**库与单测永不碰 Win32**
+
 ### Added
 
 - **`aegis-fuse` 拓扑震荡熔断器**（新建 crate，**当前纯逻辑**）
