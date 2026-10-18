@@ -36,22 +36,52 @@ Aegis 建立一张**独立于任何上层代理软件的 OS 级安全底座**：
 
 ## 当前进度
 
-设计面（§1–§30）已闭环；编码面（§21）正在进行，第一步做的就是**只读感知层**：
+设计面（§1–§31）已闭环；编码面（§21）已推进到**真机下发与回滚**，
+并且完成了四组**真机验证实验**（每组都留下了可复现的结论与代价说明）。
 
 | Crate | 状态 | 说明 |
 |---|---|---|
 | `aegis-version` | ✅ 可用 | 版本标识单一事实来源（零依赖） |
 | `aegis-model` | ✅ 可用 | 拓扑事实的共享类型（**零依赖**，感知层产出 / 策略层消费） |
 | `aegis-sense` | ✅ 可用 | 感知层：拓扑采集 / 接口分类 / 默认出口裁决 / SSID / 拓扑指纹 / 拓扑差分 |
-| `aegis-core` | ✅ 可用 | 角色裁决（§20.5）+ 状态机（§26） |
-| `aegis-wfp` | 🚧 只读 + 干跑 | WFP 状态勘察（枚举 / Provider / **持久背板审计**）+ **绝缘笼规则计划与静态自检**（未下发） |
+| `aegis-core` | ✅ 可用 | 角色裁决（§20.5）+ 状态机（§26）+ **`guard`：下游规则生效性守卫** |
+| `aegis-wfp` | ✅ 勘察 + 计划 + **真机下发/回滚** | 只读勘察（枚举 / Provider / 持久背板审计）+ 绝缘笼计划与静态自检 + **两阶段确认下发**（10s 倒计时自动撤销）+ `force_teardown` + 持久化实验探针 |
 | `aegis-fuse` | ✅ 感知侧已通 | 拓扑震荡熔断器：去抖 + **先熔断后分析**；`NotifyIpInterfaceChange` 已接（回调只做一次 `fetch_add`），**拉绝缘动作本身尚未接 WFP** |
-| `aegis-audit` | 🚧 证据链 + 落盘 + 导出已通（未接数据源） | 审计事件 + 规范化编码 + SHA-256 哈希链（篡改可检测）+ 有界内存缓冲 + 只追加落盘（跨分片连续）+ CSV/JSON 证据包 |
+| `aegis-audit` | ✅ 证据链 + 落盘 + 导出 + **崩溃安全** | 规范化编码 + SHA-256 哈希链（篡改可检测）+ 只追加落盘 + CSV/JSON 证据包 + **`scan()` 区分"掉电截断"与"被篡改"** + `open_or_create`（掉电后能续跑） |
 | `aegis-ipc` | ✅ 可用 | 本地 IPC：帧编解码 + 版本握手 + **命名管道（显式 DACL）+ 一次性 token 鉴权** |
-| `aegis-config` | ✅ 可用 | 配置加载与 schema 版本校验（Fail-Closed） |
-| `aegis-orchestrator` | ✅ 可用 | 应用层适配器 SPI：**能力接口** `Capability`（不是软件接口）+ 逐能力失败模式（写死）+ 能力矩阵 + 声明自检 + **契约测试夹具** + 参考适配器（纯模型，不碰系统） |
-| `aegisd` | ✅ 最小链路 | 守护进程：配置（失败即退）→ IPC 命名管道 → 拓扑快照 → 角色裁决 → **WFP 仅干跑** → 审计落盘 |
-| `aegisctl` | ✅ 最小链路 | 控制端：握手 → token 鉴权 → 状态查询 / 心跳 |
+| `aegis-config` | ✅ 可用 | 配置加载与 schema 版本校验（Fail-Closed）+ `[proxy]` / `[[always_allow]]` + `guard_facts` |
+| `aegis-orchestrator` | ✅ 可用 | 适配器 SPI：**能力接口** `Capability` + 逐能力失败模式（写死）+ 能力矩阵 + 声明自检 + **契约测试夹具** + 参考适配器；能力含 **`RuleEffectiveness`（规则是否真的生效）** |
+| `aegisd` | ✅ 最小链路 | 配置（失败即退）→ IPC 命名管道 → 拓扑快照 → 角色裁决 → **WFP 仅干跑** → 审计落盘 |
+| `aegisctl` | ✅ 可用 | 控制端：握手 → token 鉴权 → 状态查询 / 心跳 + `apply` / `confirm` / `rollback` |
+
+**工程状态**：508 项单元测试 + `clippy -D warnings` 全工作区干净；
+变异测试（`cargo mutants`）已接入并有分片方案。
+
+### 四组真机验证实验（都留下了"结论 + 代价"）
+
+| 实验 | 结论 | 文档 |
+|---|---|---|
+| **绝缘笼全流程演练** | 装前通 → 装后断 → **断网期间 IPC 仍活** → 倒计时自动恢复 → 收尾通（5/5）。最坏情况有 45s 硬上界 | `tools/cage-drill.sh` |
+| **持久化规则** | 装得上、**进程退出后仍在**、**删 Provider 不级联（0x8032000A）**、持久过滤器是 `HKLM\...\BFE\...\Persistent\Filter` 下的 REG_BINARY 值 → 离线逃生舱本机可行 | [`docs/PERSISTENT-CAGE.md`](docs/PERSISTENT-CAGE.md) |
+| **崩溃安全** | 掉电留下的审计日志能被识别为"截断"而不是"被篡改"，且**服务能续跑**；同次修掉两个真 bug | [`docs/CRASH-SAFETY.md`](docs/CRASH-SAFETY.md) |
+| **沙漏模型 / 域名边界** | WFP **没有域名字段**（穷举全部约 130 个 `FWPM_CONDITION_*` 后确认）；按出口网卡过滤**成立**（含阴性对照）；"整个主域名"只能做到 IP 快照 | [`docs/HOURGLASS.md`](docs/HOURGLASS.md) |
+
+### 下游规则失效时的兜底（已落地到判决与契约，运行时接线待做）
+
+需求：**"检测到下游规则未生效 → 帮它兜底，全都拒绝"**。
+
+- 兜底那一半**早就写死**：`next(Controlled, ProxyRulesIneffective) = Degraded`，
+  而 `insulation(Degraded) = Full`（全部拒绝），被测试逐状态钉死。
+- 难的是**检测**：除"代理进程崩了"外，其余失效（TUN 消失 / 默认路由没指向它 /
+  系统代理开关被改 / 规则集加载为空）**全部静默**——不报错、不崩溃、界面正常，
+  只是该走的没走。
+- 已落地：四级断言、防抖（连续 3 次才收紧）、冷却（放宽须等）、
+  反复故障转人工、**判不了 ≠ 通过**（`Unknown` 永不触发收紧，否则 SPI 没实现时
+  会变成"一进受控态就永久断网"，那是自锁死）。
+- 兜底的正确姿势是**撤掉放行**（放行本就在动态会话里），**不是新增拒绝规则**——
+  后者一旦持久化，误触发就等于重启都救不回来。
+
+详见 [`docs/DOWNSTREAM-GUARD.md`](docs/DOWNSTREAM-GUARD.md)。
 
 ### 依赖方向铁律
 
@@ -114,6 +144,27 @@ PipeServer::bind（显式 DACL + FIRST_PIPE_INSTANCE，句柄不可继承）
         │
         ▼  FrameReader 解帧（字节流模式下负责分片 / 粘包）
     请求 / 响应
+
+绝缘笼真机下发（需管理员；`tools/cage-drill.sh` 全自动且自带恢复）：
+计划 ──preflight()──▶ 拒绝 Boot / 拒绝无法精确映射的条件
+   │
+   ▼  apply()（**动态会话**：进程崩溃内核自动清空）
+装好 = **待确认**（ApplyTicket::Pending，10s 倒计时）
+   ├─ 窗口内 confirm ──▶ Committed
+   ├─ 超时 / abort ───▶ 自动按 id 回滚
+   └─ force_teardown ─▶ 已确认的也能一条命令撤掉（兜底手册的命脉）
+   ⚠ 看门狗线程**持有会话**：会话一关，这次装的全部规则就没了
+
+持久化规则（**进程死了还在**，仅实验探针使用，未进正式下发路径）：
+非动态会话（flags=0）──▶ 注册 Provider ──▶ FWPM_FILTER_FLAG_PERSISTENT
+   └─ 逃生舱顺序：先删 filter → 再删 Provider（实测**不级联**）→ 复核为 0
+
+下游规则守卫（aegis-core::guard，纯逻辑）：
+配置 + 拓扑 ──guard_facts_from()──▶ GuardFacts ──evaluate()──▶
+    Effective │ Ineffective{failed,reason} │ **Unknown{reason}**
+        │
+        ▼  GuardTracker::observe()（连续 3 次 / 冷却 30s / 1h 内 3 次转人工）
+    Nothing │ Tighten(撤放行) │ Relax │ NeedsHuman
 ```
 
 ## 目录结构
@@ -123,15 +174,26 @@ Aegis/
 ├── design-spec.md          # 设计文档（唯一事实来源）
 ├── VERSION                 # 权威版本号，与 Cargo.toml 严格一致
 ├── docs/
-│   └── VERSIONING.md       # 版本编号规范（发版必读）
+│   ├── VERSIONING.md           # 版本编号规范（发版必读）
+│   ├── CAGE-PLAN.md            # 绝缘笼十条规则逐条在防什么
+│   ├── CRASH-SAFETY.md         # 掉电 / 蓝屏 / 强杀后的恢复能力与代价
+│   ├── EMERGENCY-TEARDOWN.md   # 出事时的强拆手册
+│   ├── HOURGLASS.md            # 沙漏模型：上层管域名，Aegis 管网卡
+│   ├── PERSISTENT-CAGE.md      # 持久化绝缘笼：技术可行性与架构变更方案
+│   └── DOWNSTREAM-GUARD.md     # 下游代理规则失效时的兜底方案
 ├── Cargo.toml              # workspace
 ├── rust-toolchain.toml     # 工具链锁定
 ├── rustfmt.toml / clippy.toml
 ├── config/
 │   └── config.example.toml # 编排器配置样例
 ├── tools/
-│   ├── dev-env.ps1         # MSVC 路线的构建入口
-│   └── clean-ghost-nics.ps1# 幽灵网卡盘点与清理（默认只读）
+│   ├── dev-env.ps1             # MSVC 路线的构建入口
+│   ├── clean-ghost-nics.ps1    # 幽灵网卡盘点与清理（默认只读）
+│   ├── cage-drill.sh           # 绝缘笼全流程演练（全自动恢复，5/5）
+│   ├── persist-drill.sh        # 持久化规则验证实验
+│   ├── crash-drill.sh          # 崩溃安全演练
+│   ├── aegis-restore.sh        # 一键恢复（先走 IPC 强拆，不需要网络）
+│   └── mutate-changed.sh       # 只对改动文件跑变异测试
 └── crates/
     ├── aegis-version/      # 版本标识（零依赖）
     ├── aegis-model/        # 共享数据模型（零依赖）：拓扑事实的类型
@@ -166,11 +228,18 @@ Aegis/
 - ❌ 不启停任何进程或服务（**含任何上层代理软件**）
 - ❌ 不修改注册表、系统代理、路由表
 
-`aegis-wfp` 当前同样**只做只读勘察**：打开动态会话、枚举、审计，
-**不添加 / 不修改 / 不删除任何 WFP 对象**。会话使用
-`FWPM_SESSION_FLAG_DYNAMIC`，即使进程崩溃，引擎也会自动回收该会话的
-一切对象——这条写在会话标志里，而不是依赖"退出前记得清理"，
-因为崩溃路径上没有机会执行清理代码。
+`aegis-wfp` 分为两条路径，**默认走的是安全那条**：
+
+- **正式下发路径**：动态会话（`FWPM_SESSION_FLAG_DYNAMIC`）。即使进程崩溃，
+  引擎也会自动回收该会话的一切对象——这条写在会话标志里，而不是依赖
+  "退出前记得清理"，因为崩溃路径上没有机会执行清理代码。
+  再加上 10 秒两阶段确认，`aegisctl apply` 最坏情况有硬上界。
+- **只读勘察**（`wfp_inspect`）与**计划干跑**（`wfp_plan`）不装任何东西。
+
+⚠ **例外：持久化实验探针**（`persist_probe` / `domain_probe`）会装
+`FWPM_FILTER_FLAG_PERSISTENT` 规则——**进程退出、重启都还在**。
+它们只用于验证"死了也不放开"是否可行，**不在正式下发路径里**，
+用完必须 `purge`。详见 [`docs/PERSISTENT-CAGE.md`](docs/PERSISTENT-CAGE.md)。
 
 > 注：枚举 WFP 通常需要管理员权限。权限不足时 `wfp_inspect` 会明确报出
 > 错误码与处置建议，而不是假装"什么都没有"。
@@ -239,6 +308,17 @@ cargo run -p aegis-orchestrator --example orchestrator_dryrun  # 适配器 SPI�
 cargo run -p aegisd  -- --config config/config.example.toml --data-dir .aegis-run --serve-secs 30
 cargo run -p aegisctl -- --token-file .aegis-run/ipc.token    # 另开终端：握手 + 鉴权 + 查状态
 ```
+
+### 真机实验（**需要管理员**，会真的动网络；脚本自带恢复）
+
+```bash
+bash tools/cage-drill.sh       # 绝缘笼全流程：装 → 断 → 自动恢复，最坏 45s
+bash tools/persist-drill.sh    # 持久化规则：装 → 跨进程还在 → 删得掉
+bash tools/crash-drill.sh      # 崩溃安全：掉电截断的日志能被续跑而不是被判为篡改
+```
+
+> ⚠ `persist_probe` / `domain_probe` 装的规则**进程退出、重启都还在**，
+> 用完必须 `purge`（`persist-drill.sh` 在任何退出路径上都会强制再跑一次）。
 
 ### 绝缘笼：为什么先做"计划"而不是直接下发
 
