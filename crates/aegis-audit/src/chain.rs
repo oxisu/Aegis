@@ -233,6 +233,19 @@ mod tests {
         assert!(c.is_empty());
     }
 
+    /// `is_empty` 只测"空的时候为真"是不够的——一个恒返回 `true` 的实现
+    /// 照样通过。而它的用途恰恰是"有记录时不能说自己是空的"：
+    /// 校验前的快速判空一旦恒真，空证据包会被当成"校验通过"。
+    #[test]
+    fn a_chain_that_has_records_is_not_empty() {
+        let mut c = EvidenceChain::new();
+        assert!(c.is_empty());
+
+        c.append(&event(1));
+        assert!(!c.is_empty(), "追加过记录就不能再说自己是空的");
+        assert_eq!(c.len(), 1);
+    }
+
     #[test]
     fn empty_input_verifies() {
         assert_eq!(verify(&[], &[]), Ok(()));

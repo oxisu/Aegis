@@ -49,7 +49,7 @@ Aegis 建立一张**独立于任何上层代理软件的 OS 级安全底座**：
 | `aegis-audit` | 🚧 证据链 + 落盘 + 导出已通（未接数据源） | 审计事件 + 规范化编码 + SHA-256 哈希链（篡改可检测）+ 有界内存缓冲 + 只追加落盘（跨分片连续）+ CSV/JSON 证据包 |
 | `aegis-ipc` | ✅ 可用 | 本地 IPC：帧编解码 + 版本握手 + **命名管道（显式 DACL）+ 一次性 token 鉴权** |
 | `aegis-config` | ✅ 可用 | 配置加载与 schema 版本校验（Fail-Closed） |
-| `aegis-orchestrator` | ⬜ 待建 | 应用层代理适配器（SPI，可插拔） |
+| `aegis-orchestrator` | ✅ 可用 | 应用层适配器 SPI：**能力接口** `Capability`（不是软件接口）+ 逐能力失败模式（写死）+ 能力矩阵 + 声明自检 + **契约测试夹具** + 参考适配器（纯模型，不碰系统） |
 | `aegisd` / `aegisctl` | ⬜ 待建 | 守护进程 / 控制端二进制 |
 
 ### 依赖方向铁律
@@ -150,6 +150,8 @@ Aegis/
     │   │                   #   + 命名管道（显式 DACL）与 token 鉴权
     │   └── examples/ipc_dryrun.rs   # 全链路干跑（无需管理员）
     └── aegis-config/       # 配置加载 + schema 版本校验（Fail-Closed）
+    ├── aegis-orchestrator/ # 适配器 SPI：能力接口 + 失败模式 + 契约夹具 + 参考适配器
+    │   └── examples/orchestrator_dryrun.rs  # 适配器契约干跑（无需管理员）
 ```
 
 ## 安全边界（`aegis-sense` 的硬约束）
@@ -228,6 +230,7 @@ cargo run -p aegis-wfp   --example wfp_plan    # 绝缘笼干跑：打印要装�
 cargo run -p aegis-wfp   --example wfp_plan -- --campus-strict --boot-backbone
 cargo run -p aegis-ipc   --example ipc_dryrun  # IPC 全链路：握手 + token 鉴权（无需管理员）
 cargo run -p aegis-audit --example audit_dryrun # 证据链：什么抓得住、什么抓不住
+cargo run -p aegis-orchestrator --example orchestrator_dryrun  # 适配器 SPI：契约 + 自检 + 三类故障
 ```
 
 ### 绝缘笼：为什么先做"计划"而不是直接下发

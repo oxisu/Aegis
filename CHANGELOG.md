@@ -34,6 +34,51 @@
 
 ### Added
 
+- **`aegis-orchestrator` 应用层适配器 SPI**（新建 crate，§2A.4）。
+  对应外部评审第 1 点：**薄适配器无法"确保"适配，只能靠契约测试和失败模式**
+  - `capability::Capability`：SPI 按**能力**切，不按软件类别切。
+    按软件切的下场是换个软件就改 trait，那不叫可插拔
+    - `Capability::fallback()`：逐能力的失败模式**写死在代码里**，
+      不给运行时留"Fail-Closed 还是告警"的二选一。留给运行时，就会出现
+      "本该断网的时候只是弹了个提示"
+      - Fail-Closed 三条：`TunInterfacePresent` / `DefaultEgress` / `DnsOwnership`
+      - 降级三条：`Reload` / `HealthProbe` / `ConfigFragmentGenerate`
+  - `error::AdapterError`：**`Unsupported` 与 `Failed` 必须分开**
+    - 混在一起的后果不是代码难看：`Unsupported` 被当 `Failed` → Aegis 一直
+      重试一个永远不可能成功的能力；`Failed` 被当 `Unsupported` → 适配器真挂了
+      却被静默吞掉，一个该 Fail-Closed 的出口悄悄变成放行
+    - `is_fault()` 是运维侧唯一该用来判断"要不要告警"的入口
+  - `spi::invoke_checked`：**所有调用的唯一入口**，两件事由底座保证而非靠适配器自觉
+    - 未声明的能力调用即 `Unsupported`（不进适配器）
+    - **答非所问即故障**：问 DNS 却回 `Healthy` 会升级成 `Failed`。
+      这种错不表现为失败，只表现为"结果看起来不对"
+  - `spi::matrix` 能力矩阵：`usable()` = 无 Fail-Closed 缺口。
+    降级项不影响——"少了健康检查"不等于"在漏流量"
+  - `spi::audit_declaration` 声明自检（§2A.4 ③：声明 ≠ 事实）
+    - 声明了却回 `Unsupported` = 撒谎（`Lie`），必须按 `Failed` 处置
+    - `Reload` 还会验证**配置版本号真的变了**——只回 `Reloaded` 但版本纹丝不动
+      的适配器，它的 Reload 是假的，后果是"以为配置生效了其实没有"
+    - `DefaultEgress` 标记为 `Unverifiable`：**它无法无害自检**，
+      "试一下"就等于真的接管一次出口
+    - ⚠ 自检有副作用（会真的 reload 一次），**必须排在契约之后**，
+      否则契约里"健康检查报当前版本"会假红
+  - `contract` 契约测试夹具：把"适配"从形容词变成可判定的命题
+    （**适配 = 这组 fixture 过没过**）
+    - `suite(scenario, declared)` 由场景 + 声明生成完整用例：
+      声明了 → 期望真做对；没声明 → 期望 `Unsupported`。
+      **少实现一个能力不会让契约红，声明了却做不到一定红**
+    - `SUITE_ORDER` 里 `Reload` 必须排在 `HealthProbe` 之后（注释写明理由）
+  - `reference::ReferenceAdapter`：**由场景驱动的纯模型**，不启进程、不提权、
+    不改路由表。契约验的是适配器的**语义**，不是"这个软件装没装"
+    - TUN 三态：`TunPresent` / `TUN_NOT_PERMITTED`（起来了但没被放行，
+      **必须报错，不能静默说"没有"**）/ `TunAbsent`
+    - DNS 双边接管 53 = `DNS_OWNERSHIP_CONFLICT` 冲突，不是"以谁为准"
+  - `examples/orchestrator_dryrun`：演示三类"看起来适配了其实在漏"——
+    ① 撒谎（声明 Reload 却回 Unsupported）② 答非所问 ③ **诚实但能力不够
+    （契约 7/7 全绿，却有 Fail-Closed 缺口，出口不可用）**
+  - ⚠ 结论写进 §21.2：**契约过 ≠ 能用**。契约验"诚不诚实"，
+    矩阵验"够不够"，合成一个"通过/不通过"会把"诚实但能力不够"伪装成"适配好了"
+
 - **`aegis-audit` 审计与证据链**（新建 crate，**当前纯内存，未落盘**）
   - `event::AuditEvent`：一条出站连接的完整事实（谁 / 哪到哪 / 协议 /
     走哪张网卡的哪个角色 / 结果如何）。`host` 与 `rule` 是**可空富化字段**——
@@ -229,6 +274,22 @@
     而不是假装"什么都没有"
 
 ### Fixed
+
+- **变异测试补漏（aegis-audit 安全核心 106 个变异体：8 漏网 → 0）**
+  - `EvidenceChain::is_empty` / `AuditRing::is_empty` 只测了"空的时候为真"，
+    恒返回 `true` 的实现能蒙混过关。已补"有记录时必须为假"
+    （前者用于校验前判空，后者用于 UI 判断有没有新事件）
+  - `decode` 的尾随字节数只验了 1 个字节——"剩余 = 总长 − 位置"和
+    "剩余 = 总长 ÷ 位置"在这个取值上恰好都等于 1。已补 3 / 9 个字节两种
+    **确切值**断言，把减法写成除法的实现立刻暴露
+  - `Cursor::take` 的 `Truncated.have` 只用了 `matches!` 验过，
+    把它从"还剩几个字节"算成"缓冲区总长"的实现抓不到；已补
+    `Truncated { need: 4, have: 3 }` 这种确切值
+  - `Action::tag()` / `Protocol::tag()` 只验了"是 ASCII 且非空"，
+    把整个函数换成常量 `"xyzzy"` 照样通过。它们是**证据包的字段值**
+    （不是给人看的文案），已钉住确切字面值
+  - 两个 `Display` 实现同样补了字面值断言：空掉它不会让任何校验失败，
+    只会让人在核对时看到一片空白
 
 - **对端关闭被误判成协议故障**：客户端 `CloseHandle` 后，阻塞中的 `ReadFile`
   **不会**返回 `got == 0`，而是直接以 `ERROR_BROKEN_PIPE`（109）失败。

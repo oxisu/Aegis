@@ -286,6 +286,42 @@ mod tests {
         assert_eq!(decode(&b), Err(DecodeError::TrailingBytes(1)));
     }
 
+    /// 尾随字节的**个数**必须报准。
+    ///
+    /// 只追加 1 个字节时，"剩余 = 总长 - 位置"和"剩余 = 总长 / 位置"
+    /// 恰好都等于 1，一个把减法写成除法的实现能蒙混过关。多加几个字节，
+    /// 两种算法立刻分开。这类"只在某个取值上等价"的算术错误，
+    /// 只有把确切值钉住才抓得到。
+    #[test]
+    fn the_number_of_trailing_bytes_is_reported_exactly() {
+        let mut b = canonical_bytes(&event()).to_vec();
+        b.extend_from_slice(&[0x00, 0x01, 0x02]);
+        assert_eq!(decode(&b), Err(DecodeError::TrailingBytes(3)));
+
+        let mut b = canonical_bytes(&event()).to_vec();
+        b.extend_from_slice(&[0x00; 9]);
+        assert_eq!(decode(&b), Err(DecodeError::TrailingBytes(9)));
+    }
+
+    /// `have` 是"还剩几个字节"，不是"缓冲区总长"。
+    ///
+    /// 只验 `matches!(.., Truncated { .. })` 抓不到把它算错的实现，
+    /// 而报错里那个数是排查"这段日志为什么读不出来"的唯一线索——
+    /// 报成几百（总长）会直接把人引到错的偏移量上。
+    #[test]
+    fn a_truncation_reports_how_many_bytes_are_actually_left() {
+        let b = canonical_bytes(&event()).to_vec();
+        // MAGIC 17 字节之后紧跟一个 u32：切到 20 字节时还差 1 字节
+        assert_eq!(
+            decode(&b[..20]),
+            Err(DecodeError::Truncated { need: 4, have: 3 })
+        );
+        assert_eq!(
+            decode(&b[..17]),
+            Err(DecodeError::Truncated { need: 4, have: 0 })
+        );
+    }
+
     #[test]
     fn illegal_field_values_are_rejected() {
         let mut b = canonical_bytes(&event()).to_vec();

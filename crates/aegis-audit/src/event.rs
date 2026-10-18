@@ -178,9 +178,19 @@ mod tests {
         assert!(!Action::Allow.is_blocked());
     }
 
+    /// 证据包要跨系统比对，标签里不能出现中文。
+    ///
+    /// ⚠ 这里必须钉住**确切字面值**，不能只验"是 ASCII 且非空"。
+    /// 只验性质的话，把整个 `tag()` 换成一个常量（比如 "xyzzy"）照样通过，
+    /// 而那样改的后果是：证据包导出去之后，别人按 "allow"/"reject" 比对的
+    /// 脚本全部静默失配——比导出失败更糟。
     #[test]
     fn action_tags_are_ascii_and_stable() {
-        // 证据包要跨系统比对，标签里不能出现中文
+        assert_eq!(Action::Allow.tag(), "allow");
+        assert_eq!(Action::Reject.tag(), "reject");
+        assert_eq!(Action::FirewallBlock.tag(), "firewall-block");
+        assert_eq!(Action::PlaintextBlock.tag(), "plaintext-block");
+
         for a in [
             Action::Allow,
             Action::Reject,
@@ -190,6 +200,43 @@ mod tests {
             assert!(a.tag().is_ascii(), "{a} 的标签必须是 ASCII：{}", a.tag());
             assert!(!a.tag().is_empty());
         }
+    }
+
+    /// 同上：协议标签是证据包的字段值，不是给人看的文案。
+    #[test]
+    fn protocol_tags_are_pinned_to_exact_literals() {
+        assert_eq!(Protocol::Tcp.tag(), "tcp");
+        assert_eq!(Protocol::Udp.tag(), "udp");
+        assert_eq!(Protocol::Icmp.tag(), "icmp");
+        assert_eq!(Protocol::Other(47).tag(), "other");
+        assert_eq!(Protocol::Other(0).tag(), "other");
+    }
+
+    /// Display 是给运维/网络中心看的那一行字。空掉它不会让任何校验失败，
+    /// 只会让人在核对时看到一片空白——所以也钉住。
+    #[test]
+    fn display_text_is_not_empty_and_distinguishes_the_variants() {
+        assert_eq!(Action::Allow.to_string(), "放行");
+        assert_eq!(Action::Reject.to_string(), "规则拒绝");
+        assert_eq!(Action::FirewallBlock.to_string(), "内核阻断");
+        assert_eq!(Action::PlaintextBlock.to_string(), "明文阻断");
+
+        let mut seen = Vec::new();
+        for a in [
+            Action::Allow,
+            Action::Reject,
+            Action::FirewallBlock,
+            Action::PlaintextBlock,
+        ] {
+            let s = a.to_string();
+            assert!(!s.is_empty());
+            assert!(!seen.contains(&s), "两个动作的显示文案重复：{s}");
+            seen.push(s);
+        }
+
+        assert_eq!(Protocol::Tcp.to_string(), "tcp");
+        assert_eq!(Protocol::Icmp.to_string(), "icmp");
+        assert_eq!(Protocol::Other(47).to_string(), "proto-47");
     }
 
     #[test]

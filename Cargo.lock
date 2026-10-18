@@ -62,6 +62,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "aegis-orchestrator"
+version = "0.1.0-alpha.2"
+dependencies = [
+ "aegis-version",
+ "mutants",
+ "thiserror",
+]
+
+[[package]]
 name = "aegis-sense"
 version = "0.1.0-alpha.2"
 dependencies = [

@@ -134,6 +134,18 @@ mod tests {
         assert_eq!(ring.dropped(), 2, "丢弃必须可观测");
     }
 
+    /// 同上：`is_empty` 恒返回 `true` 也能骗过"drain 后为空"这种单向断言。
+    /// 而 UI 正是靠它判断"有没有新事件要显示"——恒真等于永远不刷新。
+    #[test]
+    fn a_ring_that_holds_records_is_not_empty() {
+        let ring = AuditRing::new(4);
+        assert!(ring.is_empty());
+
+        ring.push(event(1));
+        assert!(!ring.is_empty(), "推入过事件就不能再说自己是空的");
+        assert_eq!(ring.len(), 1);
+    }
+
     #[test]
     fn drain_empties_the_ring_but_not_the_drop_counter() {
         let ring = AuditRing::new(2);
