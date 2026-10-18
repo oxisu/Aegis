@@ -177,7 +177,9 @@ v0 可以先由用户在配置里显式给几个。
 | P1 | 配置面 `proxy.tun_luid` / `proxy.mode` / `always_allow` | `aegis-config` | ✅ 已落地（见 §7.1） |
 | P1 | 断言 B/C 的**采集**：TUN 在不在 + 默认出口是不是它 | `aegis-core::guard::topology_inputs` | ✅ 已落地 |
 | P1 | 编排器接线：定时采拓扑 → 判 → 喂 `GuardTracker` | `aegis-orchestrator` | ⬜ 待做 |
-| P2 | 断言 D：路由试算 canary（`GetBestRoute2`） | `aegis-sense` + SPI | ⬜ SPI 未实现 |
+| P2 | 断言 A/D 的 **SPI 契约面** | `aegis-orchestrator` | ✅ 已落地（见 §6.4） |
+| P2 | 接**真实**适配器（Clash / sing-box 实现该能力） | `aegis-orchestrator` | ⬜ 待做 |
+| P2 | 断言 D：路由试算 canary（`GetBestRoute2`） | `aegis-sense` | ⬜ 待做 |
 | P2 | GUI 展示"为什么断" + 始终白名单管理 | Tauri | ⬜ |
 
 ### 6.1 已落地的部分长什么样
@@ -230,6 +232,34 @@ match tracker.observe(&verdict, now_ms, GuardPolicy::default()) {
 - 配置里的 `tun_luid = 0` 同理，加载时**翻成 `None`**。否则守卫会拿 0 去
   跟真实默认出口比，永远不等 → 判定"未生效" → 持续收紧 → **永久断网**。
   （样例配置 `config.example.toml` 里写的就是 0。）
+
+### 6.4 断言 A/D 的 SPI 契约面（`aegis-orchestrator`，已落地）
+
+SPI 里原先只有 `HealthProbe`（能被健康检查）——它只回答"进程活着吗"，
+**抓不到"活着但规则没生效"**。所以新增一个独立能力：
+
+```rust
+Capability::RuleEffectiveness          // tag: "rule_effectiveness"
+Op::RulesEffective
+Outcome::RulesEffective                // 生效
+       | RulesIneffective { failed }   // 没生效（**事实**不是错误）
+       | RulesUnknown { why }          // 它自己也不知道
+```
+
+三条刻意的设计：
+
+1. **三态，不是一个 `bool`。** 守卫对"判不了"的处理（保持现状）与对
+   "没生效"的处理（收紧）是**相反**的。逼适配器二选一，它就会猜，
+   猜错方向就是误断网或漏放行。
+2. **`RulesIneffective` 是事实不是错误。** 适配器如实说"我的规则没生效"
+   必须被允许；否则它只能靠"调用失败"来传达，调用方就分不清
+   "没生效"和"适配器坏了"（与 `TunAbsent` / `DnsNotOwned` 同一条原则）。
+3. **缺失只降级，不 Fail-Closed。** Aegis 自己还有"TUN 在不在 / 默认出口
+   是不是它"这两条断言可用，不需要适配器配合。若因为适配器不支持就断网，
+   等于 SPI 没实现时一进受控态就**永久断网**——那是自锁死。
+
+契约里也钉住了那个核心场景：进程好好活着（`HealthProbe` 报 Healthy），
+但 `RuleEffectiveness` 报告规则没生效——**只有后者抓得到它**。
 
 ### 6.3 配置面（`aegis-config`，已落地）
 

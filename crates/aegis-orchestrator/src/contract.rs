@@ -15,7 +15,7 @@
 use crate::capability::Capability;
 use crate::error::{invariant, AdapterError};
 use crate::op::{Op, Outcome};
-use crate::reference::{fragment_text, Scenario};
+use crate::reference::{fragment_text, RuleState, Scenario};
 use crate::spi::{invoke_checked, Adapter};
 
 /// 用例的输入。**拥有数据**（不是借用），因为夹具要能被存下来、传出去。
@@ -28,6 +28,8 @@ pub enum Input {
     Health,
     Reload,
     Dns,
+    /// 问适配器："你的规则现在真的生效吗？"
+    RulesEffective,
 }
 
 impl Input {
@@ -39,6 +41,7 @@ impl Input {
             Self::Health => Capability::HealthProbe,
             Self::Reload => Capability::Reload,
             Self::Dns => Capability::DnsOwnership,
+            Self::RulesEffective => Capability::RuleEffectiveness,
         }
     }
 
@@ -50,6 +53,7 @@ impl Input {
             Self::Health => Op::Health,
             Self::Reload => Op::Reload,
             Self::Dns => Op::Dns,
+            Self::RulesEffective => Op::RulesEffective,
         }
     }
 }
@@ -178,13 +182,14 @@ fn describe_got(got: &Result<Outcome, AdapterError>) -> String {
 /// `next_version`，而健康检查用例期望的是 `version`。顺序反了会让一条
 /// 完全正确的实现被判失败——这种"假红"比漏测更伤，因为它会让人习惯于
 /// 忽略契约结果。
-pub const SUITE_ORDER: [Capability; 6] = [
+pub const SUITE_ORDER: [Capability; 7] = [
     Capability::TunInterfacePresent,
     Capability::DefaultEgress,
     Capability::ConfigFragmentGenerate,
     Capability::HealthProbe,
     Capability::DnsOwnership,
     Capability::Reload,
+    Capability::RuleEffectiveness,
 ];
 
 /// 契约里用来表示"一张没被放行的 TUN"的哨兵名。
@@ -343,6 +348,30 @@ fn honest_cases(scenario: &Scenario, capability: Capability) -> Vec<HonestCase> 
                 Expect::Outcome(Outcome::DnsNotOwned),
             )],
         },
+
+        // ⚠ 三态都要有契约用例。"不知道"必须是一个**正当答案**：
+        // 适配器被逼着在"生效/没生效"里二选一，就会猜一个，
+        // 而守卫对两种结论的处理是相反的（保持现状 vs 收紧）——
+        // 猜错方向就是误断网或漏放行。
+        Capability::RuleEffectiveness => match &scenario.rules {
+            RuleState::Effective => vec![(
+                "rules_are_reported_effective",
+                Input::RulesEffective,
+                Expect::Outcome(Outcome::RulesEffective),
+            )],
+            RuleState::Ineffective { failed } => vec![(
+                "ineffective_rules_are_reported_as_a_fact",
+                Input::RulesEffective,
+                Expect::Outcome(Outcome::RulesIneffective {
+                    failed: failed.clone(),
+                }),
+            )],
+            RuleState::Unknown { why } => vec![(
+                "not_knowing_is_an_honest_answer",
+                Input::RulesEffective,
+                Expect::Outcome(Outcome::RulesUnknown { why: why.clone() }),
+            )],
+        },
     }
 }
 
@@ -400,6 +429,53 @@ mod tests {
             .filter(|c| c.expect == Expect::Unsupported)
             .count();
         assert_eq!(undeclared, Capability::ALL.len() - 2);
+    }
+
+    /// **这条是整个新增能力的意义所在**：进程好好活着（HealthProbe 报 Healthy），
+    /// 但规则没生效。只看健康检查永远抓不到它——那类最阴的静默失效。
+    #[test]
+    fn a_live_adapter_with_dead_rules_is_caught_only_by_rule_effectiveness() {
+        let s = Scenario::sample_with_ineffective_rules();
+        let a = ReferenceAdapter::new("ref", s.clone());
+
+        assert!(check(&a, &s).passed(), "{}", check(&a, &s).summary());
+
+        // ⚠ 直接调用要另起一个适配器：`check` 跑的是**完整**契约套件，
+        // 里面包含 Reload，跑完之后 Health 报的就是 next_version 了
+        // （这正是"Reload 必须排在 Health 之后"那条顺序约束的意义）。
+        let fresh = ReferenceAdapter::new("ref", s.clone());
+
+        // 健康检查照样是"活的"
+        assert_eq!(
+            invoke_checked(&fresh, Op::Health).unwrap(),
+            Outcome::Healthy {
+                version: "2026.10.18-1".into()
+            }
+        );
+        // 只有规则生效性说"没生效"
+        match invoke_checked(&fresh, Op::RulesEffective).unwrap() {
+            Outcome::RulesIneffective { failed } => assert_eq!(
+                failed,
+                vec!["规则集加载为空（FINAL 走直连）".to_string()]
+            ),
+            other => panic!("期望 RulesIneffective，得到 {other:?}"),
+        }
+    }
+
+    /// "不知道"必须是**正当答案**：契约要绿，且不能被当成失败或撒谎。
+    /// 适配器被逼着二选一就会猜，而守卫对两种结论的处理是相反的。
+    #[test]
+    fn an_adapter_may_honestly_say_it_does_not_know() {
+        let s = Scenario::sample_with_unknown_rules();
+        let a = ReferenceAdapter::new("ref", s.clone());
+
+        assert!(check(&a, &s).passed(), "{}", check(&a, &s).summary());
+        match invoke_checked(&a, Op::RulesEffective).unwrap() {
+            Outcome::RulesUnknown { why } => {
+                assert_eq!(why, "无法读取当前生效的规则集")
+            },
+            other => panic!("期望 RulesUnknown，得到 {other:?}"),
+        }
     }
 
     /// 撒谎的适配器：声明了 Reload，却回 Unsupported。契约必须红。

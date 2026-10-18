@@ -38,6 +38,22 @@ pub struct Scenario {
     pub version: String,
     /// 热重载之后的版本号。
     pub next_version: String,
+    /// 它自己的规则**当前是否真的生效**（`docs/DOWNSTREAM-GUARD.md`）。
+    ///
+    /// ⚠ 这是个三态，不是一个 bool。"不知道"必须能被表达——
+    /// 适配器被逼着在"生效/没生效"里二选一就会猜，而守卫对两种结论的
+    /// 处理是**相反**的（保持现状 vs 收紧），猜错方向就是误断网或漏放行。
+    pub rules: RuleState,
+}
+
+/// 适配器对自己规则生效性的回答。**与 `Outcome` 的三态一一对应。**
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum RuleState {
+    Effective,
+    /// 没生效，并且说得出哪几条断言没过。
+    Ineffective { failed: Vec<String> },
+    /// 自己也不知道。
+    Unknown { why: String },
 }
 
 impl Scenario {
@@ -50,6 +66,28 @@ impl Scenario {
             aegis_dns_lock: false,
             version: "2026.10.18-1".to_string(),
             next_version: "2026.10.18-2".to_string(),
+            rules: RuleState::Effective,
+        }
+    }
+
+    /// 场景：进程好好活着，但**规则没生效** —— 那类最阴的静默失效。
+    /// `HealthProbe` 会照样报 Healthy，只有 `RuleEffectiveness` 能抓到。
+    pub fn sample_with_ineffective_rules() -> Self {
+        Self {
+            rules: RuleState::Ineffective {
+                failed: vec!["规则集加载为空（FINAL 走直连）".to_string()],
+            },
+            ..Self::sample()
+        }
+    }
+
+    /// 场景：适配器自己也说不清规则生没生效。
+    pub fn sample_with_unknown_rules() -> Self {
+        Self {
+            rules: RuleState::Unknown {
+                why: "无法读取当前生效的规则集".to_string(),
+            },
+            ..Self::sample()
         }
     }
 
@@ -143,6 +181,13 @@ impl Adapter for ReferenceAdapter {
                 })
             }
             Op::Dns => self.dns(),
+            Op::RulesEffective => Ok(match &self.scenario.rules {
+                RuleState::Effective => Outcome::RulesEffective,
+                RuleState::Ineffective { failed } => Outcome::RulesIneffective {
+                    failed: failed.clone(),
+                },
+                RuleState::Unknown { why } => Outcome::RulesUnknown { why: why.clone() },
+            }),
         }
     }
 }

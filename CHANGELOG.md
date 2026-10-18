@@ -271,6 +271,22 @@
 - **`config.example.toml`**：补上 `[proxy]` 与注释掉的 `[[always_allow]]`，
   写清 mode 为什么不能猜、后门为什么受控
 
+- **`aegis-orchestrator`：新增能力 `RuleEffectiveness`（断言 A/D 的 SPI 契约面）**
+  - ⚠ 它与已有的 `HealthProbe` **不是一回事**，别合并：后者只回答"进程活着吗"，
+    而"活着但规则没生效"正是那类最阴的静默失效（TUN 没了 / 默认路由没指向它 /
+    规则集加载为空，全都表现为"进程好好的、端口通着、界面正常"）
+  - `Outcome` 是**三态**：`RulesEffective` / `RulesIneffective{failed}` /
+    `RulesUnknown{why}`。守卫对"判不了"（保持现状）与"没生效"（收紧）的处理
+    是**相反**的，逼适配器二选一它就会猜，猜错方向就是误断网或漏放行
+  - `RulesIneffective` 是**事实不是错误**（与 `TunAbsent` / `DnsNotOwned` 同一条
+    原则）：适配器如实说"我的规则没生效"必须被允许，否则它只能靠"调用失败"
+    来传达，调用方就分不清"没生效"和"适配器坏了"
+  - ⚠ 缺失**只降级不 Fail-Closed**：Aegis 自己还有"TUN 在不在 / 默认出口是不是
+    它"两条断言可用。若因为适配器不支持就断网，等于 SPI 没实现时一进受控态
+    就永久断网——那是自锁死
+  - 契约钉住核心场景：进程活着（HealthProbe 报 Healthy）但规则没生效，
+    **只有 RuleEffectiveness 抓得到**
+
 - **`docs/DOWNSTREAM-GUARD.md`：下游规则失效时的兜底方案**
   - 需求：**"检测到规则未生效 → 帮下游软件兜底，全都拒绝掉"**
   - ⚠ **兜底那一半早就有了**：`next(Controlled, ProxyUnhealthy) = Degraded`，

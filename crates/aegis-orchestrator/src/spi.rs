@@ -155,6 +155,7 @@ fn probe_op(capability: Capability) -> Op<'static> {
         Capability::HealthProbe => Op::Health,
         Capability::Reload => Op::Reload,
         Capability::DnsOwnership => Op::Dns,
+        Capability::RuleEffectiveness => Op::RulesEffective,
     }
 }
 
@@ -357,8 +358,30 @@ mod tests {
                 Capability::DefaultEgress,
                 Capability::ConfigFragmentGenerate,
                 Capability::DnsOwnership,
+                Capability::RuleEffectiveness,
             ]
         );
+    }
+
+    /// ⚠ 这条钉住"规则生效"缺了之后**出口仍可用**：
+    /// 它只是让 Aegis 少一组断言，而 Aegis 自己的出口断言还在，
+    /// 因此不能变成 Fail-Closed 缺口（那样 SPI 没实现时会永久断网）。
+    #[test]
+    fn missing_rule_effectiveness_does_not_make_the_egress_unusable() {
+        let mut a = full();
+        a.declare(&[
+            Capability::TunInterfacePresent,
+            Capability::DefaultEgress,
+            Capability::DnsOwnership,
+        ]);
+        let m = matrix(&a);
+        assert!(m.missing().contains(&Capability::RuleEffectiveness));
+        assert!(
+            m.fail_closed_gaps().is_empty(),
+            "规则生效只该降级，不该成为 Fail-Closed 缺口：{:?}",
+            m.fail_closed_gaps()
+        );
+        assert!(m.usable());
     }
 
     /// 缺了 Reload / ConfigFragmentGenerate 只降级，出口仍可用。

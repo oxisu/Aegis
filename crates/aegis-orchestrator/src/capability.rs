@@ -31,18 +31,27 @@ pub enum Capability {
     Reload,
     /// 它是否接管 DNS（与 Aegis 的 53 封锁是否冲突）
     DnsOwnership,
+    /// 能否报告**自己的规则当前是否真的生效**（`docs/DOWNSTREAM-GUARD.md`）
+    ///
+    /// ⚠ 这一条与 [`Self::HealthProbe`] **不是一回事**，别合并：
+    /// `HealthProbe` 只回答"进程活着吗"，而"活着但规则没生效"正是
+    /// 那类最阴的静默失效（TUN 没了 / 默认路由没指向它 / 规则集加载为空，
+    /// 全都表现为"进程好好的、端口通着、界面正常"）。
+    /// 没有这个能力，Aegis 就只能靠自己那套出口断言去猜。
+    RuleEffectiveness,
 }
 
 impl Capability {
     /// 全部能力。能力矩阵与"缺了什么"的对账都从这里出发——
     /// 加新能力时只改这一处，矩阵和自检自动跟上。
-    pub const ALL: [Capability; 6] = [
+    pub const ALL: [Capability; 7] = [
         Capability::TunInterfacePresent,
         Capability::DefaultEgress,
         Capability::ConfigFragmentGenerate,
         Capability::HealthProbe,
         Capability::Reload,
         Capability::DnsOwnership,
+        Capability::RuleEffectiveness,
     ];
 
     /// ASCII 稳定标签：写进配置、日志、错误码。
@@ -57,6 +66,7 @@ impl Capability {
             Self::HealthProbe => "health_probe",
             Self::Reload => "reload",
             Self::DnsOwnership => "dns_ownership",
+            Self::RuleEffectiveness => "rule_effectiveness",
         }
     }
 
@@ -76,6 +86,7 @@ impl Capability {
             Self::HealthProbe => "能被健康检查",
             Self::Reload => "能热重载（不重启进程就让配置生效）",
             Self::DnsOwnership => "接管 DNS（关系到 53 封锁会不会被绕过）",
+            Self::RuleEffectiveness => "能报告自己的规则**是否真的生效**（不只是『进程活着』）",
         }
     }
 
@@ -102,6 +113,17 @@ impl Capability {
             Self::ConfigFragmentGenerate => Fallback::Degrade {
                 action: "只用 Aegis 自带的粗粒度规则：精细路由没了，\
                          但 53 / 广播 / 默认拒绝仍在",
+            },
+            // ⚠ 刻意是 Degrade 而不是 FailClosed。
+            // 这个能力缺失意味着 Aegis 少一组断言，但**不是没有断言**：
+            // 「TUN 在不在」「默认出口是不是它」这两条 Aegis 自己就能判，
+            // 不需要适配器配合。若因为适配器不支持就 FailClosed，
+            // 等于在 SPI 还没实现时一进受控态就永久断网——那是自锁死，
+            // 不是 fail-closed（见 docs/DOWNSTREAM-GUARD.md）。
+            Self::RuleEffectiveness => Fallback::Degrade {
+                action: "降级为只使用 Aegis 自己的出口断言（TUN 在不在、\
+                         默认出口是不是它）；若该模式下连出口断言都不可用，\
+                         守卫如实报告『判不了』而不是假装生效",
             },
         }
     }
@@ -193,7 +215,21 @@ mod tests {
                 Capability::ConfigFragmentGenerate,
                 Capability::HealthProbe,
                 Capability::Reload,
+                Capability::RuleEffectiveness,
             ]
+        );
+    }
+
+    /// ⚠ 这条钉住新增能力的**判据**：「规则生效」缺失只降级不断网。
+    /// 它和 `HealthProbe`（进程活着吗）是两件事——恰恰是"活着但规则没生效"
+    /// 这类静默失效需要单独一个能力来表达。
+    #[test]
+    fn rule_effectiveness_is_its_own_capability_and_only_degrades() {
+        assert_ne!(Capability::RuleEffectiveness, Capability::HealthProbe);
+        assert_eq!(Capability::RuleEffectiveness.tag(), "rule_effectiveness");
+        assert!(
+            !Capability::RuleEffectiveness.fallback().is_fail_closed(),
+            "缺失只应降级：Aegis 自己还有出口断言可用"
         );
     }
 

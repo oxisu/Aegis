@@ -30,6 +30,13 @@ pub enum Op<'a> {
 
     /// 谁在管 53。
     Dns,
+
+    /// 你自己的规则**当前是否真的生效**（`docs/DOWNSTREAM-GUARD.md`）。
+    ///
+    /// ⚠ 与 `Health` 的区别：`Health` 只回答"进程活着吗"，而
+    /// "活着但规则没生效"正是那类最阴的静默失效。这里要的是
+    /// "你的规则此刻有没有真的在拦该拦的东西"。
+    RulesEffective,
 }
 
 impl Op<'_> {
@@ -42,6 +49,7 @@ impl Op<'_> {
             Self::Health => Capability::HealthProbe,
             Self::Reload => Capability::Reload,
             Self::Dns => Capability::DnsOwnership,
+            Self::RulesEffective => Capability::RuleEffectiveness,
         }
     }
 }
@@ -72,6 +80,21 @@ pub enum Outcome {
     DnsOwned { owner: String },
     /// 没人管 53。
     DnsNotOwned,
+    /// 规则确认生效。
+    RulesEffective,
+    /// 规则**没生效**。⚠ 这是**事实**不是错误——适配器如实说"我的规则
+    /// 没生效"是必须被允许的表达，否则它只能靠"调用失败"来传达，
+    /// 调用方就分不清"没生效"和"适配器坏了"。
+    RulesIneffective {
+        /// 哪些断言没过（给人看，进审计）。
+        failed: Vec<String>,
+    },
+    /// 适配器自己**也不知道**规则生没生效。
+    ///
+    /// 三态缺一不可：把"不知道"塞进前两者之一，会造出一个假的确定性——
+    /// 而守卫对"判不了"的处理（保持现状）与对"没生效"的处理（收紧）
+    /// 是**相反**的，猜错方向就是误断网或漏放行。
+    RulesUnknown { why: String },
 }
 
 impl Outcome {
@@ -84,6 +107,9 @@ impl Outcome {
             Self::Healthy { .. } => Capability::HealthProbe,
             Self::Reloaded { .. } => Capability::Reload,
             Self::DnsOwned { .. } | Self::DnsNotOwned => Capability::DnsOwnership,
+            Self::RulesEffective
+            | Self::RulesIneffective { .. }
+            | Self::RulesUnknown { .. } => Capability::RuleEffectiveness,
         }
     }
 }
@@ -109,6 +135,26 @@ mod tests {
         assert_eq!(Op::Health.capability(), Capability::HealthProbe);
         assert_eq!(Op::Reload.capability(), Capability::Reload);
         assert_eq!(Op::Dns.capability(), Capability::DnsOwnership);
+        assert_eq!(
+            Op::RulesEffective.capability(),
+            Capability::RuleEffectiveness
+        );
+    }
+
+    /// 三态同属一个能力：适配器必须能分别表达"生效 / 没生效 / 不知道"，
+    /// 而它们都归 `RuleEffectiveness`，不能被当成答非所问。
+    #[test]
+    fn all_three_rule_states_belong_to_one_capability() {
+        let c = Capability::RuleEffectiveness;
+        assert_eq!(Outcome::RulesEffective.capability(), c);
+        assert_eq!(
+            Outcome::RulesIneffective { failed: vec!["x".into()] }.capability(),
+            c
+        );
+        assert_eq!(
+            Outcome::RulesUnknown { why: "y".into() }.capability(),
+            c
+        );
     }
 
     /// "适配器答非所问"要靠这个不变式抓出来：
