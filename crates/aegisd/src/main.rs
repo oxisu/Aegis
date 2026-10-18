@@ -246,6 +246,10 @@ fn main() {
     for f in &findings {
         println!("      [{:?}/{}] {}: {}", f.severity, f.kind.name(), f.code, f.detail);
     }
+    // ⚠ 逐条打印。让人在**下发之前**就能看清要装的是什么——
+    // "装了 10 条规则"这种数字没有任何判断价值，
+    // 而"第 3 条是无条件阻断"才是决定要不要按回车的依据。
+    print_plan(&plan);
     println!("  ⚠ 以上只是**计划**。下发需提权且会改变本机网络状态，必须先征求用户同意。");
     println!();
 
@@ -463,6 +467,41 @@ fn serve_one(
             },
             _ => return Ok(()),
         }
+    }
+}
+
+// ── 计划的可读输出 ───────────────────────────────────────────────────
+
+/// 把计划逐条打成一张表。
+///
+/// ⚠ **必须逐条打，不能只打条数。** "装了 10 条规则"这个数字没有任何
+/// 判断价值——十条里可能有一条是无条件阻断，而那一条就决定了整机通不通。
+/// 让人在下发之前看清每一行，是防呆的第一道。
+fn print_plan(plan: &[FilterSpec]) {
+    println!("  规则清单  ：");
+    for (i, f) in plan.iter().enumerate() {
+        let conds: Vec<String> = f.conditions.iter().map(ToString::to_string).collect();
+        let cond = if conds.is_empty() {
+            "**无条件**（匹配这一层的全部流量）".to_string()
+        } else {
+            conds.join(" 且 ")
+        };
+        println!(
+            "    {:>2}. [{:<4} w{:<2}] {:<16} {:?}",
+            i + 1,
+            action_cn(f.action),
+            f.weight,
+            f.name,
+            f.layer
+        );
+        println!("        条件：{}", cond);
+    }
+}
+
+fn action_cn(a: aegis_wfp::Action) -> &'static str {
+    match a {
+        aegis_wfp::Action::Permit => "放行",
+        aegis_wfp::Action::Block => "阻断",
     }
 }
 
