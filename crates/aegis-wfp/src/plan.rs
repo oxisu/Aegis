@@ -166,6 +166,31 @@ pub enum Condition {
     PhysicalInterface,
     /// 进程 ID —— **只有运行期才有意义**
     ProcessId(u64),
+    /// **远端主机名**（⛔ 实测无效，见下）。
+    ///
+    /// # 实测结论：它不是"按域名拦"的字段
+    ///
+    /// WFP 的过滤条件里**没有**一个叫"域名"的字段。最接近的是
+    /// `FWPM_CONDITION_ALE_EFFECTIVE_NAME`（`B1277B9A-B781-40FC-9671-E5F1B989F34E`，
+    /// blob 类型），它确实出现在 `ALE_AUTH_CONNECT_V4` 的字段表里，
+    /// 名字听起来就像"远端主机名"。
+    ///
+    /// 于是实测（见 `examples/name_probe` 第二幕）：把 `www.baidu.com`
+    /// 以 UTF-16LE + NUL 塞进 blob，装一条 Block 规则，**装住不拆**再测：
+    ///
+    /// ```text
+    /// ✅ 内核接受了（id=[…]）—— 只说明参数合法
+    ///    直连 183.2.172.177:443     通    ← 没拦住
+    /// ```
+
+    /// 换言之：**装得上 ≠ 拦得住**。内核接受这条规则只能证明参数合法，
+    /// 证明不了它按你想的那样匹配。
+    ///
+    /// ⚠ 因此它**不在** [`crate::apply::mappable`] 白名单里：
+    /// `preflight` 会拒绝任何含这条条件的计划。只有探针能绕过 preflight
+    /// 直接调 `apply`，目的就是让人还能复现这个结论，而不是重新踩一遍。
+    RemoteName(&'static str),
+
     /// 进程是**系统服务宿主**（`%SystemRoot%\system32\svchost.exe`）。
     ///
     /// # 为什么不叫 `ServicePid`（一次真机事故改掉的命名）
@@ -200,7 +225,10 @@ impl Condition {
     /// 写成"匹配某个进程"，那是一条**永不匹配的死规则**——
     /// 引导时间还没有进程。结果就是开机即断网，且没有任何界面能救。
     pub fn is_static(self) -> bool {
-        !matches!(self, Self::ProcessId(_) | Self::SystemServiceHost)
+        !matches!(
+            self,
+            Self::ProcessId(_) | Self::SystemServiceHost | Self::RemoteName(_)
+        )
     }
 
     /// 这条条件是不是"按进程身份"匹配，且我们**真的能**翻译成 WFP 字段。
@@ -222,6 +250,7 @@ impl fmt::Display for Condition {
             Self::Loopback => write!(f, "回环"),
             Self::PhysicalInterface => write!(f, "接口类型=物理网卡"),
             Self::ProcessId(p) => write!(f, "进程ID={p}"),
+            Self::RemoteName(n) => write!(f, "远端主机名={n}"),
             Self::SystemServiceHost => write!(f, "进程=系统服务宿主(svchost)"),
         }
     }

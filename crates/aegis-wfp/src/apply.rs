@@ -192,6 +192,10 @@ pub fn mappable(cond: &Condition) -> bool {
             | Condition::Loopback
             | Condition::SystemServiceHost
     )
+    // ⛔ `RemoteName` 刻意**不**在白名单里：实测证明它装得上但拦不住
+    // （见 [`Condition::RemoteName`] 的注释与 `examples/name_probe`）。
+    // 让它进白名单等于往生产计划里放一条"看起来在拦、其实没拦"的规则——
+    // 那比不拦更危险，因为人会以为自己已经拦了。
 }
 
 /// 挑出计划里**所有**无法精确映射的条件。
@@ -219,6 +223,8 @@ fn describe(cond: &Condition) -> &'static str {
     match cond {
         Condition::ProcessId(_) => "ProcessId",
         Condition::PhysicalInterface => "PhysicalInterface",
+        // 别落到 `_ => "可映射"`：它**不可**映射，说它可映射就是放行一条假规则
+        Condition::RemoteName(_) => "RemoteName(实测不按域名匹配)",
         _ => "可映射",
     }
 }
@@ -356,6 +362,10 @@ fn add_one(session: &Session, spec: &FilterSpec) -> Result<u64, WfpError> {
     let mut translated: Vec<(GUID, wfp::FWP_MATCH_TYPE, FwpValue)> = Vec::new();
     // AppId blob 由 WFP 分配，必须活到 `FwpmFilterAdd0` 返回之后再释放
     let mut owned_blobs: Vec<*mut wfp::FWP_BYTE_BLOB> = Vec::new();
+    // 自己构造的 blob，数据缓冲区同样要活到调用之后
+    let mut owned_bytes: Vec<Box<[u8]>> = Vec::new();
+    // 区分"谁分配的"：释放方式不同，混起来会炸（拿 WFP 的指针去 Box::from_raw）
+    let mut wfp_allocated: Vec<*mut wfp::FWP_BYTE_BLOB> = Vec::new();
     for cond in &spec.conditions {
         match cond {
             Condition::RemotePort(p) => translated.push((
@@ -394,6 +404,7 @@ fn add_one(session: &Session, spec: &FilterSpec) -> Result<u64, WfpError> {
                 let path = system_service_host_path();
                 match app_id_blob(&path) {
                     Some(blob) => {
+                        wfp_allocated.push(blob);
                         owned_blobs.push(blob);
                         translated.push((
                             wfp::FWPM_CONDITION_ALE_APP_ID,
@@ -407,6 +418,18 @@ fn add_one(session: &Session, spec: &FilterSpec) -> Result<u64, WfpError> {
                         })
                     },
                 }
+            },
+            // 实验性：见 [`Condition::RemoteName`]。blob 内容按 UTF-16LE + NUL 构造，
+            // 这一条**只在探针里用**，默认计划不产生它。
+            Condition::RemoteName(name) => {
+                let (bytes, blob) = name_blob(name);
+                owned_bytes.push(bytes);
+                owned_blobs.push(blob);
+                translated.push((
+                    wfp::FWPM_CONDITION_ALE_EFFECTIVE_NAME,
+                    wfp::FWP_MATCH_EQUAL,
+                    FwpValue::Blob(blob),
+                ))
             },
             // 走到这里说明 preflight 漏了。**绝不猜一个字段**。
             other => {
@@ -472,12 +495,22 @@ fn add_one(session: &Session, spec: &FilterSpec) -> Result<u64, WfpError> {
     let mut id = 0u64;
     let rc = unsafe { wfp::FwpmFilterAdd0(session.handle(), &filter, None, Some(&mut id)) };
 
-    // AppId blob 是 WFP 分配的，内核复制完就可以还回去
+    // ⚠ 只有 WFP 分配的 AppId blob 能用 FwpmFreeMemory0；自己构造的不能。
+    // 这里按"谁分配谁释放"分开放：先还给 WFP，再 drop 自己的缓冲区。
+    // 顺序不能反——blob 结构体里还指着这些字节。
+    let wfp_owned = wfp_allocated;
     for mut b in owned_blobs {
-        unsafe {
-            wfp::FwpmFreeMemory0(&mut b as *mut _ as *mut *mut core::ffi::c_void);
+        if wfp_owned.contains(&b) {
+            unsafe {
+                wfp::FwpmFreeMemory0(&mut b as *mut _ as *mut *mut core::ffi::c_void);
+            }
+        } else {
+            unsafe {
+                drop(Box::from_raw(b));
+            }
         }
     }
+    drop(owned_bytes);
 
     if rc != 0 {
         return Err(WfpError::FilterAdd(rc));
@@ -532,6 +565,25 @@ pub fn probe_add_then_remove(spec: &FilterSpec) -> Result<ProbeResult, WfpError>
         removed,
         session_name,
     })
+}
+
+/// 把一个主机名打包成 WFP 的 blob（UTF-16LE + 结尾 NUL）。
+///
+/// ⚠ **这是实验性的**，只在探针里用。WFP 的 blob 到底该放 UTF-16 还是 UTF-8、
+/// 要不要结尾 NUL，文档没说清楚；所以 `name_probe` 会几种都试一遍，
+/// 靠"拦不拦得住"来判定，而不是靠"装没装上"。
+fn name_blob(name: &str) -> (Box<[u8]>, *mut wfp::FWP_BYTE_BLOB) {
+    let mut bytes: Vec<u8> = name
+        .encode_utf16()
+        .flat_map(|u| u.to_le_bytes())
+        .collect::<Vec<u8>>();
+    bytes.extend_from_slice(&[0, 0]);
+    let mut boxed: Box<[u8]> = bytes.into_boxed_slice();
+    let blob = Box::into_raw(Box::new(wfp::FWP_BYTE_BLOB {
+        size: boxed.len() as u32,
+        data: boxed.as_mut_ptr(),
+    }));
+    (boxed, blob)
 }
 
 enum FwpValue {
@@ -672,6 +724,26 @@ mod tests {
     }
 
     // ── 条件白名单 ────────────────────────────────────────────────────
+
+    /// **回归**：`RemoteName`（`ALE_EFFECTIVE_NAME`）实测装得上但拦不住。
+    /// 它绝不能进白名单——一条"看起来在拦、其实没拦"的规则比不拦更危险，
+    /// 因为人会以为自己已经拦了。
+    #[test]
+    fn a_condition_that_only_pretends_to_match_is_not_mappable() {
+        assert!(!mappable(&Condition::RemoteName("www.baidu.com")));
+        assert_eq!(describe(&Condition::RemoteName("x")), "RemoteName(实测不按域名匹配)");
+        assert_eq!(
+            unmappable_conditions(&[FilterSpec {
+                name: "按名字拦",
+                layer: Layer::AleAuthConnectV4,
+                action: Action::Block,
+                weight: 1,
+                conditions: vec![Condition::RemoteName("x")],
+                tier: Tier::Runtime,
+            }]),
+            vec!["RemoteName(实测不按域名匹配)"]
+        );
+    }
 
     #[test]
     fn mappable_conditions_are_exactly_the_five_we_can_translate() {
