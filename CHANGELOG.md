@@ -287,6 +287,20 @@
   - 契约钉住核心场景：进程活着（HealthProbe 报 Healthy）但规则没生效，
     **只有 RuleEffectiveness 抓得到**
 
+- **`docs/GUARD-WIRING.md`：守卫的运行时接线方案（`aegisd`，未动代码）**
+  - 关键发现：**撤放行这条通道已经有了** —— `ApplyTicket::force_teardown()`
+    的存在理由就是"已确认的规则也必须能一条命令撤掉"，看门狗 200ms 巡检
+    会按 id 撤掉；撤完默认拒绝底板仍在 = 全都拒绝。**不需要新机制**
+  - 反方向没有现成的：`Relax` 要重新 `apply()`。⚠ 但**自动恢复不要再走
+    10 秒确认**——它是"恢复"不是"新装"，再罚用户 10 秒说不过去；
+    审计必须记清是自动恢复，不能和人工确认混在一起
+  - `Session` 不是 `Send`：新增 Supervisor 线程**不碰 Session**，
+    只判 + 改 ticket；需要重装时 spawn 新线程，会话生在新线程里
+  - 巡检周期建议 3s（泄漏窗口 ≈ 3×周期 = 9s），先观测再动手：
+    步 1 只判不动作，确认真机上不会平白报 Ineffective 之后再接 Tighten
+  - 验收用**一个不用改代码**的实验：把 `proxy.tun_luid` 填成一张真实但
+    不是 TUN 的网卡 → 断言 C 必然失败 → 看它是否真的收紧并恢复
+
 - **`docs/DOWNSTREAM-GUARD.md`：下游规则失效时的兜底方案**
   - 需求：**"检测到规则未生效 → 帮下游软件兜底，全都拒绝掉"**
   - ⚠ **兜底那一半早就有了**：`next(Controlled, ProxyUnhealthy) = Degraded`，

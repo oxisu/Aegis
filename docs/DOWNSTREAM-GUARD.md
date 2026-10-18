@@ -176,7 +176,7 @@ v0 可以先由用户在配置里显式给几个。
 | P0 | 断言 A/B/C 的裁决 + 防抖/冷却/反复故障 | `aegis-core::guard` | ✅ 已落地 |
 | P1 | 配置面 `proxy.tun_luid` / `proxy.mode` / `always_allow` | `aegis-config` | ✅ 已落地（见 §7.1） |
 | P1 | 断言 B/C 的**采集**：TUN 在不在 + 默认出口是不是它 | `aegis-core::guard::topology_inputs` | ✅ 已落地 |
-| P1 | 编排器接线：定时采拓扑 → 判 → 喂 `GuardTracker` | `aegis-orchestrator` | ⬜ 待做 |
+| P1 | 运行时接线：定时采拓扑 → 判 → 撤放行 | `aegisd` | ⬜ 待做（方案见 [`GUARD-WIRING.md`](GUARD-WIRING.md)） |
 | P2 | 断言 A/D 的 **SPI 契约面** | `aegis-orchestrator` | ✅ 已落地（见 §6.4） |
 | P2 | 接**真实**适配器（Clash / sing-box 实现该能力） | `aegis-orchestrator` | ⬜ 待做 |
 | P2 | 断言 D：路由试算 canary（`GetBestRoute2`） | `aegis-sense` | ⬜ 待做 |
