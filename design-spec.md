@@ -287,7 +287,7 @@ flowchart TB
         S3[防漏层<br/>WFP Boot-Time / 动态绝缘笼 · 53封锁]
         S4[审计层<br/>WFP ALE 内核捕获（第一源）+ 落盘存证]
         S5[熔断层<br/>IP Helper 网口热插拔微秒级绝缘]
-        SA[[适配器层 Adapter SPI<br/>ProxyAdapter / MultiWanAdapter / AuditEnricher]]
+        SA[[适配器层 Adapter SPI<br/>**能力接口** Capability：TunInterfacePresent / DnsOwnership / …<br/>（§2A.4，非软件接口）]]
     end
 
     APP -.->|系统代理 / TUN / 虚拟网卡（经适配器）| ADAPT[(可插拔代理工具)]
@@ -313,6 +313,147 @@ flowchart TB
 5. **熔断层**：`NotifyIpInterfaceChange` / `NotifyRouteChange2` 网口变动微秒级拉起绝缘笼。
 
 > 底座（S1–S5）全部为 OS 网络栈能力，**不依赖任何代理软件**；Clash/HypoMux/sing-box 仅作为 `ADAPT` 节点的可插拔实现（§2A）。
+
+### 3.1 组件依赖图（crate 级）
+
+> 上图是**分层职责**，这张是**实际代码的依赖方向**。两者必须能对上——
+> 对不上就说明架构在文档里、代码在别处。
+
+```mermaid
+flowchart TB
+    subgraph PURE["纯逻辑 · 零特权 · 可只读干跑"]
+        direction LR
+        C["aegis-core<br/>角色裁决 + 状态机"]
+        CF["aegis-config<br/>配置 + schema 校验"]
+        A["aegis-audit<br/>事件 · 证据链 · 落盘"]
+    end
+
+    subgraph TYPES["共享类型"]
+        direction LR
+        V["aegis-version<br/>版本标识 · 零依赖"]
+        M["aegis-model<br/>拓扑事实类型"]
+    end
+
+    subgraph OSL["碰 OS · 含 unsafe（已标注单点）"]
+        direction LR
+        S["aegis-sense<br/>拓扑采集（只读）"]
+        W["aegis-wfp<br/>WFP 勘察 + 绝缘笼计划"]
+        F["aegis-fuse<br/>网口变动熔断"]
+        I["aegis-ipc<br/>命名管道 + 显式 DACL"]
+    end
+
+    subgraph FUT["待建"]
+        direction LR
+        O["aegis-orchestrator<br/>适配器 SPI（能力接口，§2A.4）"]
+        D["aegisd / aegisctl<br/>守护进程 / 控制端"]
+    end
+
+    V --> C & CF & A & S & W & F & I
+    M --> S
+    M --> C
+    C --> CF
+    C --> A
+    S -.->|dev-dependencies<br/>仅 examples 用| C
+
+    OSL --> D
+    PURE --> D
+    D --> O
+    O -.->|可插拔| ADAPT2[(Clash / sing-box / HypoMux)]
+
+    classDef pure fill:#e8f5e9,stroke:#2e7d32,color:#1b5e20
+    classDef os fill:#fff3e0,stroke:#ef6c00,color:#e65100
+    classDef types fill:#e3f2fd,stroke:#1565c0,color:#0d47a1
+    classDef future fill:#fafafa,stroke:#9e9e9e,color:#616161,stroke-dasharray: 5 3
+    class C,CF,A pure
+    class S,W,F,I os
+    class V,M types
+    class O,D future
+```
+
+**依赖方向铁律（务必保持）**
+
+```text
+aegis-version ──▶ 所有层
+aegis-model   ──▶ aegis-sense（产出）、aegis-core / aegis-config（消费）
+aegis-sense   ──▶ 只有"真要读 Win32"的层才碰它
+```
+
+⚠ **策略层（`aegis-core` / `aegis-config`）只依赖 `aegis-model`，绝不依赖
+`aegis-sense`。** 曾为 3 个类型（`InterfaceInfo` / `InterfaceKind` /
+`if_flags`）依赖了整个 sense，把 `windows` crate 拖进纯逻辑的依赖图：
+增量构建从约 3s 涨到约 22s，且"策略层可在普通用户下只读干跑"这条硬约束
+名存实亡——光编译就得先把 WFP 绑定编一遍。抽出 `aegis-model` 后：
+
+| crate | 改前 | 改后 |
+|---|---|---|
+| aegis-core | 7.4–22.5s | **3.9s** |
+| aegis-config | 13.8–16.3s | **3.6s** |
+| aegis-sense | 6.7–14.9s | **3.6s** |
+
+校验：`cargo tree -p aegis-core | grep -c windows` 应为 **0**。
+
+**`unsafe` 的落点（每个 crate 最多一处，且都写在模块文档里）**
+
+| crate | `unsafe` 在哪 | 为什么只有那里 |
+|---|---|---|
+| `aegis-sense` | 采集模块 | 读 Win32，只读不改 |
+| `aegis-wfp` | `session.rs` | 只剩 FFI 胶水，翻译逻辑已拆成纯函数 |
+| `aegis-fuse` | `watch.rs` | 回调只做一次 `fetch_add`，绝不分配/加锁/碰 WFP |
+| `aegis-ipc` | `pipe.rs`（+ `token.rs` 的随机数） | 端点常量、帧、版本判定全零 Win32 |
+| `aegis-audit` | `store.rs`（写文件） | 事件/编码/链/导出全零 Win32，可完整单测 |
+
+### 3.2 时序图：开机绝缘笼 → 拓扑指纹 → 角色放行 → 网口变动熔断
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant OS as Windows 内核 / WFP
+    participant D as aegisd（SYSTEM）
+    participant S as aegis-sense
+    participant C as aegis-core
+    participant F as aegis-fuse
+    participant U as 用户 / GUI（不提权）
+
+    Note over D,OS: ① 开机：先关笼子，再问问题
+    D->>OS: 动态会话装绝缘笼（默认拒绝 + 回环/DHCP 放行）
+    Note right of OS: 此刻除回环与 DHCP 外全部阻断<br/>（漏掉任一条 = 静默锁死，靠 verify() 拦）
+
+    Note over D,U: ② 拓扑指纹：只算物理网卡
+    D->>S: 采拓扑快照
+    S-->>D: 44 张网卡（3 物理 / 25 过滤器 / 7 隧道 / …）
+    D->>C: 算指纹（**只算物理 Up 网卡**）
+    Note right of C: 计入伪接口会造成假漂移 →<br/>反复打断用户 → 无脑点确认 → 零信任失效
+    C-->>D: 指纹 + 与已信任指纹比对
+
+    Note over D,U: ③ 角色放行：漂移才打断用户
+    alt 指纹一致
+        D->>U: 静默放行（不打断）
+    else 首次 / 漂移
+        D->>U: 弹窗：请确认角色分配
+        Note right of U: 此时仍是绝缘态，浏览器全断
+        U-->>D: 确认
+    end
+    D->>OS: 下发按角色的放行规则（权重严格高于默认拒绝）
+    D->>D: 存新指纹为已信任
+
+    Note over F,OS: ④ 运行中：网口变动熔断（**先熔断后分析**）
+    OS->>F: NotifyIpInterfaceChange（系统回调）
+    F->>F: 只做 ChangeKind 分类 + should_react + 一次 fetch_add
+    Note right of F: 回调即弃：绝不分配内存、加锁、打日志、碰 WFP<br/>它跑在系统线程池上，堵住的后果是网络栈死锁
+    F->>D: Worker 取走计数
+    D->>OS: **立刻**切绝缘（不等去抖）
+    Note right of OS: 等了就给了 OS 一个用默认路由发包的窗口
+    OS->>F: 后续震荡（数十次）
+    F->>F: 合并（coalesce），去抖窗口 50–100ms
+    D->>D: 窗口过后重算一次（**只叫醒一次**）
+```
+
+**四条不能改的顺序**
+
+1. **先关笼子，再问问题**：反过来的话，问问题的那几秒里流量已经从默认路由出去了。
+2. **指纹只算物理网卡**：见上图注释，假漂移的危害与假警报同类。
+3. **熔断不等去抖**：第一个事件立刻切，重活等窗口过后做一次。
+4. **放行权重必须严格高于默认拒绝**：否则放行被静默吃掉，表现为"配了却不通"。
 
 ---
 

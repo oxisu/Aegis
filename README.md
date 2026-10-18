@@ -46,7 +46,7 @@ Aegis 建立一张**独立于任何上层代理软件的 OS 级安全底座**：
 | `aegis-core` | ✅ 可用 | 角色裁决（§20.5）+ 状态机（§26） |
 | `aegis-wfp` | 🚧 只读 + 干跑 | WFP 状态勘察（枚举 / Provider / **持久背板审计**）+ **绝缘笼规则计划与静态自检**（未下发） |
 | `aegis-fuse` | ✅ 感知侧已通 | 拓扑震荡熔断器：去抖 + **先熔断后分析**；`NotifyIpInterfaceChange` 已接（回调只做一次 `fetch_add`），**拉绝缘动作本身尚未接 WFP** |
-| `aegis-audit` | 🚧 证据链 + 落盘已通（未接数据源） | 审计事件 + 规范化编码 + SHA-256 哈希链（篡改可检测）+ 有界内存缓冲 + 只追加落盘（跨分片连续） |
+| `aegis-audit` | 🚧 证据链 + 落盘 + 导出已通（未接数据源） | 审计事件 + 规范化编码 + SHA-256 哈希链（篡改可检测）+ 有界内存缓冲 + 只追加落盘（跨分片连续）+ CSV/JSON 证据包 |
 | `aegis-ipc` | ✅ 可用 | 本地 IPC：帧编解码 + 版本握手 + **命名管道（显式 DACL）+ 一次性 token 鉴权** |
 | `aegis-config` | ✅ 可用 | 配置加载与 schema 版本校验（Fail-Closed） |
 | `aegis-orchestrator` | ⬜ 待建 | 应用层代理适配器（SPI，可插拔） |
@@ -102,6 +102,7 @@ CagePolicy ──cage_plan()──▶ Vec<FilterSpec> ──verify()──▶ �
      ├─ 重开：重放已有记录恢复链头，**不从 GENESIS 重新开始**
      ├─ 分片：链头跨分片带过去，分片只是文件边界不是证据边界
      ├─ 改一条 / 删中间一条：校验失败
+     ├─ 导出：CSV / JSON 证据包，**自带链头与校验结论**
      └─ ⚠ 删**尾部**：抓不住 —— 链头必须定期外置，这是唯一缓解
 
 本地 IPC（无需管理员即可验证；`cargo run -p aegis-ipc --example ipc_dryrun`）：
