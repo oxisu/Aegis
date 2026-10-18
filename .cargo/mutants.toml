@@ -57,6 +57,21 @@ exclude_re = [
 #   结论：单机上并行是负优化。要压墙钟时间只能**换机器并行**，
 #   即用 --shard 切片后丢给多个 CI runner（见 .github/workflows/ci.yml）。
 
+# ── `#[cfg_attr(test, mutants::skip)]`：标注"测不到的"而不是假装能测 ──────
+#
+# 有些函数**必须连上真实 WFP 引擎**才跑得到（引擎要提权）。对它们，
+# "把整个函数体换成 Ok(Default::default())" 这类变异体在任何无提权的环境里
+# 都不可能被观察到——硬留着只会让报告永远挂着几条假警报，反而掩盖真问题。
+#
+# 正确做法是三件事一起做：
+#   1. 胶水函数标 `#[cfg_attr(test, mutants::skip)]`（`mutants` 是 dev-dependency）
+#   2. 把它肚子里**真正有逻辑的部分**抽成纯函数（不碰 API），例如
+#      aegis-wfp 的 rows_of / collect_providers / collect_filters / assemble_snapshot
+#   3. 那些纯函数用**手搓的 FWPM_* 结构体**完整单测
+#
+# 也就是说：跳过的是"不值得测的胶水"，不是"难测的逻辑"。
+# 详见 crates/aegis-wfp/src/session.rs 模块头。
+
 # 留空即可：虚拟 manifest 下 `cargo test` 默认就跑全部工作区成员。
 # 需要只测某个 crate 时，命令行加 `-C -p -C <crate>`。
 additional_cargo_args = []

@@ -20,5 +20,11 @@ windows = { workspace = true, features = [
 aegis-version = { workspace = true }
 thiserror     = { workspace = true }
 
+[dev-dependencies]
+# 只为 `#[cfg_attr(test, mutants::skip)]`：把"必须连上真实 WFP 引擎才跑得到"
+# 的胶水函数标出来，避免变异报告里永远挂着几条不可能被捕获的假警报。
+# 详见 src/session.rs 模块头的"变异测试怎么对待本模块"。
+mutants = { workspace = true }
+
 # 刻意不依赖 aegis-core：底座层（OS Level）不关心上层的角色策略，
 # 否则"换一套策略"会牵动最靠近内核的那一层。

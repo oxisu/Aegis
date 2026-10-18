@@ -68,6 +68,7 @@ name = "aegis-wfp"
 version = "0.1.0-alpha.2"
 dependencies = [
  "aegis-version",
+ "mutants",
  "thiserror",
  "windows",
 ]
@@ -153,6 +154,12 @@ name = "libc"
 version = "0.2.191"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "65cd87c9a6d60536580b316ad985726104730a5151c99845f2490428ef91240a"
+
+[[package]]
+name = "mutants"
+version = "0.0.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bc0287524726960e07b119cebd01678f852f147742ae0d925e6a520dca956126"
 
 [[package]]
 name = "proc-macro2"

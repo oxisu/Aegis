@@ -63,6 +63,10 @@ tracing  = { version = "0.1" }
 serde    = { version = "1", features = ["derive"] }
 # 配置解析：仅 aegis-config 使用
 toml     = { version = "1" }
+# 变异测试标注：提供 `#[mutants::skip]` 属性（cargo-mutants 官方配套）。
+# 只作 dev-dependency，配合 `#[cfg_attr(test, mutants::skip)]` 使用——
+# 正式构建里不存在这个 crate，也不会被编进去。
+mutants  = { version = "0.0.3" }
 # 工作区内部：版本标识（所有 crate 都应依赖它，不要各自读 CARGO_PKG_VERSION）
 aegis-version = { path = "crates/aegis-version" }
 # 工作区内部：共享数据模型（拓扑事实的类型，零依赖）
