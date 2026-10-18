@@ -1,0 +1,31 @@
+[package]
+name        = "aegis-model"
+description = "网络拓扑事实的共享数据模型（零 Win32 依赖，感知层产出、策略层消费）"
+version.workspace      = true
+edition.workspace      = true
+rust-version.workspace = true
+license.workspace      = true
+authors.workspace      = true
+
+[dependencies]
+# 只有 serde：模型要能序列化落盘 / 过 IPC。
+# ⚠ 刻意**不**依赖 windows crate —— 这条是整个 crate 存在的理由。
+
+serde = { workspace = true }
+
+# ── 为什么这个 crate 必须单独存在 ────────────────────────────────────────
+# 分层铁律是「感知层 = 事实，策略层 = 策略」。策略层（aegis-core）只需要
+# 若干个**类型**（InterfaceInfo / InterfaceKind / if_flags ...），不需要
+# 感知层的采集能力。
+#
+# 但这几个类型原先住在 aegis-sense 里，于是为了拿到 3 个类型，aegis-core
+# 被迫依赖整个 aegis-sense，进而把 `windows` crate（WFP + IP Helper 全量
+# 绑定）拖进了策略层的依赖图。实测后果（改一行代码后的增量构建+测试）：
+#
+#   aegis-fuse / aegis-ipc（无 windows）  2.2–3.6s
+#   aegis-core（经 sense 拉进 windows）  7.4–22.5s   ← 其中自身只占 0.7s
+#   aegis-config（经 core 再拉一层）     13.8–16.3s
+#
+# 也就是：**20 秒里有 19 秒是一条自己引入的依赖边造成的，不是语言的成本。**
+# 把它们下沉到这里之后，策略层与配置层彻底脱离 Win32，编译回到 2–3 秒量级，
+# 同时「策略层必须能只读干跑」这条铁律才真正成立（原来只是嘴上说说）。

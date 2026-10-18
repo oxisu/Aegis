@@ -17,10 +17,18 @@ dependencies = [
 name = "aegis-core"
 version = "0.1.0-alpha.2"
 dependencies = [
+ "aegis-model",
  "aegis-sense",
  "aegis-version",
  "serde",
  "thiserror",
+]
+
+[[package]]
+name = "aegis-fuse"
+version = "0.1.0-alpha.2"
+dependencies = [
+ "aegis-version",
 ]
 
 [[package]]
@@ -33,9 +41,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "aegis-model"
+version = "0.1.0-alpha.2"
+dependencies = [
+ "serde",
+]
+
+[[package]]
 name = "aegis-sense"
 version = "0.1.0-alpha.2"
 dependencies = [
+ "aegis-model",
  "aegis-version",
  "serde",
  "sha2",

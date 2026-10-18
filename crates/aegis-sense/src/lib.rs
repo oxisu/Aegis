@@ -20,10 +20,17 @@
 pub mod delta;
 pub mod error;
 pub mod fingerprint;
-pub mod model;
 pub mod route;
 pub mod topology;
 pub mod wifi;
+
+// 数据模型下沉到 aegis-model（零 Win32 依赖），这里重导出以保持
+// `aegis_sense::model::*` 这一路径对上层不变。
+//
+// 为什么必须下沉：aegis-core 只需要 3 个类型，却因此依赖了整个 aegis-sense，
+// 把 windows crate 拖进策略层，增量构建 0.7s → 22.5s。上层要用这些类型
+// 请直接依赖 aegis-model，不要为了拿类型而依赖本 crate。
+pub use aegis_model as model;
 
 pub use self::delta::{diff, InterfaceChange, TopologyDelta};
 pub use self::error::SenseError;

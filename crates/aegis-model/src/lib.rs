@@ -1,8 +1,25 @@
-//! 感知层数据模型。
+//! 网络拓扑事实的共享数据模型（**事实的类型**，不含任何采集能力）。
 //!
-//! 设计与 Windows API 类型解耦：这里只用标准库类型表达"网卡长什么样"，
-//! 所有 `windows` crate 的 FFI 细节都被收敛在 `topology` / `wifi` / `route` 三个模块里。
-//! 这样做的好处是模型可序列化、可测试、可跨 ★ 模块复用，且更换底层实现时不必改动上层。
+//! # 这个 crate 为什么单独存在
+//!
+//! 分层铁律是「`aegis-sense` = 事实，`aegis-core` = 策略」。策略层只需要
+//! **若干类型**（[`InterfaceInfo`] / [`InterfaceKind`] / [`if_flags`] …），
+//! 不需要感知层的采集能力。但这些类型原先住在 `aegis-sense` 里，于是为了
+//! 拿到 3 个类型，`aegis-core` 被迫依赖整个 `aegis-sense`，把 `windows`
+//! crate 拖进了策略层的依赖图——实测让策略层的增量构建从 0.7s 涨到 22.5s。
+//! 详见本 crate 的 `Cargo.toml` 注释。
+//!
+//! 下沉到这里之后：
+//! - `aegis-sense` 产出这些类型（它是唯一真正需要 Win32 的层）
+//! - `aegis-core` 消费这些类型，且**不再**依赖 Win32 —— 策略层终于真的
+//!   可以脱离特权环境干跑，而不用先编译一遍 WFP 绑定
+//!
+//! # 为什么与 Windows API 类型解耦
+//!
+//! 这里只用标准库类型表达"网卡长什么样"（`u64` LUID、`u32` ifType、
+//! `u8` 位域……），所有 `windows` crate 的 FFI 细节都收敛在 `aegis-sense`
+//! 的 `topology` / `wifi` / `route` 三个模块里。这样模型可序列化、可测试，
+//! 更换底层实现时不必改动上层。
 
 use serde::Serialize;
 use std::fmt;
