@@ -73,18 +73,53 @@ impl EvidenceChain {
         self.len == 0
     }
 
-    /// 追加一条事件，返回链节。
-    pub fn append(&mut self, event: &AuditEvent) -> Link {
+    /// 算出下一条链节（**不改状态**）。
+    ///
+    /// 与 [`Self::commit`] 分开，是为了支持"先落盘、再进链"：调用方可以先把
+    /// 链节写出去，确认写成功了再 `commit`。反过来（先进链再写盘）会在写盘
+    /// 失败时留下"链上有、盘上没有"的空洞，而空洞在校验时表现为断链，
+    /// 看起来像是有人删了记录。
+    pub fn next(&self, event: &AuditEvent) -> Link {
         let prev = self.head;
-        let hash = link_hash(prev, event);
-        self.len += 1;
-        let link = Link {
-            seq: self.len,
+        Link {
+            seq: self.len + 1,
             ts_ms: event.ts_ms,
             prev,
-            hash,
-        };
-        self.head = hash;
+            hash: link_hash(prev, event),
+        }
+    }
+
+    /// 提交一条**已经落盘**的链节。
+    ///
+    /// 校验前驱与序号，对不上就拒绝——这能挡住"把两天的日志拼在一起"这类
+    /// 拼装错误，而不是让链悄悄接上一个不相干的头。
+    pub fn commit(&mut self, link: Link) -> Result<(), ChainError> {
+        if link.seq != self.len + 1 {
+            return Err(ChainError::SeqMismatch { seq: link.seq });
+        }
+        if link.prev != self.head {
+            return Err(ChainError::PrevMismatch { seq: link.seq });
+        }
+        self.head = link.hash;
+        self.len += 1;
+        Ok(())
+    }
+
+    /// 把链**强行推进到**某个状态：已有 `len` 条、链头是 `head`。
+    ///
+    /// 用于续接分片：前一个分片读到第 N 条、链头是 H，那么本分片的链必须
+    /// 从这个状态起步，否则每条都会被"前驱对不上"拒掉。
+    /// 调用方负责保证这个状态确实来自同一条链。
+    pub fn advance_to(&mut self, len: u64, head: Hash) {
+        self.head = head;
+        self.len = len;
+    }
+
+    /// 追加一条事件，返回链节（内存用法：算与提交一起做）。
+    pub fn append(&mut self, event: &AuditEvent) -> Link {
+        let link = self.next(event);
+        // next 出来的链节必然与当前状态吻合，不可能失败
+        let _ = self.commit(link);
         link
     }
 }
@@ -316,6 +351,41 @@ mod tests {
         for w in heads.windows(2) {
             assert_ne!(w[0], w[1]);
         }
+    }
+
+    /// 先算后提交：算的时候链**不动**，这样写盘失败就能什么都不做。
+    #[test]
+    fn next_does_not_advance_the_chain_but_commit_does() {
+        let mut c = EvidenceChain::new();
+        let link = c.next(&event(0));
+        assert_eq!(c.len(), 0, "next 不该改状态");
+        assert_eq!(c.head(), GENESIS);
+        assert_eq!(link.seq, 1);
+        assert_eq!(link.prev, GENESIS);
+
+        c.commit(link).unwrap();
+        assert_eq!(c.len(), 1);
+        assert_eq!(c.head(), link.hash);
+    }
+
+    #[test]
+    fn commit_rejects_a_link_that_does_not_follow_the_head() {
+        let mut c = EvidenceChain::new();
+        c.append(&event(0));
+        let second = c.next(&event(1));
+
+        // 跳号
+        let mut skipped = second;
+        skipped.seq = 99;
+        assert_eq!(c.commit(skipped), Err(ChainError::SeqMismatch { seq: 99 }));
+
+        // 前驱对不上：接在一个不相干的头上（例如把另一段日志的链拼过来）
+        let mut wrong_prev = second;
+        wrong_prev.prev = link_hash(GENESIS, &event(9));
+        assert_ne!(wrong_prev.prev, c.head());
+        assert_eq!(c.commit(wrong_prev), Err(ChainError::PrevMismatch { seq: 2 }));
+
+        assert_eq!(c.len(), 1, "被拒的提交不该改变链");
     }
 
     #[test]

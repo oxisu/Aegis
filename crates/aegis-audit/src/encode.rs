@@ -32,7 +32,7 @@ pub const CANONICAL_VERSION: u32 = 1;
 
 /// 流头。带它是为了让"这不是审计事件的规范化编码"能被一眼看出来，
 /// 而不是拿到一串字节还得猜它是哪个版本、哪个布局。
-const MAGIC: &[u8] = b"AEGIS-AUDIT-CANON";
+pub(crate) const MAGIC: &[u8] = b"AEGIS-AUDIT-CANON";
 
 /// 把一条事件编码成规范化字节。
 pub fn canonical_bytes(event: &AuditEvent) -> Vec<u8> {

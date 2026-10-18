@@ -184,5 +184,53 @@ fn main() {
         );
     }
     println!();
-    println!("全程干跑：没有任何落盘，没有碰系统任何状态。");
+
+    // ── 8. 落盘：写 → 重开 → 续写 ─────────────────────────────────────
+    let dir = std::env::temp_dir().join(format!(
+        "aegis-audit-dryrun-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0)
+    ));
+    std::fs::create_dir_all(&dir).expect("建临时目录");
+    let path = dir.join("audit.log");
+
+    println!("8. 落盘：写 5 条 → 关掉 → 重开 → 再写 1 条");
+    let head_before = {
+        let mut log = aegis_audit::AuditLog::create(&path).expect("新建日志");
+        for e in &events {
+            log.append(e).expect("追加");
+        }
+        log.flush().expect("刷盘");
+        log.head()
+    };
+
+    let mut reopened = aegis_audit::AuditLog::open(&path).expect("重开");
+    println!("   重开后：{} 条，链头 = {}…", reopened.len(), &chain::hex(&reopened.head())[..16]);
+    println!(
+        "   与关掉前一致：{}",
+        reopened.head() == head_before
+    );
+    let resumed = reopened.append(&events[0]).expect("续写");
+    println!("   续写这条是第 {} 号，前驱 = {}…", resumed.seq, &chain::hex(&resumed.prev)[..16]);
+    reopened.flush().expect("刷盘");
+    println!();
+
+    // ── 9. 改文件里的一个字节 ─────────────────────────────────────────
+    println!("9. 改文件里的一个字节：");
+    drop(reopened);
+    let mut raw = std::fs::read(&path).expect("读文件");
+    let at = raw.len() / 2;
+    raw[at] ^= 0xFF;
+    println!("   改的是偏移 {} 处的那个字节", at);
+    std::fs::write(&path, &raw).expect("写回");
+    println!("   {:?}", aegis_audit::read_records(&path).err());
+    println!();
+
+    let _ = std::fs::remove_dir_all(&dir);
+    println!("   临时目录已清理：{}", dir.display());
+    println!();
+    println!("全程干跑：只碰临时目录下的一个文件，且已删除。");
 }

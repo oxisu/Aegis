@@ -24,23 +24,30 @@
 //! | [`encode`] | 规范化字节编码（哈希输入） | 无 |
 //! | [`chain`] | SHA-256 哈希链与校验 | 无 |
 //! | [`ring`] | 有界内存缓冲（实时视图） | 无 |
+//! | [`store`] | 只追加的落盘文件（跨分片连续） | 写文件 |
 //!
 //! 本 crate **不含任何 Win32 调用**，也不需要管理员权限——
 //! 证据链的构造与校验必须能在普通用户下完整推演。真正从 WFP ALE 层捕获
 //! 事件是 `aegis-wfp` 的事，落在它那一层的 `unsafe` 里。
 //!
-//! ⚠ **本 crate 尚未接任何落盘**：没有文件、没有 SQLite。
-//! 先把"证据长什么样、怎么证明它没被改"定死，再谈往哪写。
+//! ⚠ **本 crate 尚未接任何数据源**：没有 WFP ALE 捕获、没有落盘的调用方。
+//! 先把"证据长什么样、怎么证明它没被改、重开怎么接得上"定死，再谈往哪读往哪写。
 
 pub mod chain;
+pub mod decode;
 pub mod encode;
 pub mod event;
 pub mod ring;
+pub mod store;
 
 pub use chain::{hex, verify, ChainError, EvidenceChain, Hash, Link, HASH_LEN, GENESIS};
+pub use decode::{decode, DecodeError};
 pub use encode::{canonical_bytes, CANONICAL_VERSION};
 pub use event::{Action, AuditEvent, Protocol};
 pub use ring::AuditRing;
+pub use store::{
+    read_records, read_records_with, AuditLog, ReadCtx, ReadError, Record, LOG_MAGIC, LOG_VERSION,
+};
 
 // 审计记录里带着网卡角色，调用方构造事件时必然要用它。
 // 与其让每个调用方再去依赖 aegis-core（然后各自 import 一份），
