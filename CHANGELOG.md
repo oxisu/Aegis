@@ -9,6 +9,49 @@
 
 ## [Unreleased]
 
+### Added
+
+- **`aegisctl` 拆出 `apply` / `confirm` / `rollback` 三个子命令 + 10 秒防呆倒计时**
+  - `apply` 装完**只是待确认**：10 秒内没有 `confirm` 就看门狗自动撤销。
+    装错了、手滑了、人不在机器旁边，都不需要做任何事，网络自己会回来
+  - **看门狗线程持有会话**，每 200ms 巡检。会话**不能**提前释放：
+    动态会话一旦关闭，内核就把这次装的全部规则清掉——所以确认之后也要继续守着
+  - ⚠ `Session` 里是原始 HANDLE，**不是 `Send`**，所以会话**生在**看门狗线程里，
+    从头到尾没离开过那个线程（反过来先装再想办法交给守护线程是搬不动的）
+  - `rollback` 能撤掉**已确认**的规则（`force_teardown`）。这是紧急拆除的命脉：
+    "一条命令能救回来"和"必须重启"是两种事故等级
+  - 过期后 `confirm` 必须失败，否则"超时回滚 → 再确认一次 → 又装回去"，
+    而这第二次没人兜底
+  - **命令分级闸门**：`apply` / `confirm` / `rollback` 除 token 外还要求
+    对端进程**已提权**（`TokenIsElevated`），否则以退出码 8 拒绝
+  - 应答带 `ok ` / `denied ` 前缀，控制端按**前缀**判成败，不在正文里搜"失败"
+
+- **`SECURITY.md` + `docs/EMERGENCY-TEARDOWN.md`**：出事之后怎么把网络救回来
+  - 手册第一条路是本机 IPC 强拆——**命名管道走内核 NPFS，不经过 IP 栈**，
+    所以"网断了"不影响拆除；第二条路是结束 `aegisd`（动态会话随之清空）；
+    第三条路是重启（本版不装 Boot 层规则，所以重启一定是干净的）
+  - 明确写出哪些是"刻意留下的取舍"而不是疏漏：token 文件 AU 可读、
+    规则不跨进程存活、无法按服务精确放行
+
+- **真实下发通路 + 两个只读/无害探针**
+  - `examples/apply_probe`：把计划里所有**放行类**规则逐条"装上再按 id 拆掉"。
+    放行规则装上去等于什么都没变，但能验证"会话能开 → 翻译得对 → 内核接受 →
+    按 id 删得回去"。**它一条阻断规则都不装**
+  - `examples/probe_appid`：只读探针，实测 `FwpmGetAppIdFromFileName0` 的语义
+
+### Fixed
+
+- **真机下发失败 `0x80320027`（`FWP_E_TYPE_MISMATCH`）：条件类型填错了**
+  - 第一版把"绑定到 Dhcp 服务"翻译成 `FWPM_CONDITION_ALE_APP_ID` + `UINT64(pid)`。
+    内核不接受：`ALE_APP_ID` 的值是**字节 blob**，不是整数
+  - 用只读探针实测出的语义：传**服务短名** → `ERROR_FILE_NOT_FOUND`；
+    传**可执行文件路径** → 成功；传带参数的命令行 → 失败（只认纯路径）
+  - 结论：**WFP 里没有"按 PID/服务过滤"这个字段**。于是删掉
+    `Condition::ServicePid`，换成 `Condition::SystemServiceHost`
+    （收紧到系统服务宿主进程）+ `Condition::LocalPort`（钉死方向）
+  - ⚠ 残余风险写进 `SECURITY.md`：DHCP 跑在共享 `svchost.exe` 里，
+    同宿主的其他服务理论上仍可借 67/68 外联，§28.1 借壳偷渡**没有完全堵住**
+
 ### Changed
 
 - **架构：新增 `aegis-model`，策略层彻底脱离 Win32**（性能 + 分层双修）

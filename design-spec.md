@@ -1050,7 +1050,7 @@ Aegis 的审计规则、告警阈值、日志级别。
 | 拓扑震荡熔断（已接 FFI） | ✅ | `aegis-fuse` |
 | Named Pipe + 显式 DACL + token 鉴权 | ✅ | `aegis-ipc` |
 | 审计事件 + 证据链 + 只追加落盘 | ✅ | `aegis-audit`（**尚未接数据源**） |
-| **真正下发 WFP 规则** | ⬜ 未做 | 需提权，且会改变本机网络状态 —— **必须先征求用户同意** |
+| **真正下发 WFP 规则** | 🟨 通路已验证，**整副笼子待授权** | `aegis-wfp::apply`；放行类规则已用无害探针逐条验证（见 §21.4），阻断类需人工 10 秒窗口 |
 | 证据导出（CSV/JSON 证据包） | ✅ | `aegis-audit::export`（CSV 防公式注入 + JSON 证据包） |
 | 适配器 SPI（能力接口） | ✅ | `aegis-orchestrator`：`Capability` + 逐能力失败模式 + 能力矩阵 |
 | 参考适配器 + 契约测试夹具 | ✅ | `aegis-orchestrator::reference` / `::contract`（§2A.4 ③） |
@@ -1073,9 +1073,86 @@ Aegis 的审计规则、告警阈值、日志级别。
 2. **感知失败就退出。** 不知道机器长什么样就不能裁决角色，此时放行是盲放行。
 3. **WFP 只干跑。** 下发需提权且改变本机网络状态，**必须先征求用户同意**。
 
-⚠ **两处已知的、显式留下的缺口**（不掩盖，写进代码注释）：
-- token 文件按普通文件写入，**尚未套用 `TOKEN_FILE_SDDL`**；
+⚠ **一处已知的、显式留下的缺口**（不掩盖，写进代码注释）：
 - "启动完成"是**链路自检事件，不是真实连接**，导出证据包时必须按 `BOOT:` 前缀过滤。
+
+（token 文件已套用 `TOKEN_FILE_SDDL`：SY/BA 完全控制，AU 只读。
+代价是 AU 能读 token，因此危险命令**额外**要求对端进程已提权，见 §21.5。）
+
+### 21.4 从"干跑"到"真实下发"：真机踩到的两条硬事实
+
+#### ① WFP 里没有"按进程 ID 过滤"这个字段
+
+第一版把"绑定到 Dhcp 服务"翻译成 `FWPM_CONDITION_ALE_APP_ID` + `UINT64(pid)`。
+真机下发时内核直接回 **`0x80320027`（`FWP_E_TYPE_MISMATCH`）**——
+`ALE_APP_ID` 的值是**字节 blob**，不是整数。
+
+用只读探针（`crates/aegis-wfp/examples/probe_appid.rs`）实测出的语义：
+
+| 传给 `FwpmGetAppIdFromFileName0` 的东西 | 结果 |
+|---|---|
+| 服务短名 `"Dhcp"` | ❌ `ERROR_FILE_NOT_FOUND` —— **"按服务名绑定"这条路不通** |
+| 可执行文件路径（纯路径） | ✅ 返回 `\device\harddiskvolume1\windows\system32\svchost` 之类的 blob |
+| 带参数的整条命令行 | ❌ 失败 —— 只认纯路径，不认 `-k xxx` |
+
+结论：**"按服务绑定"在 WFP 里做不到**。DHCP 跑在共享的 `svchost.exe` 里，
+同一个宿主下还挂着 `Dnscache`、`Schedule` 等，AppId 区分不了它们。
+所以 `Condition::ServicePid` 被删掉，换成 `Condition::SystemServiceHost`
+（收紧到"系统服务宿主进程"）+ `LocalPort`（钉死方向）。
+
+⚠ **§28.1 的"借壳偷渡"因此没有被完全堵住**：同宿主的其他服务理论上仍可借
+67/68 外联。比"任何进程都能借"好得多，但**不是零**。
+彻底解决要靠 ALE callout 在内核里按 PID 判。
+
+#### ② 在拿整副笼子冒险之前，先用无害探针验证通路
+
+WFP **没有** dry-run 接口：`FwpmFilterAdd0` 要么成功要么报错。
+所以 `crates/aegis-wfp/examples/apply_probe` 把计划里**所有放行类规则**
+逐条"装上再按 id 拆掉"——放行规则只会扩大放行面，装上去等于什么都没变，
+而它们能验证"会话能开 → 条件翻译得对 → 内核接受 → 按 id 删得回去"这整条机械动作。
+
+**它一条阻断规则都不装。** 阻断规则必须靠人工在 10 秒窗口内确认，
+因为"装上去网断了"正是它本该造成的效果。
+
+### 21.5 命令分级：token 之外还要提权
+
+| 风险 | 命令 | 要求 |
+|---|---|---|
+| `ReadOnly` | `status` / `ping` | 持有 token |
+| `Dangerous` | `apply` / `confirm` / `rollback` | 持有 token **且**对端进程已提权 |
+
+理由：token 文件对 Authenticated Users **只读**（GUI 不提权，必须能读），
+所以"持有 token"只证明"你是本机的一个客户端"。若危险命令也只要 token，
+那么一个标准用户读走一个文件就等于能指挥 SYSTEM 进程装/拆防火墙规则——
+那是提权漏洞的形状。
+
+判定用 `TokenIsElevated` 而不是"是不是 Administrators 组成员"：
+UAC 之下管理员的默认令牌是**已过滤**的（SID 还在但只用于拒绝项），
+按 SID 判会误判成"是管理员"。**判不出来一律按没权限处理**（Fail-Closed）。
+
+### 21.6 两阶段下发 + 10 秒倒计时（防呆）
+
+```text
+aegisctl apply   → 装好，进入 Phase::Pending，开 10 秒倒计时
+                 → 看门狗线程持有会话，每 200ms 巡检
+   ├─ 10 秒内 aegisctl confirm  → Phase::Committed，规则保留
+   └─ 超时 / aegisctl rollback  → 按回执里的 id 逐条删除
+```
+
+三条不可让步：
+
+1. **过期后 `confirm` 必须失败。** 否则"超时自动回滚 → 人再确认一次 →
+   又装回去"，而这次没人兜底。
+2. **回滚只认 id，不认名字。** 按名字删会误伤别人的规则。
+3. **会话必须一直握着。** 动态会话一旦关闭（哪怕只是离开作用域），
+   内核就把这次装的全部规则清掉——所以确认之后也不能提前 return。
+
+已确认的规则也**必须能拆**：`rollback` 对 `Committed` 票据走
+`force_teardown`（显式、单独、可审计）。这是紧急拆除手册的命脉——
+"一条命令能救回来"和"必须重启"是两种事故等级。
+
+完整处置手册见 **[`docs/EMERGENCY-TEARDOWN.md`](docs/EMERGENCY-TEARDOWN.md)**，
+安全策略见 **[`SECURITY.md`](SECURITY.md)**。
 
 ### 21.2 适配器 SPI 的三条判定（已落地）
 
