@@ -1,0 +1,25 @@
+[package]
+name        = "aegis-audit"
+description = "审计与证据链：出站连接事实 + 规范化编码 + SHA-256 哈希链（篡改可检测）+ 有界内存缓冲"
+version.workspace      = true
+edition.workspace      = true
+rust-version.workspace = true
+license.workspace      = true
+authors.workspace      = true
+
+[dependencies]
+aegis-version = { workspace = true }
+# 只为了 InterfaceRole：审计必须记录"这条连接从哪张角色的网卡出去的"。
+# 刻意复用 core 的枚举而不是自己再定义一个"通道"枚举——两处定义必然漂移，
+# 而漂移的表现是审计表里写着一个早已不存在的角色名。
+aegis-core    = { workspace = true }
+# 证据链哈希。纯 Rust 实现，不引入 C 编译（本 crate 要能在普通用户下秒级构建）
+sha2          = { workspace = true }
+thiserror     = { workspace = true }
+
+[dev-dependencies]
+mutants = { workspace = true }
+
+[[example]]
+name = "audit_dryrun"
+path = "examples/audit_dryrun.rs"

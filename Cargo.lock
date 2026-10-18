@@ -3,6 +3,17 @@
 version = 4
 
 [[package]]
+name = "aegis-audit"
+version = "0.1.0-alpha.2"
+dependencies = [
+ "aegis-core",
+ "aegis-version",
+ "mutants",
+ "sha2",
+ "thiserror",
+]
+
+[[package]]
 name = "aegis-config"
 version = "0.1.0-alpha.2"
 dependencies = [
