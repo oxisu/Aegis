@@ -291,18 +291,58 @@ SCM 失败动作（SERVICE_FAILURE_ACTIONS）
 
 ## 8. 落地前必跑的验证实验（未完成前不写产品代码）
 
-| # | 要验证什么 | 方法 | 代价 |
+| # | 要验证什么 | 代价 | 状态 |
 |---|---|---|---|
-| 1 | 本机能否在非动态会话里装 `FWPM_FILTER_FLAG_PERSISTENT` 规则 | 新探针（`Session::open_persistent`） | 低，需提权 |
-| 2 | **Provider + serviceName 开关是否真的生效** | 装持久规则 → 禁用服务 → 重启 → 查是否还拦 | **要重启** |
-| 3 | 删 provider 是否级联删 filter（预期：**不**级联） | 先试删 provider，看返回值与残留 | 低 |
-| 4 | 持久对象在本机注册表的实际位置与形态 | 装一条 → 查 `...\BFE\Parameters\Policy\Persistent` | 低 |
-| 5 | SCM 失败动作能否在 `taskkill /F` 后拉起服务；`RUN_COMMAND` 是否触发 | 装成服务实测 | 中 |
-| 6 | 安全模式下 BFE 是否仍加载第三方持久过滤器；能否手动起 aegisd | 进安全模式实测 | **要重启** |
-| 7 | `--purge` 能否在无 aegisd、无配置、无网络的情况下清干净 | 端到端 | 低 |
+| 1 | 本机能否在非动态会话里装 `FWPM_FILTER_FLAG_PERSISTENT` 规则 | 低 | ✅ **已过** |
+| 2 | **Provider + serviceName 开关是否真的生效** | **要重启** | ⏳ 待跑 |
+| 3 | 删 provider 是否级联删 filter（预期：**不**级联） | 低 | ✅ **已过** |
+| 4 | 持久对象在本机注册表的实际位置与形态 | 低 | ✅ **已过** |
+| 5 | SCM 失败动作能否在 `taskkill /F` 后拉起服务；`RUN_COMMAND` 是否触发 | 中 | ⏳ 待跑 |
+| 6 | 安全模式下 BFE 是否仍加载第三方持久过滤器；能否手动起 aegisd | **要重启** | ⏳ 待跑 |
+| 7 | `--purge` 能否在无 aegisd、无配置、无网络的情况下清干净 | 低 | ✅ **已过**（等价验证） |
 
-⚠ 2 和 6 要重启，属于"长任务 + 有干扰"。按约定，**跑之前先问你要不要跑**，
-且要挑你不在用网的时段。
+⚠ 2 和 6 要重启，5 要在系统上建服务，都属于"长任务 + 有干扰"。
+按约定，**跑之前先问你要不要跑**，且要挑你不在用网的时段。
+
+### 8.1 已跑完的 4 项：`bash tools/persist-drill.sh`
+
+```text
+✅ 装之前通
+✅ 跨进程后仍断（真持久化）   ← 另一个进程看到 id=80934，跨重启=是，
+                                 Provider=Some("Aegis 持久化探针")
+✅ 删除后恢复
+✅ 删完没有残留（0）
+✅ 持久存储确实被写入（filter 条目 48 → 49）
+```
+
+逐条对应的结论：
+
+| 项 | 实测到什么 |
+|---|---|
+| 1 | 非动态会话开得成；`FwpmFilterAdd0` + `FWPM_FILTER_FLAG_PERSISTENT` 返回成功 |
+| 3 | **filter 还在时删 Provider 被拒，错误码 `0x8032000A`** → **不级联**，与微软文档一致，与第三方注释矛盾。逃生舱按"先 filter 后 provider"实现是对的 |
+| 4 | 键 `HKLM\SYSTEM\CurrentControlSet\Services\BFE\Parameters\Policy\Persistent` 存在，子键 `Filter` / `Provider` / `SubLayer`；**过滤器是 `Persistent\Filter` 下的 REG_BINARY 值，名字即过滤器 GUID**（本机基线 48 条，含 Windows 防火墙自己的） → 离线逃生舱"挂 SYSTEM hive 删这个键"**在本机确认可行** |
+| 7 | `purge`（先删 filter → 再删 provider → 再枚举复核）把持久化对象清干净，网络恢复，复核 0 条 |
+
+### 8.2 顺带抓出的一个真 bug：`snapshot()` 里的 use-after-free
+
+跑 P0 的第一分钟就段错误了，而且崩的是 **purge（逃生舱本身）**。
+根因在 `crates/aegis-wfp/src/session.rs`：
+
+```rust
+let rows = rows_of(entries, count);   // 借用，指向引擎分配的那一块
+FwpmFreeMemory0(entries);             // 先释放
+Ok(collect_providers(&rows))          // 再用 → use-after-free
+```
+
+修法是**先翻译成自有数据再释放**。
+
+⚠ 这个 bug 潜伏了很久，三重因素把它盖住了：`snapshot()` 此前没有任何路径
+真的调用过；单测覆盖的是"翻译层"；"胶水层"因为要提权而整层跳过变异测试。
+**它只可能在真机跑起来的时候暴露**——这也是 P0 必须先做实验、再写代码的原因。
+
+（同一次还修掉一个假测量：`purge` 崩掉时 `check | grep -c` 会得到 0，
+看起来像"清干净了"。现在改成先看退出码。）
 
 ---
 
