@@ -149,6 +149,10 @@ Stop-Process -Name aegisd -Force
 
 重启一定清空动态会话。
 
+> 断电 / 蓝屏 / 进程被强杀之后会留下什么，以及"重启后会不会因为数据损坏
+> 而连不上网"，单独写在 **`docs/CRASH-SAFETY.md`**。结论是：不会。
+> 动态会话里的对象只存在于内核内存，从不写入 BFE 的持久存储。
+
 ⚠ **本版不会装 Boot 层（引导时间）规则**，所以重启之后网络一定是干净的。
 这是被代码强制的：`aegis-wfp::preflight` 见到计划里有 `Tier::Boot` 规则就
 直接拒绝下发（`RefuseReason::BootRulesPresent`）。
@@ -178,13 +182,23 @@ aegisctl  ──命名管道 \\.\pipe\aegis──▶  aegisd  ──WFP 动态�
 
 ## 5. 诊断：确认到底装了什么
 
+⚠ **`netsh wfp show filters` 不往 stdout 输出**。它在**当前工作目录**生成一个
+`filters.xml`（本机实测 2.9 MB，已加进 `.gitignore`）。重定向到别处是**拿不到**
+东西的——`netsh wfp show filters > C:\x.txt` 会得到一个空文件，而你会以为
+"系统里没有过滤器"。正确做法是先 `cd` 到一个临时目录，再去读 `filters.xml`：
+
 ```powershell
-# 列出所有 WFP 过滤器（输出很长，重定向到文件看）
-netsh wfp show filters > C:\wfp-filters.txt
+$tmp = New-Item -ItemType Directory -Path (Join-Path $env:TEMP ("wfp-" + (Get-Date -f yyyyMMdd-HHmmss)))
+Push-Location $tmp
+netsh wfp show filters          # 在当前目录生成 filters.xml
+Pop-Location
 
 # 只看我们装的（会话名带 aegis- 前缀）
-Select-String -Path C:\wfp-filters.txt -Pattern "aegis-" -Context 0,6
+Select-String -Path (Join-Path $tmp filters.xml) -Pattern "aegis-" -Context 0,6
 ```
+
+⚠ 另一个同款陷阱：`grep -c` 在计数为 0 时**既打印 0 又返回退出码 1**。
+写成 `grep -c X f || echo 0` 会得到 `0\n0`。要写成 `|| true`。
 
 `aegisd` 起的会话名形如 `aegis-cage-<毫秒时间戳>`，探针起的形如
 `aegis-probe-<毫秒时间戳>`。搜 `aegis-` 就能找到。
