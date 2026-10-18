@@ -1,0 +1,67 @@
+# cargo-mutants 配置 —— Aegis 变异测试
+#
+# 文档：https://mutants.rs
+# 运行：
+#   cargo mutants --package aegis-core
+#   cargo mutants --package aegis-sense
+#   cargo mutants                      # 全工作区（较慢）
+#
+# 为什么需要变异测试：
+# 覆盖率只能证明"代码被执行过"，不能证明"断言抓得住错"。
+# Aegis 是安全底座，历史上已经有两次教训——
+#   1) 默认出口用错度量（跑得通但结果错）
+#   2) 指纹把 WFP 伪接口算进去（假漂移）
+# 这两类问题的共同点是：测试全绿，行为却是错的。
+# 变异测试通过"故意注入 bug，看测试是否红"来直接检验测试的牙齿。
+
+# 只看被测源码，跳过示例、集成测试与构建脚本
+examine_globs = ["crates/*/src/**/*.rs"]
+exclude_globs = [
+    "crates/*/examples/**",
+    "crates/*/tests/**",
+    "crates/*/build.rs",
+]
+
+# 这些变异属于"等价变异"或纯展示性改动，杀不掉也不代表测试有问题：
+# - 常量字符串/提示文案：改动不影响安全语义
+# - Display 实现的文案
+exclude_re = [
+    # 版本横幅与展示文案
+    "replace .* with \"\"",
+    # 等价变异：配对枚举的内层索引起点 `i + 1` 被改成 `i * 1`（== i）后，
+    # 只是多了一次"规则与自身比较"——层相同、权重相同、动作必然相同，
+    # 永远不满足"动作不同"这个判据，行为完全等价。测试无法也无须捕获。
+    "replace \\+ with \\* in verify",
+]
+
+# ── 速度：这是能不能把变异测试纳入日常流程的关键 ────────────────────────
+#
+# 成本 = 变异体数量 × (一次编译 + 一次跑测试)。本机实测（aegis-wfp，163 个）：
+#
+#   默认 dev profile              7s 编译 + 3s 测试  →  约 32 分钟
+#   --profile mutants（关 debug）  3s 编译 + 3s 测试  →  约 16 分钟
+#
+# 关掉调试信息是最大的单项收益：Windows 上链接阶段写 PDB 最贵，
+# 而变异测试根本不需要它——跑挂了只会看到"某个断言失败"，不会去调栈。
+# profile 定义在根 Cargo.toml 的 [profile.mutants]。
+#
+# ⚠ `profile` 写在 mutants.toml 里会被**静默忽略**，必须在命令行传
+#   `--profile mutants`。踩过。
+#
+# ⚠ 不要指望 `-j` 并行。实测三种配置（16 核机器）：
+#     -j 8 --copy-target=true  → 每个 job 拿到冷 target 副本，
+#                                单次编译 7s 涨到 45s，还炸出 5 个超时
+#     -j 4 共享 target         → 113s，比单线程(100s)还慢：cargo 对
+#                                target 目录是独占锁，并发只会互相等锁
+#     -j 1                     → 100s（最快）
+#   结论：单机上并行是负优化。要压墙钟时间只能**换机器并行**，
+#   即用 --shard 切片后丢给多个 CI runner（见 .github/workflows/ci.yml）。
+
+# 留空即可：虚拟 manifest 下 `cargo test` 默认就跑全部工作区成员。
+# 需要只测某个 crate 时，命令行加 `-C -p -C <crate>`。
+additional_cargo_args = []
+
+# 时间预算：单个变异体跑测试超过这个秒数视为超时，用命令行 `-t 120` 传。
+# （`test_timeout` **不是** config 支持的字段；cargo-mutants 对未知字段是
+#  拒绝解析整个文件的，写上去会让整份配置静默失效。）
+# 关掉 debug 后单个变异体只需几秒，120s 已很宽裕，足以兜住偶发抖动。

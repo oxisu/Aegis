@@ -24,6 +24,17 @@
 resolver = "2"
 members = ["crates/*"]
 
+# ── 变异测试专用 profile ──────────────────────────────────────────────────
+# cargo-mutants 要为每个变异体单独编译+链接一次测试二进制（163 个变异体 =
+# 163 次链接）。Windows 上链接阶段写调试信息是最贵的一步，而变异测试
+# 根本不需要调试信息——跑挂了也只会看到"某个断言失败"，不会去调栈。
+# 关掉 debuginfo 直接砍掉每个变异体的构建时间。
+# 用法：cargo mutants --profile mutants
+[profile.mutants]
+inherits   = "dev"
+debug      = false
+incremental = false
+
 # ── 统一版本号：所有 crate 共用，与根目录 VERSION 文件严格一致 ──────────────
 # Cargo 的 version 字段不接受 SemVer build metadata（+xxx），
 # 因此这里只写到预发布标签；build metadata 由 aegis-version 在运行时追加。

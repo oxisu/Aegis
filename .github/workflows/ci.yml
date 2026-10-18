@@ -123,11 +123,24 @@ jobs:
   # match arm 测试仍然全绿，那用户真的走到那条边时系统就不会迁移，
   # 而我们会一直以为它是好的。
   # ---------------------------------------------------------------------------
+  # 变异测试的总成本 = 变异体总数 × (一次编译 + 一次跑测试)，
+  # 单个 runner 上跑完要十几到三十分钟。既然**单机并行是负优化**
+  # （cargo 对 target 目录是独占锁，加 -j 只会互相等锁，实测 -j 4 比
+  # -j 1 还慢），那就换**机器并行**：把变异体切成 8 份，8 个 runner
+  # 同时各跑一份，墙钟时间从"三十分钟"降到"几分钟"。
+  #
+  # 每个分片独立判定自己那一份的漏检数——任一分片出现漏检就整体失败，
+  # 这样阈值语义和单任务时完全一致，不需要跨 job 聚合产物。
   mutation:
-    name: 变异回归测试
+    name: 变异回归测试 (${{ matrix.shard }}/${{ matrix.total }})
     if: github.event_name == 'workflow_dispatch' || github.event_name == 'schedule'
     runs-on: windows-latest
-    timeout-minutes: 120
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4, 5, 6, 7, 8]
+        total: [8]
     env:
       # 允许漏检的变异体数量。基线为 0 —— 新代码必须自带能杀死它的测试。
       MUTATION_MAX_MISSED: 0
@@ -145,14 +158,17 @@ jobs:
       - name: 安装 cargo-mutants
         run: cargo install cargo-mutants --locked
 
-      - name: 运行变异测试
+      - name: 运行变异测试（分片 ${{ matrix.shard }}/${{ matrix.total }}）
         # -v 是必需的：不带时输出走块缓冲，日志会长时间停在基线那一行，
         # 看起来像挂起（本机实测踩过）。
-        # 不开 -j 并行：cargo 对 target 目录独占锁，并发会互相等锁，
-        # 实测 -j 8 时单次构建从 5s 膨胀到 30~56s 并全部超时。
+        # --profile mutants 关掉调试信息，单次编译 7s → 3s，是最大的单项收益。
+        # 不开 -j：见 mutants.toml 里的实测数据，单机并行是负优化。
         # 另外不依赖 cargo mutants 自身的退出码语义，改为解析产物目录
         # 自行判定，这样"阈值是多少"这件事只由本文件说了算。
-        run: cargo mutants --no-shuffle -v --output mutants.out
+        run: >
+          cargo mutants --no-shuffle -v --profile mutants
+          --shard ${{ matrix.shard }}/${{ matrix.total }}
+          --output mutants.out
 
       - name: 判定漏检数量
         shell: pwsh

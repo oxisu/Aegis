@@ -890,6 +890,113 @@ mod tests {
         );
     }
 
+    // ── 逐层判定：`check_loopback` / `check_dhcp` 的层匹配 ──────────────
+    // 变异测试指出这五个判据的"层"维度没被覆盖：把 `==` 改成 `!=`、
+    // 把 `&&` 改成 `||` 之后，别的层的规则会被拉进来参与判断，
+    // 于是凭空多出遮蔽结论。
+
+    /// 别的层的无条件阻断**不能**遮蔽本层的回环放行。
+    #[test]
+    fn loopback_shadowing_is_judged_within_one_layer() {
+        let plan = vec![
+            FilterSpec {
+                name: "回环放行",
+                layer: Layer::AleAuthConnectV4,
+                action: Action::Permit,
+                weight: 5,
+                conditions: vec![Condition::Loopback],
+                tier: Tier::Runtime,
+            },
+            FilterSpec {
+                name: "DHCP 放行·服务端67",
+                layer: Layer::AleAuthConnectV4,
+                action: Action::Permit,
+                weight: W_DHCP,
+                conditions: vec![
+                    Condition::ServicePid(DHCP_SERVICE),
+                    Condition::RemotePort(67),
+                ],
+                tier: Tier::Runtime,
+            },
+            spec("默认拒绝", Layer::AleAuthConnectV4, Action::Block, 3),
+            // V6 层有一条权重更高的无条件阻断，但它管不到 V4 的回环放行
+            spec("默认拒绝", Layer::AleAuthConnectV6, Action::Block, 15),
+        ];
+        let c = codes(&plan);
+        assert!(
+            !c.contains(&"LOOPBACK_SHADOWED"),
+            "跨层不应判定为遮蔽：{c:?}"
+        );
+        // V6 确实没有回环放行，这条该报——顺便确认判据本身还活着
+        assert!(c.contains(&"LOOPBACK_MISSING"), "{c:?}");
+    }
+
+    /// 别的层的无条件阻断**不能**遮蔽本层的 DHCP 放行。
+    #[test]
+    fn dhcp_shadowing_is_judged_within_one_layer() {
+        let mut plan = minimal_v4_plan();
+        plan.push(spec("默认拒绝", Layer::AleAuthConnectV6, Action::Block, 15));
+        let c = codes(&plan);
+        assert!(!c.contains(&"DHCP_SHADOWED"), "跨层不应判定为遮蔽：{c:?}");
+    }
+
+    /// **阻断** 67/68 的规则不算 DHCP 放行——放行必须是 Permit。
+    #[test]
+    fn blocking_dhcp_ports_does_not_count_as_a_permit() {
+        let plan = vec![
+            FilterSpec {
+                name: "回环放行",
+                layer: Layer::AleAuthConnectV4,
+                action: Action::Permit,
+                weight: W_LOOPBACK,
+                conditions: vec![Condition::Loopback],
+                tier: Tier::Runtime,
+            },
+            FilterSpec {
+                name: "阻断 67",
+                layer: Layer::AleAuthConnectV4,
+                action: Action::Block,
+                weight: W_DNS_LOCK,
+                conditions: vec![Condition::RemotePort(PORT_DHCP_SERVER)],
+                tier: Tier::Runtime,
+            },
+            spec(
+                "默认拒绝",
+                Layer::AleAuthConnectV4,
+                Action::Block,
+                W_DEFAULT_DENY,
+            ),
+        ];
+        assert!(
+            codes(&plan).contains(&"DHCP_MISSING"),
+            "只有阻断 67 的规则时不算放行：{:?}",
+            codes(&plan)
+        );
+    }
+
+    /// 权重**低于**默认拒绝时，DHCP 放行确实被遮蔽——确认判据活着，
+    /// 否则下面那条"同权重不算遮蔽"的否定断言可能只是判据失效才通过。
+    #[test]
+    fn dhcp_below_default_deny_is_shadowed() {
+        let mut plan = minimal_v4_plan();
+        plan[1].weight = 1;
+        assert!(
+            codes(&plan).contains(&"DHCP_SHADOWED"),
+            "{:?}",
+            codes(&plan)
+        );
+    }
+
+    /// DHCP 放行与默认拒绝**同权重**：那是顺序不确定，不是遮蔽。
+    #[test]
+    fn dhcp_at_same_weight_as_default_deny_is_not_shadowed() {
+        let mut plan = minimal_v4_plan();
+        plan[1].weight = W_DEFAULT_DENY;
+        let c = codes(&plan);
+        assert!(c.contains(&"DUPLICATE_WEIGHT"), "{c:?}");
+        assert!(!c.contains(&"DHCP_SHADOWED"), "同权重不是遮蔽：{c:?}");
+    }
+
     /// 权重**等于**上限是合法的：只有超过才该报。
     #[test]
     fn weight_exactly_at_max_is_accepted() {

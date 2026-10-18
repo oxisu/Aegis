@@ -103,7 +103,7 @@
 - **变异回归测试（`cargo-mutants`）**
   - 单测全绿只证明"代码通过了我们想到的用例"，变异测试反过来问：
     注入一个 bug，测试会不会红
-  - 配置见 `mutants.toml`；CI 的 `mutation` job 每周一 + 手动触发，
+  - 配置见 `.cargo/mutants.toml`；CI 的 `mutation` job 每周一 + 手动触发，
     阈值 `MUTATION_MAX_MISSED=0`，产物以 artifact 上传
   - `CONTRIBUTING.md` 写入本地运行方式、漏检的处理办法与三条经验
   - 首轮 `aegis-core` 79 个变异体**漏检 26 个**，绝大多数是
