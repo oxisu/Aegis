@@ -1,0 +1,16 @@
+[package]
+name        = "aegis-fuse"
+description = "微秒级拓扑震荡熔断器：NotifyIpInterfaceChange 回调即弃 + 去抖 + 先熔断后分析"
+version.workspace      = true
+edition.workspace      = true
+rust-version.workspace = true
+license.workspace      = true
+authors.workspace      = true
+
+[dependencies]
+aegis-version = { workspace = true }
+
+# 刻意**不**依赖 windows crate（至少现阶段）：
+# 熔断的判定逻辑（去抖、先断后算、时钟边界）全是纯状态机，
+# 不碰 Win32 也能完整推演与单测。等真要接 NotifyIpInterfaceChange
+# 时再单独加一个模块，把 FFI 关在那一层。
