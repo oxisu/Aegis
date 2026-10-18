@@ -1523,6 +1523,11 @@ mod tests {
     }
 
     /// 广播封锁缺失同理。
+    ///
+    /// ⚠ 必须验告警**点名了哪几个端口**，不能只验"有没有这条告警"。
+    /// 只验存在性的话，把 `missing` 那个 filter 的 `!` 删掉照样通过——
+    /// 那样改之后列表里是"**已经封住的**端口"而不是"缺失的端口"：
+    /// 告警照样弹，但它指错了方向，排查会直奔一个根本没问题的端口。
     #[test]
     fn removing_the_broadcast_lock_from_the_plan_is_caught() {
         let policy = CagePolicy {
@@ -1538,9 +1543,14 @@ mod tests {
             })
             .collect();
         let f = verify_policy(&plan, &policy);
-        assert!(f
+        let hit = f
             .iter()
-            .any(|x| x.code == "POLICY_BROADCAST_LOCK_NOT_HONORED"));
+            .find(|x| x.code == "POLICY_BROADCAST_LOCK_NOT_HONORED")
+            .expect("抽掉 5353 封锁必须被抓");
+        assert!(hit.is_invariant());
+        assert!(hit.detail.contains("5353"), "必须点名缺的那个端口：{}", hit.detail);
+        assert!(!hit.detail.contains("5355"), "5355 还在，不该报成缺失：{}", hit.detail);
+        assert!(!hit.detail.contains("137"), "137 还在，不该报成缺失：{}", hit.detail);
     }
 
     /// ⚠ 最危险的脱节：策略说不要持久背板，计划里却有 Boot 规则。
@@ -1840,6 +1850,19 @@ mod tests {
         assert_eq!(Layer::OutboundTransportV4.name(), "OUTBOUND_TRANSPORT_V4");
         assert_eq!(Layer::OutboundTransportV6.name(), "OUTBOUND_TRANSPORT_V6");
         assert_eq!(Layer::AleAuthRecvAcceptV4.name(), "ALE_AUTH_RECV_ACCEPT_V4");
+    }
+
+    /// `FindingKind::name()` 会被打进 `wfp_plan` 的每一行输出
+    /// （`[{tag}/{kind.name()}]`），也是运维区分"必须改"与"可以商量"的依据。
+    ///
+    /// ⚠ 必须钉确切字面值。只验"非空"的话，把整个函数换成 `"xyzzy"` 照样通过，
+    /// 而那样改的后果是：不变量和写法问题在输出里再无区别——
+    /// 用户会把"可以商量的卫生问题"当成"必须修的底线"，或者反过来。
+    #[test]
+    fn finding_kind_names_are_pinned() {
+        assert_eq!(FindingKind::Invariant.name(), "不变量");
+        assert_eq!(FindingKind::Hygiene.name(), "写法");
+        assert_ne!(FindingKind::Invariant.name(), FindingKind::Hygiene.name());
     }
 
     /// 层 GUID 必须与 `layers.rs` 里登记的是同一层，否则下发到别的层去了。
