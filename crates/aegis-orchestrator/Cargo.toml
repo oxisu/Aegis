@@ -1,0 +1,19 @@
+[package]
+name        = "aegis-orchestrator"
+description = "应用层适配器 SPI：能力接口（Capability）+ 逐能力失败模式 + 契约测试夹具"
+version.workspace      = true
+edition.workspace      = true
+rust-version.workspace = true
+license.workspace      = true
+authors.workspace      = true
+
+[dependencies]
+aegis-version = { workspace = true }
+thiserror     = { workspace = true }
+
+[dev-dependencies]
+mutants = { workspace = true }
+
+[[example]]
+name = "orchestrator_dryrun"
+path = "examples/orchestrator_dryrun.rs"
