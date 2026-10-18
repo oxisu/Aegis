@@ -50,6 +50,15 @@ pub struct Session {
 }
 
 impl Session {
+    /// 底层引擎句柄。
+    ///
+    /// ⚠ 只给 [`crate::apply`] 用（`pub(crate)`）：拿到它就能往引擎里
+    /// **装东西**。可见性刻意卡在这一层——`session.rs` 自己只做只读勘察，
+    /// 会改系统状态的入口全在 `apply.rs` 一处，审代码时只需看那一个文件。
+    pub(crate) fn handle(&self) -> HANDLE {
+        self.handle
+    }
+
     /// 打开一个**动态**会话。
     ///
     /// 需要提权，无法在单测里覆盖，故跳过变异（理由见模块头）。

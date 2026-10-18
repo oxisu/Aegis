@@ -18,12 +18,18 @@
 //! 守护进程 panic = 绝缘笼可能没装完 = fail-open 的那一瞬间。
 //! 所有 Win32 / WFP 失败都带错误码向上传递（见 [`error::WfpError`]）。
 
+pub mod apply;
 pub mod error;
 pub mod layers;
 pub mod model;
 pub mod plan;
 pub mod session;
 
+pub use apply::{
+    apply, has_boot_rules, mappable, preflight, probe_add_then_remove, rollback,
+    unmappable_conditions, ApplyReceipt, ApplyTicket, ConfirmError, Phase, ProbeResult,
+    RefuseReason, CONFIRM_WINDOW_MS,
+};
 pub use error::WfpError;
 pub use layers::{
     action_is_terminal, action_name, is_known, layer_name, layer_purpose, watched_layers,

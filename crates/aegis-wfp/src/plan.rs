@@ -156,6 +156,8 @@ impl Action {
 pub enum Condition {
     /// 目的端口等于给定值
     RemotePort(u16),
+    /// **本地**端口等于给定值（配合 `RemotePort` 可以钉死一个方向）
+    LocalPort(u16),
     /// 目的 IPv4 地址等于给定值
     RemoteAddrV4(Ipv4Addr),
     /// 本机回环（127.0.0.0/8）
@@ -164,21 +166,50 @@ pub enum Condition {
     PhysicalInterface,
     /// 进程 ID —— **只有运行期才有意义**
     ProcessId(u64),
-    /// 某个 Windows 服务的进程 ID，到下发时才解析。
+    /// 进程是**系统服务宿主**（`%SystemRoot%\system32\svchost.exe`）。
     ///
-    /// 之所以不直接存解析好的数字：计划是在**没有权限、可能还没开机**的
-    /// 环境里生成的，那时拿不到 PID。存服务名，让下发方去填。
-    ServicePid(&'static str),
+    /// # 为什么不叫 `ServicePid`（一次真机事故改掉的命名）
+    ///
+    /// 第一版写作"某个 Windows 服务的进程 ID"，下发时翻译成
+    /// `FWPM_CONDITION_ALE_APP_ID` + `UINT64(pid)`。真机下发时内核直接
+    /// 返回 `0x80320027`（`FWP_E_TYPE_MISMATCH`）：**WFP 根本没有"按 PID
+    /// 过滤"这个字段**，`ALE_APP_ID` 的值是**字节 blob**，不是整数。
+    ///
+    /// 用只读探针（见 `examples/probe_appid.rs`）实测后确认的语义是：
+    ///
+    /// - 传服务短名（`"Dhcp"`）→ 失败 `ERROR_FILE_NOT_FOUND`，
+    ///   也就是说"按服务名绑定"这条路根本不通；
+    /// - 传可执行文件路径 → 成功，返回形如
+    ///   `\device\harddiskvolume1\windows\system32\svchost` 的 blob；
+    /// - 传带参数的整条命令行 → 失败，只认纯路径。
+    ///
+    /// 于是"按服务绑定"在 WFP 里**做不到**：DHCP 跑在共享的 `svchost.exe`
+    /// 里，同一个宿主下还挂着 `Dnscache`、`Schedule` 等等，AppId 无法
+    /// 区分它们。这条条件只能收紧到"系统服务宿主进程"。
+    ///
+    /// ⚠ 因此 §28.1 的"借壳偷渡"**没有被完全堵住**：同宿主的其他服务
+    /// 理论上仍可借 67/68 端口外联。这比"任何进程都能借"好得多，
+    /// 但不是零。彻底解决要靠 ALE callout 在内核里按 PID 判，那是后续工作。
+    SystemServiceHost,
 }
 
 impl Condition {
     /// 该条件是否在"TCP/IP 栈启动之前、任何进程存在之前"就能求值。
     ///
     /// 这是 Boot-Time 层（§20.2 / §28.1）的硬约束：引导时间 DHCP 放行若
-    /// 写成"匹配 Dhcp 服务 PID"，那是一条**永不匹配的死规则**——
+    /// 写成"匹配某个进程"，那是一条**永不匹配的死规则**——
     /// 引导时间还没有进程。结果就是开机即断网，且没有任何界面能救。
     pub fn is_static(self) -> bool {
-        !matches!(self, Self::ProcessId(_) | Self::ServicePid(_))
+        !matches!(self, Self::ProcessId(_) | Self::SystemServiceHost)
+    }
+
+    /// 这条条件是不是"按进程身份"匹配，且我们**真的能**翻译成 WFP 字段。
+    ///
+    /// 今天只有 [`Self::SystemServiceHost`] 满足（走 `ALE_APP_ID` blob）。
+    /// [`Self::ProcessId`] **永远不可映射**：WFP 在 ALE 层没有"按 PID 过滤"
+    /// 这个字段，硬填数字只会换来 `FWP_E_TYPE_MISMATCH`。
+    pub fn is_mappable_process_identity(self) -> bool {
+        matches!(self, Self::SystemServiceHost)
     }
 }
 
@@ -186,11 +217,12 @@ impl fmt::Display for Condition {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::RemotePort(p) => write!(f, "目的端口={p}"),
+            Self::LocalPort(p) => write!(f, "本地端口={p}"),
             Self::RemoteAddrV4(a) => write!(f, "目的地址={a}"),
             Self::Loopback => write!(f, "回环"),
             Self::PhysicalInterface => write!(f, "接口类型=物理网卡"),
             Self::ProcessId(p) => write!(f, "进程ID={p}"),
-            Self::ServicePid(s) => write!(f, "进程ID={s}服务(下发时解析)"),
+            Self::SystemServiceHost => write!(f, "进程=系统服务宿主(svchost)"),
         }
     }
 }
@@ -295,21 +327,30 @@ pub fn cage_plan(p: CagePolicy) -> Vec<FilterSpec> {
         });
     }
 
-    // 运行期 DHCP：已经能解析到 Dhcp 服务进程，因此用 PID 精确绑定，
-    // 避免任何进程都能借 67/68 偷渡（§28.1 借壳偷渡）。
+    // 运行期 DHCP：按"方向 + 宿主进程"放行。
     //
     // **必须拆成两条**：WFP 的多条件是 AND 语义，"端口=67 且 端口=68"
     // 是一条永假条件——写上去不报错，只是这条放行永远不生效，
     // 表现就是开机断网。这是第一版踩到的坑，别再合回去。
-    for port in [PORT_DHCP_SERVER, PORT_DHCP_CLIENT] {
+    //
+    // 每条再钉死**本地端口**，把放行收窄成"客户端方向"与"服务端方向"
+    // 两个具体方向，而不是"远端端口是 67 或 68 就放行"。
+    //
+    // ⚠ 这里**没有**"按 Dhcp 服务精确绑定"——WFP 做不到（见
+    // [`Condition::SystemServiceHost`] 的注释）。残余风险写在那儿了。
+    for (local, remote) in [
+        (PORT_DHCP_CLIENT, PORT_DHCP_SERVER),
+        (PORT_DHCP_SERVER, PORT_DHCP_CLIENT),
+    ] {
         out.push(FilterSpec {
-            name: dhcp_permit_name(port),
+            name: dhcp_permit_name(remote),
             layer: Layer::AleAuthConnectV4,
             action: Action::Permit,
             weight: W_DHCP,
             conditions: vec![
-                Condition::ServicePid(DHCP_SERVICE),
-                Condition::RemotePort(port),
+                Condition::SystemServiceHost,
+                Condition::LocalPort(local),
+                Condition::RemotePort(remote),
             ],
             tier: Tier::Runtime,
         });
@@ -369,7 +410,7 @@ pub fn cage_plan(p: CagePolicy) -> Vec<FilterSpec> {
     // ── 引导时间持久背板（可选）────────────────────────────────────────
     if p.boot_backbone {
         // 只能用静态条件：接口类型 + 端口 + 广播地址。
-        // 绝不能出现 ServicePid —— 引导时间没有进程，写了就是死规则。
+        // 绝不能出现 SystemServiceHost —— 引导时间没有进程，写了就是死规则。
         // 同样按端口拆成两条（AND 语义）。
         for port in [PORT_DHCP_SERVER, PORT_DHCP_CLIENT] {
             out.push(FilterSpec {
@@ -848,7 +889,8 @@ mod tests {
                 action: Action::Permit,
                 weight: W_DHCP,
                 conditions: vec![
-                    Condition::ServicePid(DHCP_SERVICE),
+                    Condition::SystemServiceHost,
+                    Condition::LocalPort(68),
                     Condition::RemotePort(67),
                 ],
                 tier: Tier::Runtime,
@@ -895,7 +937,8 @@ mod tests {
                 action: Action::Permit,
                 weight: W_DHCP,
                 conditions: vec![
-                    Condition::ServicePid(DHCP_SERVICE),
+                    Condition::SystemServiceHost,
+                    Condition::LocalPort(68),
                     Condition::RemotePort(67),
                 ],
                 tier: Tier::Runtime,
@@ -928,7 +971,8 @@ mod tests {
                 action: Action::Permit,
                 weight: 11,
                 conditions: vec![
-                    Condition::ServicePid(DHCP_SERVICE),
+                    Condition::SystemServiceHost,
+                    Condition::LocalPort(68),
                     Condition::RemotePort(67),
                 ],
                 tier: Tier::Runtime,
@@ -1060,7 +1104,8 @@ mod tests {
                 action: Action::Permit,
                 weight: W_DHCP,
                 conditions: vec![
-                    Condition::ServicePid(DHCP_SERVICE),
+                    Condition::SystemServiceHost,
+                    Condition::LocalPort(68),
                     Condition::RemotePort(67),
                 ],
                 tier: Tier::Runtime,
@@ -1734,7 +1779,7 @@ mod tests {
         assert!(Condition::Loopback.is_static());
         assert!(Condition::PhysicalInterface.is_static());
         assert!(!Condition::ProcessId(1).is_static());
-        assert!(!Condition::ServicePid("Dhcp").is_static());
+        assert!(!Condition::SystemServiceHost.is_static());
     }
 
     /// **回归**：WFP 多条件是 AND 语义，"端口=67 且 端口=68" 是永假条件。
@@ -1784,10 +1829,20 @@ mod tests {
                 "缺少目的端口 {port} 的 DHCP 放行"
             );
         }
-        // 运行期放行绑定的是服务名，等下发时再解析 PID
+        // 运行期放行绑定到系统服务宿主，并钉死本地端口（方向）
         assert!(plan
             .iter()
-            .any(|f| f.conditions.contains(&Condition::ServicePid(DHCP_SERVICE))));
+            .any(|f| f.conditions.contains(&Condition::SystemServiceHost)));
+        assert!(
+            plan.iter().any(|f| f.conditions.contains(&Condition::LocalPort(68))
+                && f.conditions.contains(&Condition::RemotePort(67))),
+            "DHCP 客户端方向（本地 68 → 远端 67）必须存在"
+        );
+        assert!(
+            plan.iter().any(|f| f.conditions.contains(&Condition::LocalPort(67))
+                && f.conditions.contains(&Condition::RemotePort(68))),
+            "DHCP 服务端方向（本地 67 → 远端 68）必须存在"
+        );
     }
 
     #[test]

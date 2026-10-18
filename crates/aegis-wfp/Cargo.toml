@@ -15,6 +15,9 @@ windows = { workspace = true, features = [
     "Win32_NetworkManagement_WindowsFilteringPlatform",
     "Win32_Security",
     "Win32_System_Rpc",
+    # GetSystemDirectoryW：解析系统服务宿主（svchost.exe）的真实路径，
+    # 用于 ALE_APP_ID blob。系统盘不一定在 C:，不能拼字符串。
+    "Win32_System_SystemInformation",
     "Win32_Foundation",
 ] }
 aegis-version = { workspace = true }

@@ -22,6 +22,17 @@ pub enum WfpError {
     Enumerate(u32),
     /// 关闭引擎失败（通常在 Drop 里，仅记录）
     EngineClose(u32),
+    /// `FwpmFilterAdd0` 失败
+    FilterAdd(u32),
+    /// 遇到了无法精确映射成 WFP 字段的条件。
+    ///
+    /// ⚠ 出现这个错误意味着**没有下发任何规则**——宁可不装，
+    /// 也不把条件翻译成"差不多"的另一个字段。
+    ///
+    /// 名字用 `&'static str` 而不是 `String`：`WfpError` 是 `Copy`，
+    /// 调用方到处按值传。为一个只在拒绝路径出现的错误破掉 `Copy`
+    /// 不划算，而这些名字本来就是有限的几个常量。
+    UnsupportedCondition { name: &'static str },
 }
 
 impl WfpError {
@@ -31,7 +42,9 @@ impl WfpError {
             Self::EngineOpen(c)
             | Self::EnumHandle(c)
             | Self::Enumerate(c)
-            | Self::EngineClose(c) => c,
+            | Self::EngineClose(c)
+            | Self::FilterAdd(c) => c,
+            Self::UnsupportedCondition { .. } => 0,
         }
     }
 
@@ -62,6 +75,10 @@ impl fmt::Display for WfpError {
             Self::EnumHandle(_) => "创建枚举句柄",
             Self::Enumerate(_) => "枚举",
             Self::EngineClose(_) => "关闭 WFP 引擎",
+            Self::FilterAdd(_) => "下发 WFP 规则",
+            Self::UnsupportedCondition { name } => {
+                return write!(f, "条件无法精确映射到 WFP 字段：{name}（本次未下发任何规则）")
+            },
         };
         write!(f, "{what}失败（错误码 0x{:08X}", self.code())?;
         if self.is_wfp_code() {
