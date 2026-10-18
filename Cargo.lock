@@ -97,6 +97,30 @@ dependencies = [
 ]
 
 [[package]]
+name = "aegisctl"
+version = "0.1.0-alpha.2"
+dependencies = [
+ "aegis-ipc",
+ "aegis-version",
+ "mutants",
+]
+
+[[package]]
+name = "aegisd"
+version = "0.1.0-alpha.2"
+dependencies = [
+ "aegis-audit",
+ "aegis-config",
+ "aegis-core",
+ "aegis-ipc",
+ "aegis-model",
+ "aegis-sense",
+ "aegis-version",
+ "aegis-wfp",
+ "mutants",
+]
+
+[[package]]
 name = "block-buffer"
 version = "0.10.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"

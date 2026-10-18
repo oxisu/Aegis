@@ -85,6 +85,14 @@ aegis-core    = { path = "crates/aegis-core" }
 aegis-ipc     = { path = "crates/aegis-ipc" }
 # 工作区内部：配置加载与 schema 校验
 aegis-config  = { path = "crates/aegis-config" }
+# 工作区内部：OS 级底座（WFP 规则计划与静态自检）
+aegis-wfp     = { path = "crates/aegis-wfp" }
+# 工作区内部：审计与证据链落盘
+aegis-audit   = { path = "crates/aegis-audit" }
+# 工作区内部：应用层适配器 SPI（能力接口 + 契约夹具）
+aegis-orchestrator = { path = "crates/aegis-orchestrator" }
+# 工作区内部：微秒级网口熔断器
+aegis-fuse    = { path = "crates/aegis-fuse" }
 
 # ── Release 优化：本机安全底座追求极小体积与快速冷启动 ──
 [profile.release]

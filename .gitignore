@@ -60,3 +60,8 @@ mutants.out.old/
 
 # ============ WorkBuddy 本地项目数据（非临时缓存，但无需入库）============
 .workbuddy/
+
+# ============ aegisd 运行数据（含 IPC token，**绝不入库**）============
+.aegis-run/
+*.binlog
+ipc.token

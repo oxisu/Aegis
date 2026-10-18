@@ -50,7 +50,8 @@ Aegis 建立一张**独立于任何上层代理软件的 OS 级安全底座**：
 | `aegis-ipc` | ✅ 可用 | 本地 IPC：帧编解码 + 版本握手 + **命名管道（显式 DACL）+ 一次性 token 鉴权** |
 | `aegis-config` | ✅ 可用 | 配置加载与 schema 版本校验（Fail-Closed） |
 | `aegis-orchestrator` | ✅ 可用 | 应用层适配器 SPI：**能力接口** `Capability`（不是软件接口）+ 逐能力失败模式（写死）+ 能力矩阵 + 声明自检 + **契约测试夹具** + 参考适配器（纯模型，不碰系统） |
-| `aegisd` / `aegisctl` | ⬜ 待建 | 守护进程 / 控制端二进制 |
+| `aegisd` | ✅ 最小链路 | 守护进程：配置（失败即退）→ IPC 命名管道 → 拓扑快照 → 角色裁决 → **WFP 仅干跑** → 审计落盘 |
+| `aegisctl` | ✅ 最小链路 | 控制端：握手 → token 鉴权 → 状态查询 / 心跳 |
 
 ### 依赖方向铁律
 
@@ -152,6 +153,8 @@ Aegis/
     └── aegis-config/       # 配置加载 + schema 版本校验（Fail-Closed）
     ├── aegis-orchestrator/ # 适配器 SPI：能力接口 + 失败模式 + 契约夹具 + 参考适配器
     │   └── examples/orchestrator_dryrun.rs  # 适配器契约干跑（无需管理员）
+    ├── aegisd/             # 守护进程：最小可运行链路（**不下发任何 WFP 规则**）
+    └── aegisctl/           # 控制端：握手 + 鉴权 + 状态查询
 ```
 
 ## 安全边界（`aegis-sense` 的硬约束）
@@ -231,6 +234,10 @@ cargo run -p aegis-wfp   --example wfp_plan -- --campus-strict --boot-backbone
 cargo run -p aegis-ipc   --example ipc_dryrun  # IPC 全链路：握手 + token 鉴权（无需管理员）
 cargo run -p aegis-audit --example audit_dryrun # 证据链：什么抓得住、什么抓不住
 cargo run -p aegis-orchestrator --example orchestrator_dryrun  # 适配器 SPI：契约 + 自检 + 三类故障
+
+# 最小可运行链路：**不下发任何 WFP 规则**，不需要管理员权限
+cargo run -p aegisd  -- --config config/config.example.toml --data-dir .aegis-run --serve-secs 30
+cargo run -p aegisctl -- --token-file .aegis-run/ipc.token    # 另开终端：握手 + 鉴权 + 查状态
 ```
 
 ### 绝缘笼：为什么先做"计划"而不是直接下发
