@@ -368,10 +368,16 @@ fn add_one(session: &Session, spec: &FilterSpec) -> Result<u64, WfpError> {
                 wfp::FWP_MATCH_EQUAL,
                 FwpValue::Uint16(*p),
             )),
+            // ⚠ 目的地址用的是 `FWPM_CONDITION_IP_REMOTE_ADDRESS`（UINT32），
+            // **不是** `..._ADDRESS_V4`（`FWP_V4_ADDR_MASK`）。
+            // 真机实测：`ALE_AUTH_CONNECT_V4` 的字段表里**没有**
+            // `IP_REMOTE_ADDRESS_V4`，内核会回 `0x80320002`
+            // （`FWP_E_CONDITION_NOT_FOUND`）。而"层支持哪些字段"是会变的，
+            // 所以这条不是从文档背下来的，是用 `Session::fields` 问出来的。
             Condition::RemoteAddrV4(a) => translated.push((
-                wfp::FWPM_CONDITION_IP_REMOTE_ADDRESS_V4,
+                wfp::FWPM_CONDITION_IP_REMOTE_ADDRESS,
                 wfp::FWP_MATCH_EQUAL,
-                FwpValue::V4(u32::from(*a), 0xFFFF_FFFF),
+                FwpValue::Uint32(u32::from(*a)),
             )),
             // 回环用 FLAGS 字段判 IS_LOOPBACK，比"目的地址是 127.0.0.0/8"精确：
             // 后者在 IPv6 与部分隧道场景下判不准，而判不准的下场是把自己锁在门外。
@@ -411,22 +417,9 @@ fn add_one(session: &Session, spec: &FilterSpec) -> Result<u64, WfpError> {
         }
     }
 
-    // ── 第二遍：先把地址类值全部分配好 ──────────────────────────────────
-    // 必须一次分配完再取指针：边 push 边取指针的话，Vec 扩容会把旧指针全作废，
-    // 而作废的指针传给内核是未定义行为——不会报错，只会装出莫名其妙的规则。
-    let mut v4_bufs: Vec<wfp::FWP_V4_ADDR_AND_MASK> = translated
-        .iter()
-        .filter_map(|(_, _, v)| match v {
-            FwpValue::V4(addr, mask) => Some(wfp::FWP_V4_ADDR_AND_MASK {
-                addr: *addr,
-                mask: *mask,
-            }),
-            _ => None,
-        })
-        .collect();
-
+    // 地址现在是 UINT32 标量（见下面的 `RemoteAddrV4` 分支），
+    // 不再需要单独分配缓冲区去放 `FWP_V4_ADDR_AND_MASK`。
     // ── 第三遍：构造条件数组 ────────────────────────────────────────────
-    let mut v4_iter = v4_bufs.iter_mut();
     let mut conds: Vec<wfp::FWPM_FILTER_CONDITION0> = Vec::with_capacity(translated.len());
     for (field, match_type, value) in &translated {
         let mut cv = wfp::FWP_CONDITION_VALUE0::default();
@@ -438,13 +431,6 @@ fn add_one(session: &Session, spec: &FilterSpec) -> Result<u64, WfpError> {
             FwpValue::Uint32(v) => {
                 cv.r#type = wfp::FWP_UINT32;
                 cv.Anonymous.uint32 = *v;
-            },
-            FwpValue::V4(_, _) => {
-                let slot = v4_iter
-                    .next()
-                    .expect("第二遍已按同样的顺序分配好，数量必然一致");
-                cv.r#type = wfp::FWP_V4_ADDR_MASK;
-                cv.Anonymous.v4AddrMask = slot;
             },
             FwpValue::Blob(p) => {
                 cv.r#type = wfp::FWP_BYTE_BLOB_TYPE;
@@ -551,7 +537,6 @@ pub fn probe_add_then_remove(spec: &FilterSpec) -> Result<ProbeResult, WfpError>
 enum FwpValue {
     Uint16(u16),
     Uint32(u32),
-    V4(u32, u32),
     /// `ALE_APP_ID` 用的字节 blob。指针归 `owned_blobs` 管理。
     Blob(*mut wfp::FWP_BYTE_BLOB),
 }

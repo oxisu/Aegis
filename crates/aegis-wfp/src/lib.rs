@@ -44,7 +44,7 @@ pub use plan::{
     Tier, BROADCAST_V4, PORTS_BROADCAST_LEAK, PORT_DHCP_CLIENT, PORT_DHCP_SERVER, PORT_DNS,
     WEIGHT_MAX, W_BROADCAST_LOCK, W_DEFAULT_DENY, W_DHCP, W_DNS_LOCK, W_FLOW_DROP, W_LOOPBACK,
 };
-pub use session::{Session, SESSION_PREFIX};
+pub use session::{LayerField, Session, SESSION_PREFIX};
 
 use aegis_version as version;
 

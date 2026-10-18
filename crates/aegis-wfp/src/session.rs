@@ -121,6 +121,33 @@ impl Session {
         Ok(assemble_snapshot(entries, filters))
     }
 
+    /// 某一层**实际支持**哪些条件字段（只读勘察）。
+    ///
+    /// # 为什么需要它
+    ///
+    /// `FwpmFilterAdd0` 对一个不支持的条件只回
+    /// `FWP_E_CONDITION_NOT_FOUND`（`0x80320002`），**不说哪一条不支持**。
+    /// 而"层支持什么字段"是会变的（版本、SKU、装了什么驱动都不一定一样），
+    /// 靠文档背下来不可靠。真机实测就撞上了：`ALE_AUTH_CONNECT_V4`
+    /// 不接受 `IP_REMOTE_ADDRESS_V4`，而这一点在干跑里永远看不出来。
+    ///
+    /// 需要提权，无法在单测里覆盖，故跳过变异（理由见模块头）。
+    #[cfg_attr(test, mutants::skip)]
+    pub fn fields(&self, layer_key: GUID) -> Result<Vec<LayerField>, WfpError> {
+        unsafe {
+            let mut layer: *mut wfp::FWPM_LAYER0 = ptr::null_mut();
+            Self::check(
+                wfp::FwpmLayerGetByKey0(self.handle, &layer_key, &mut layer),
+                WfpError::Enumerate,
+            )?;
+            let out = collect_fields(layer);
+            if !layer.is_null() {
+                wfp::FwpmFreeMemory0(&mut layer as *mut _ as *mut *mut core::ffi::c_void);
+            }
+            Ok(out)
+        }
+    }
+
     /// 枚举 Provider，同时保留其 GUID 以便给过滤器做归属解析。
     ///
     /// 需要提权，无法在单测里覆盖，故跳过变异（理由见模块头）；
@@ -181,6 +208,48 @@ impl Session {
             }
             Ok(collect_filters(&rows, providers))
         }
+    }
+}
+
+/// 一层支持的一个条件字段。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LayerField {
+    /// 字段 GUID（与 `FWPM_CONDITION_*` 常量比对即可知道是哪个字段）。
+    pub key: GUID,
+    /// 该字段要求的值类型。
+    pub data_type: wfp::FWP_DATA_TYPE,
+}
+
+impl LayerField {
+    /// 这个字段是不是我们要找的那个。
+    pub fn is(&self, key: &GUID) -> bool {
+        &self.key == key
+    }
+}
+
+/// 把 `FWPM_LAYER0` 里的字段数组翻译成 [`LayerField`]。
+///
+/// 需要 unsafe（引擎返回裸指针数组），但不含业务逻辑，故跳过变异。
+#[cfg_attr(test, mutants::skip)]
+pub(crate) fn collect_fields(layer: *mut wfp::FWPM_LAYER0) -> Vec<LayerField> {
+    if layer.is_null() {
+        return Vec::new();
+    }
+    unsafe {
+        let f = &*layer;
+        if f.field.is_null() {
+            return Vec::new();
+        }
+        std::slice::from_raw_parts(f.field, f.numFields as usize)
+            .iter()
+            .filter_map(|fd| {
+                let key = fd.fieldKey.as_ref()?;
+                Some(LayerField {
+                    key: *key,
+                    data_type: fd.dataType,
+                })
+            })
+            .collect()
     }
 }
 
