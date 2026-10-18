@@ -29,6 +29,8 @@ name = "aegis-fuse"
 version = "0.1.0-alpha.2"
 dependencies = [
  "aegis-version",
+ "thiserror",
+ "windows",
 ]
 
 [[package]]

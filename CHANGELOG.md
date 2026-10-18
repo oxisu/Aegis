@@ -34,6 +34,22 @@
 
 ### Added
 
+- **`aegis-fuse` 接上 `NotifyIpInterfaceChange`**（FFI 层落地）
+  - 模块分层：`debounce` / `notify` / `signal` **零 Win32 依赖**（可完整单测），
+    `unsafe` 只出现在 `watch.rs` 一个文件里
+  - **回调即弃**：系统回调只做 `ChangeKind` 分类 → `should_react` → 一次
+    `fetch_add`。绝不分配内存、加锁、打日志、碰 WFP——它跑在系统线程池上，
+    堵住的后果是网络栈死锁而不是"慢一点"
+  - `initialnotification` 传 **false**：传 true 会在注册瞬间把所有现存接口
+    喂一遍，那不是变动，响应它会**让服务一启动就把网断了**，
+    而日志上只写"检测到网口变动"，看不出为什么
+  - `ChangeSignal` 用**计数**而不是布尔标志：布尔会丢事件，"震荡 30 次"
+    和"变动 1 次"在日志与告警里含义完全不同（有并发测试钉住）
+  - `examples/fuse_watch`：网口变动干跑，无需管理员权限，插拔网线即可看到
+    Trip / Coalesced / 叫醒 Worker 的完整时序；已在本机实测跑通
+  - ⚠ 残留风险已记录：`CancelMibChangeNotify2` 返回后仍有极短窗口的回调在
+    飞行中；彻底解法是回调里先把引用计数 +1（需全局注册表），留到接 `aegisd` 时做
+
 - **`aegis-fuse` 拓扑震荡熔断器**（新建 crate，**当前纯逻辑**）
   - `ShockDebouncer`：§20.3 / §28.3「回调风暴」的修正是**先熔断、后分析**——
     第一个网口变动事件**立刻**切绝缘（不等去抖，等了就给了 OS 一个用

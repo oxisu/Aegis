@@ -9,8 +9,27 @@ authors.workspace      = true
 
 [dependencies]
 aegis-version = { workspace = true }
+thiserror     = { workspace = true }
 
-# 刻意**不**依赖 windows crate（至少现阶段）：
-# 熔断的判定逻辑（去抖、先断后算、时钟边界）全是纯状态机，
-# 不碰 Win32 也能完整推演与单测。等真要接 NotifyIpInterfaceChange
-# 时再单独加一个模块，把 FFI 关在那一层。
+# Win32：**只有 src/watch.rs 用得上**。
+#
+#   IpHelper         —— NotifyIpInterfaceChange / CancelMibChangeNotify2
+#   Ndis             —— MIB_IPINTERFACE_ROW 里的 NET_LUID_LH
+#                       （不开这个 feature，相关结构根本不会出现在作用域里）
+#   WinSock          —— ADDRESS_FAMILY / AF_UNSPEC / AF_INET / AF_INET6
+#   SystemInformation —— GetTickCount64（去抖用的单调时钟）
+#
+# ⚠ 依赖方向（务必保持）：判断逻辑（debounce / notify / signal）一律不碰
+#   这些 API，所以它们能脱离权限环境完整推演与单测；
+#   `unsafe` 被压在 watch.rs 一个文件里，且回调只做一次 fetch_add。
+windows = { workspace = true, features = [
+    "Win32_Foundation",
+    "Win32_NetworkManagement_IpHelper",
+    "Win32_NetworkManagement_Ndis",
+    "Win32_Networking_WinSock",
+    "Win32_System_SystemInformation",
+] }
+
+[[example]]
+name = "fuse_watch"
+path = "examples/fuse_watch.rs"
