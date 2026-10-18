@@ -262,14 +262,21 @@ fn main() {
     let event = startup_event(snap.default_egress_luid, role);
 
     let audit_path = args.data_dir.join("audit-startup.binlog");
-    let mut log = match AuditLog::create(&audit_path) {
-        Ok(l) => l,
+    // ⚠ **必须是 `open_or_create`，不能是 `create`。**
+    // 用 `create` 的话，一次掉电 / 蓝屏留下的日志文件会让下一次启动因为
+    // "文件已存在"而失败——一次断电就把服务**永久**打趴在地上，这正好是
+    // 崩溃安全的反面。存在就续写（保住证据），不存在才新建。
+    let (mut log, action) = match AuditLog::open_or_create(&audit_path) {
+        Ok(v) => v,
         Err(e) => {
-            eprintln!("  [FATAL] 无法创建审计日志：{e}");
-            eprintln!("  文件：{}（create_new：拒绝覆盖已有日志）", audit_path.display());
+            eprintln!("  [FATAL] 无法打开审计日志：{e}");
+            eprintln!("  文件：{}", audit_path.display());
+            eprintln!("  ⚠ 日志读不懂 = 证据链已经不可信，此时不该带病启动。");
+            eprintln!("  若确需丢弃证据：手动删除该文件后重启（删证据必须人来按下）。");
             std::process::exit(exit::AUDIT);
         },
     };
+    println!("  打开方式  : {action}");
     let link = match log.append(&event) {
         Ok(l) => l,
         Err(e) => {

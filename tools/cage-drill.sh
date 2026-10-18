@@ -93,8 +93,11 @@ print(json.loads(subprocess.check_output(['cargo','metadata','--format-version',
 " 2>/dev/null)"
 log "target 目录: $TARGET_DIR"
 
-# 上一轮留下的审计日志会让 aegisd 以 exit 5 退出（create_new 不覆盖）
-rm -rf .aegis-run/ipc.token .aegis-run/audit-*.binlog 2>/dev/null
+# ⚠ 这里**刻意不删**上一轮留下的东西 —— 它们恰恰是崩溃安全的试金石：
+#   · audit-*.binlog  aegisd 必须能续写（曾经因为用 create_new 而 exit 5，
+#                     一次掉电就把服务永久打趴；现在走 open_or_create）
+#   · ipc.token       每次启动 CREATE_ALWAYS 覆盖，旧 token 当场失效
+# 留着它们跑，等于顺手回归了一遍"重启不会卡住"。
 
 step "1/6 启动 aegisd（硬时限 ${SERVE_SECS}s）"
 "$TARGET_DIR/debug/aegisd.exe" \
