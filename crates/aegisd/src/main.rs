@@ -21,21 +21,29 @@
 //!    它看起来在工作，实际按一套没人审核过的策略在放行。
 //! 2. **感知失败就退出。** 不知道这台机器长什么样，就不能裁决角色；
 //!    此时的"放行"是盲放行。
-//! 3. **WFP 只干跑。** 本链路**一条规则都不下发**。真正下发需要提权，
-//!    且会改变本机网络状态，**必须先征求用户同意**（见 design-spec §21.1）。
+//! 3. **启动路径上一条规则都不下发。** `apply` 是被动作：要由
+//!    `aegisctl`（且该进程**已提权**）显式发起，装完还要在 10 秒内
+//!    `confirm`，否则自动撤销（见 [`do_apply`] / [`watch`]）。
+//!
+//! # 下发为什么做成"两阶段 + 倒计时"
+//!
+//! 装错一条规则的后果不是报错，是**整机断网**。所以：
+//!
+//! - 需要**提权**（WFP 引擎本身要求），且对端进程必须已提权，
+//!   光有 token 不够（token 文件对本机已登录用户可读）；
+//! - 装完进入 [`Phase::Pending`]，10 秒内没有 `confirm` 就自动回滚；
+//! - 会话是 `FWPM_SESSION_FLAG_DYNAMIC`：**进程一退出，规则全清**。
+//!   这条比任何清理代码都可靠，因为崩溃路径上没有机会执行清理代码。
 //!
 //! # 已知的、刻意留下的缺口
 //!
-//! - token 文件目前按**普通文件**写入，尚未套用 `TOKEN_FILE_SDDL`
-//!   （SYSTEM/BA 完全控制、AU 只读）。正式版必须补上，否则本机任何用户
-//!   都能读到 IPC token。见 [`write_token_file`]。
 //! - "启动完成"这条审计事件是**链路自检事件，不是真实连接**。
 //!   审计事件模型目前只描述连接，用它占位会让证据包里混进一条伪造的
 //!   连接记录。正式版要么引入独立的事件种类，要么在导出时按 `BOOT:` 前缀
 //!   过滤掉。见 [`startup_event`]。
 
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::mpsc as std_mpsc;
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -46,10 +54,14 @@ use aegis_config::load_file;
 use aegis_core::role::{adjudicate_all, Confidence};
 use aegis_core::state::{insulation, State};
 use aegis_ipc::{
-    check_compat, encode_handshake, msg_type, IpcToken, PipeServer, Status, REQ_PING, REQ_STATUS,
+    check_compat, encode_handshake, msg_type, IpcToken, PipeServer, Status, DENY_PREFIX,
+    OK_PREFIX, REQ_APPLY, REQ_CONFIRM, REQ_PING, REQ_ROLLBACK, REQ_STATUS,
 };
 use aegis_sense::{default_egress, snapshot};
-use aegis_wfp::{cage_plan, invariants_violated, verify_with, CagePolicy};
+use aegis_wfp::{
+    apply, cage_plan, invariants_violated, preflight, rollback, verify_with, ApplyTicket,
+    CagePolicy, FilterSpec, Phase, Session, CONFIRM_WINDOW_MS,
+};
 use aegis_version as version;
 
 /// 退出码。**刻意各不相同**：运维看到码就知道卡在哪一步，
@@ -61,12 +73,18 @@ mod exit {
     pub const AUDIT: i32 = 5;
 }
 
+/// 一次下发的票据。**纯数据**（`filter_ids` 只是 `Vec<u64>`），
+/// 所以可以跨线程共享；真正不能跨线程的是 WFP 会话句柄，它**永远待在
+/// 看门狗线程里**（见 [`watch`]）。
+type TicketSlot = std::sync::Arc<std::sync::Mutex<Option<ApplyTicket>>>;
+
 fn main() {
     let args = Args::parse(std::env::args().skip(1));
 
     println!("Aegis · aegisd —— {}", version::full());
     println!("最小链路：配置 → IPC → 感知 → 裁决 → WFP 干跑 → 审计");
-    println!("⚠ 本链路**一条 WFP 规则都不下发**。");
+    println!("⚠ 启动过程中**不下发**任何 WFP 规则；");
+    println!("  `aegisctl apply` 需提权 + 10 秒内 confirm，否则自动撤销。");
     println!();
 
     // ── 1. 加载配置：失败就退出，不退回默认值 ────────────────────────
@@ -91,6 +109,12 @@ fn main() {
     }
     println!();
 
+    // 绝缘笼计划在**开管道之前**就构造好：它是纯逻辑（不读网卡、不开引擎），
+    // 而服务线程随时可能被 `apply` 叫到——到那时再临时构造，就得把配置
+    // 也搬进线程里。先构造好，服务线程拿走一份拷贝即可。
+    let cage = CagePolicy::default();
+    let plan = cage_plan(cage);
+
     // ── 2. 生成 IPC token 并开启命名管道 ─────────────────────────────
     println!("[2/7] 开启 IPC 命名管道");
     let token = match IpcToken::generate() {
@@ -100,23 +124,33 @@ fn main() {
             std::process::exit(exit::IPC);
         },
     };
-    if let Err(e) = write_token_file(&args.token_file, &token) {
+    // 父目录要先建好：带 DACL 的 CreateFileW 不会顺手建目录。
+    if let Some(parent) = args.token_file.parent() {
+        if !parent.as_os_str().is_empty() && std::fs::create_dir_all(parent).is_err() {
+            eprintln!("  [FATAL] 无法创建数据目录：{}", parent.display());
+            std::process::exit(exit::IPC);
+        }
+    }
+    if let Err(e) = aegis_ipc::write_protected(&args.token_file, &token) {
         eprintln!("  [FATAL] 无法写入 token 文件：{e}");
         std::process::exit(exit::IPC);
     }
     println!("  管道      : {}", args.pipe);
-    println!("  token 文件 : {}", args.token_file.display());
-    println!("  ⚠ token 文件当前按普通文件写入，尚未套用 TOKEN_FILE_SDDL——正式版必须补。");
+    println!("  token 文件 : {}（DACL: SY/BA 完全控制，AU 只读）", args.token_file.display());
+    println!("  ⚠ AU 仍可读 token（GUI 不提权，必须能读）。危险命令另有提权检查。");
 
     // ⚠ `PipeServer` 里握着一个原始 HANDLE，**不是 `Send`**，不能跨线程搬。
     // 所以管道在**服务线程内部**绑定，绑定结果用 channel 回传主线程：
     // 主线程要能确认"管道真的起来了"才继续启动，而不是先打印"已绑定"
     // 再在后面悄悄失败——那种"说了但没做"的启动日志最坑人。
     let status_slot: Arc<Mutex<Option<Status>>> = Arc::new(Mutex::new(None));
+    let ticket_slot: TicketSlot = Arc::new(Mutex::new(None));
     let (ready_tx, ready_rx) = std_mpsc::channel::<Result<(), String>>();
     let serve_pipe = args.pipe.clone();
     let serve_token = token.clone();
     let serve_status = Arc::clone(&status_slot);
+    let serve_ticket = Arc::clone(&ticket_slot);
+    let serve_plan = plan.clone();
     thread::spawn(move || {
         let server = match PipeServer::bind_named(&serve_pipe) {
             Ok(s) => s,
@@ -126,7 +160,7 @@ fn main() {
             },
         };
         let _ = ready_tx.send(Ok(()));
-        serve_forever(&server, &serve_token, &serve_status);
+        serve_forever(&server, &serve_token, &serve_status, &serve_plan, &serve_ticket);
     });
 
     match ready_rx.recv_timeout(Duration::from_secs(10)) {
@@ -203,8 +237,6 @@ fn main() {
 
     // ── 6. WFP：只干跑，一条都不下发 ─────────────────────────────────
     println!("[6/7] 绝缘笼计划（**干跑**，不下发）");
-    let cage = CagePolicy::default();
-    let plan = cage_plan(cage);
     let findings = verify_with(&plan, &cage);
     let ok = !invariants_violated(&findings);
     println!("  规则条数  : {}", plan.len());
@@ -302,6 +334,11 @@ fn main() {
         );
         thread::sleep(Duration::from_secs(args.serve_secs));
         println!("服务时间到，退出。");
+        if let Ok(g) = ticket_slot.lock() {
+            if g.as_ref().is_some_and(|t| t.phase == Phase::Committed) {
+                println!("⚠ 已确认的规则会随本进程退出而清空（动态会话）——这是兜底，不是 bug。");
+            }
+        }
     }
 }
 
@@ -309,13 +346,19 @@ fn main() {
 
 /// 逐个接待连接。**鉴权失败立刻断开，不回任何响应**——
 /// 回了就等于告诉对方"你猜得差不多了"。
-fn serve_forever(server: &PipeServer, token: &IpcToken, status: &Arc<Mutex<Option<Status>>>) {
+fn serve_forever(
+    server: &PipeServer,
+    token: &IpcToken,
+    status: &Arc<Mutex<Option<Status>>>,
+    plan: &[FilterSpec],
+    ticket: &TicketSlot,
+) {
     loop {
         let end = match server.accept() {
             Ok(e) => e,
             Err(_) => return,
         };
-        if let Err(_e) = serve_one(&end, token, status) {
+        if let Err(_e) = serve_one(&end, token, status, plan, ticket) {
             // 连接层面的错误（断开 / 帧坏）视为这次会话结束，继续等下一个
         }
         // ⚠ 必须显式 disconnect，否则下一次 accept 会失败：
@@ -332,6 +375,8 @@ fn serve_one(
     end: &aegis_ipc::PipeEnd,
     token: &IpcToken,
     status: &Arc<Mutex<Option<Status>>>,
+    plan: &[FilterSpec],
+    ticket: &TicketSlot,
 ) -> Result<(), aegis_ipc::PipeError> {
     let mut reader = aegis_ipc::FrameReader::new();
 
@@ -376,46 +421,198 @@ fn serve_one(
                 end.send(msg_type::PONG, 0, frame.seq, &[])?;
             },
             msg_type::REQUEST => {
-                let want = String::from_utf8_lossy(&frame.payload);
-                match want.trim() {
-                    REQ_PING => end.send(msg_type::RESPONSE, 0, frame.seq, b"pong")?,
-                    REQ_STATUS => {
-                        // 启动还没走完时如实说"启动中"，不编一个看起来正常的状态
-                        let body = match status.lock().ok().and_then(|s| s.clone()) {
-                            Some(s) => s.to_text(),
-                            None => "启动中：状态尚不可用".to_string(),
-                        };
-                        end.send(msg_type::RESPONSE, 0, frame.seq, body.as_bytes())?
-                    },
-                    other => {
-                        let msg = format!("未知请求：{other}（可用：{REQ_STATUS} / {REQ_PING}）");
-                        end.send(msg_type::RESPONSE, 0, frame.seq, msg.as_bytes())?
-                    },
+                let word = String::from_utf8_lossy(&frame.payload).trim().to_string();
+
+                // ── 命令分级闸门 ──────────────────────────────────────
+                // token 只证明"你是本机的客户端"。下发/确认/拆除还会改
+                // 本机网络状态，所以**额外**要求对端进程已提权。
+                // 不做这道闸，一个标准用户读走 token 文件就等于能指挥
+                // SYSTEM 进程装/拆防火墙规则——那是提权漏洞的形状。
+                let risk = aegis_ipc::risk_of(&word);
+                if !aegis_ipc::allows(end, risk) {
+                    let msg = format!(
+                        "{}{}：这条命令会改变本机网络状态，\
+                         要求控制端**以管理员身份运行**。",
+                        DENY_PREFIX, word
+                    );
+                    end.send(msg_type::RESPONSE, 0, frame.seq, msg.as_bytes())?;
+                    continue;
                 }
+
+                let body = if word == REQ_PING {
+                    "pong".to_string()
+                } else if word == REQ_STATUS {
+                    // 启动还没走完时如实说"启动中"，不编一个看起来正常的状态
+                    match status.lock().ok().and_then(|s| s.clone()) {
+                        Some(s) => s.to_text(),
+                        None => "启动中：状态尚不可用".to_string(),
+                    }
+                } else if word == REQ_APPLY {
+                    do_apply(plan, ticket)
+                } else if word == REQ_CONFIRM {
+                    do_confirm(ticket)
+                } else if word == REQ_ROLLBACK {
+                    do_rollback(ticket)
+                } else {
+                    format!(
+                        "未知请求：{word}（可用：{REQ_STATUS} / {REQ_PING} / {REQ_APPLY} / \
+                         {REQ_CONFIRM} / {REQ_ROLLBACK}）"
+                    )
+                };
+                end.send(msg_type::RESPONSE, 0, frame.seq, body.as_bytes())?
             },
             _ => return Ok(()),
         }
     }
 }
 
-// ── 辅助 ─────────────────────────────────────────────────────────────
+// ── 下发 / 确认 / 拆除（防呆）────────────────────────────────────────
 
-/// 写 token 文件。
+/// 下发绝缘笼。**装完不算数**——开一个 [`CONFIRM_WINDOW_MS`] 的倒计时，
+/// 窗口内没人 `confirm` 就自动撤掉。
 ///
-/// ⚠ **已知缺口**：这里用的是普通文件写入，**没有**套用 `TOKEN_FILE_SDDL`
-/// （SYSTEM / Administrators 完全控制，Authenticated Users 只读）。
-/// 正式版必须用 `ConvertStringSecurityDescriptorToSecurityDescriptor` +
-/// `CreateFileW` 的 `SECURITY_ATTRIBUTES` 落成带 DACL 的文件——
-/// 否则本机任何用户都能读到 IPC token，等于鉴权形同虚设。
-/// 最小链路先把它跑通，缺口显式留在这里并打印告警，不掩盖。
-fn write_token_file(path: &Path, token: &IpcToken) -> std::io::Result<()> {
-    if let Some(parent) = path.parent() {
-        if !parent.as_os_str().is_empty() {
-            std::fs::create_dir_all(parent)?;
+/// # 为什么会话必须生在看门狗线程里
+///
+/// `Session` 里握着一个原始句柄，**不是 `Send`**，搬不进别的线程。
+/// 于是顺序是：本线程发指令 → 新线程里开会话并装规则 → 新线程就地
+/// 转成看门狗，会话**从头到尾都没离开过那个线程**。
+/// 反过来（先装再想办法把会话交给一个守护线程）是搬不动的。
+fn do_apply(plan: &[FilterSpec], slot: &TicketSlot) -> String {
+    // 一次只允许一个待确认的下发：并发装会让回执与票据对不上，
+    // 而"不知道哪批 id 是哪次装的"在回滚时就是删错规则。
+    if let Ok(g) = slot.lock() {
+        if g.as_ref().is_some_and(|t| t.phase == Phase::Pending) {
+            return format!("{}已有一个待确认的下发，先 confirm 或 rollback。", DENY_PREFIX);
         }
     }
-    std::fs::write(path, token.to_hex())
+
+    // 自检在**碰引擎之前**跑完：装到一半才发现条件翻译不了，
+    // 会留下半套规则，而半套规则就是断网。
+    if let Err(e) = preflight(plan) {
+        return format!("{}拒绝下发：{e}", DENY_PREFIX);
+    }
+
+    let (tx, rx) = std_mpsc::channel::<Result<usize, String>>();
+    let watchdog_slot = Arc::clone(slot);
+    let watchdog_plan = plan.to_vec();
+    thread::spawn(move || {
+        let now = now_ms();
+        match apply(&watchdog_plan, now) {
+            Ok((session, receipt)) => {
+                let n = receipt.len();
+                if let Ok(mut g) = watchdog_slot.lock() {
+                    *g = Some(ApplyTicket::pending(
+                        now,
+                        CONFIRM_WINDOW_MS,
+                        receipt.filter_ids,
+                    ));
+                }
+                let _ = tx.send(Ok(n));
+                watch(&session, &watchdog_slot);
+            },
+            Err(e) => {
+                let _ = tx.send(Err(e.to_string()));
+            },
+        }
+    });
+
+    match rx.recv_timeout(Duration::from_secs(5)) {
+        Ok(Ok(n)) => format!(
+            "{}已下发 {n} 条规则。{CONFIRM_WINDOW_MS} 毫秒内不执行 \
+             `aegisctl confirm` 将**自动撤销**。",
+            OK_PREFIX
+        ),
+        Ok(Err(e)) => format!("{DENY_PREFIX}下发失败：{e}（多半是没提权：WFP 引擎要求管理员）"),
+        Err(_) => format!(
+            "{DENY_PREFIX}下发超时（5 秒无结果）。状态未知，按**未下发**处理——\
+             装到一半的规则会随动态会话在进程退出时清空。"
+        ),
+    }
 }
+
+/// 看门狗：持有会话，直到票据说"该撤了"。
+///
+/// ⚠ **会话必须一直握着**。它一旦关闭（哪怕只是离开作用域），内核就把
+/// 这次装的所有规则清掉——这正是动态会话的兜底性质，但也意味着
+/// "提前 return" 等于静默撤防。所以确认之后也不能 return，得继续守着。
+fn watch(session: &Session, slot: &TicketSlot) {
+    loop {
+        thread::sleep(Duration::from_millis(200));
+        let now = now_ms();
+
+        let due = match slot.lock() {
+            Ok(g) => g.as_ref().is_some_and(|t| t.must_roll_back(now)),
+            Err(_) => false,
+        };
+        if !due {
+            continue;
+        }
+
+        // 只会读一次 id 快照：回滚认的是 id，不是"现在计划里有什么"
+        let ids = match slot.lock() {
+            Ok(g) => g.as_ref().map(|t| t.filter_ids.clone()).unwrap_or_default(),
+            Err(_) => Vec::new(),
+        };
+        let removed = rollback(session, &ids).unwrap_or(0);
+        if let Ok(mut g) = slot.lock() {
+            if let Some(t) = g.as_mut() {
+                t.mark_rolled_back(format!("已拆除 {removed} 条规则"));
+            }
+        }
+        println!("  [IPC] 倒计时结束或收到拆除指令：已撤销 {removed} 条规则");
+        return;
+    }
+}
+
+fn do_confirm(slot: &TicketSlot) -> String {
+    let now = now_ms();
+    let mut g = match slot.lock() {
+        Ok(g) => g,
+        Err(_) => return format!("{DENY_PREFIX}票据锁损坏，无法确认"),
+    };
+    match g.as_mut() {
+        None => format!("{DENY_PREFIX}当前没有待确认的下发"),
+        Some(t) => match t.confirm(now) {
+            Ok(()) => format!(
+                "{}已确认，{} 条规则保留。会话是动态的：进程退出即全部清空。",
+                OK_PREFIX,
+                t.filter_ids.len()
+            ),
+            Err(e) => format!("{DENY_PREFIX}{e}"),
+        },
+    }
+}
+
+/// 立即拆除。
+///
+/// `Pending` 走普通拆除（等超时也行，这里不等）；
+/// 已 `Committed` 的走**紧急强拆**——这是兜底手册里
+/// "人在现场发现笼子装错了"的那条通道，它能撤掉已确认的规则。
+fn do_rollback(slot: &TicketSlot) -> String {
+    let mut g = match slot.lock() {
+        Ok(g) => g,
+        Err(_) => return format!("{DENY_PREFIX}票据锁损坏，无法拆除"),
+    };
+    match g.as_mut() {
+        None => format!("{DENY_PREFIX}当前没有可拆除的下发"),
+        Some(t) => {
+            let n = t.filter_ids.len();
+            match t.phase {
+                Phase::Pending => {
+                    t.request_abort();
+                    format!("{OK_PREFIX}已标记拆除 {n} 条，看门狗 200 毫秒内执行")
+                },
+                Phase::Committed => {
+                    t.force_teardown();
+                    format!("{OK_PREFIX}已请求**紧急强拆** {n} 条已确认规则，看门狗 200 毫秒内执行")
+                },
+                Phase::RolledBack => format!("{DENY_PREFIX}这次下发已经拆除过了"),
+            }
+        },
+    }
+}
+
+// ── 辅助 ─────────────────────────────────────────────────────────────
 
 /// 构造"启动完成"这条审计事件。
 ///
@@ -522,7 +719,8 @@ fn print_usage() {
     println!("  --data-dir <dir>     运行数据目录（默认 .aegis-run）");
     println!("  --serve-secs <n>     IPC 服务时长（默认 30，0 = 启动完就退出）");
     println!();
-    println!("⚠ 本程序**不下发任何 WFP 规则**。");
+    println!("启动过程不下发任何 WFP 规则。下发要由 `aegisctl apply` 发起，");
+    println!("且该命令要求：持有 token + 控制端已提权 + 10 秒内 confirm。");
 }
 
 #[cfg(test)]
@@ -565,6 +763,23 @@ mod tests {
         assert!(e.rule.as_deref().unwrap().starts_with("BOOT:"));
     }
 
+    fn empty_slot() -> TicketSlot {
+        Arc::new(Mutex::new(None))
+    }
+
+    fn boot_plan() -> Vec<FilterSpec> {
+        vec![FilterSpec {
+            name: "boot",
+            layer: aegis_wfp::Layer::AleAuthConnectV4,
+            action: aegis_wfp::Action::Block,
+            weight: 1,
+            conditions: vec![],
+            tier: aegis_wfp::Tier::Boot,
+        }]
+    }
+
+    // ── 下发 / 确认 / 拆除 的决策逻辑（不碰引擎，可在普通权限下测）──
+
     #[test]
     fn exit_codes_are_all_distinct() {
         let codes = [exit::CONFIG, exit::IPC, exit::SENSE, exit::AUDIT];
@@ -573,5 +788,94 @@ mod tests {
             assert!(!seen.contains(&c), "退出码重复：{c}");
             seen.push(c);
         }
+    }
+
+    /// 没有票据时的确认/拆除必须是"拒绝"，不能是"成功"。
+    /// 说"拆了 0 条"听起来像成功了，人就不去找真正的问题。
+    #[test]
+    fn confirm_and_rollback_without_a_ticket_are_denied() {
+        assert!(do_confirm(&empty_slot()).starts_with(DENY_PREFIX));
+        assert!(do_rollback(&empty_slot()).starts_with(DENY_PREFIX));
+    }
+
+    #[test]
+    fn confirm_commits_a_pending_ticket() {
+        let slot = empty_slot();
+        *slot.lock().unwrap() = Some(ApplyTicket::pending(
+            now_ms(),
+            CONFIRM_WINDOW_MS,
+            vec![1, 2],
+        ));
+        let out = do_confirm(&slot);
+        assert!(out.starts_with(OK_PREFIX), "{out}");
+        assert_eq!(slot.lock().unwrap().as_ref().unwrap().phase, Phase::Committed);
+    }
+
+    /// 晚了就确认不了——否则"超时自动回滚 → 再确认一次 → 又装回去"，
+    /// 而这第二次没人兜底。
+    #[test]
+    fn confirming_a_stale_ticket_is_denied() {
+        let slot = empty_slot();
+        let past = now_ms() - CONFIRM_WINDOW_MS - 1;
+        *slot.lock().unwrap() = Some(ApplyTicket::pending(past, 0, vec![7]));
+        let out = do_confirm(&slot);
+        assert!(out.starts_with(DENY_PREFIX), "{out}");
+        assert_eq!(slot.lock().unwrap().as_ref().unwrap().phase, Phase::Pending);
+    }
+
+    #[test]
+    fn rollback_of_a_pending_ticket_requests_an_abort() {
+        let slot = empty_slot();
+        *slot.lock().unwrap() =
+            Some(ApplyTicket::pending(now_ms(), CONFIRM_WINDOW_MS, vec![3]));
+        let out = do_rollback(&slot);
+        assert!(out.starts_with(OK_PREFIX), "{out}");
+        assert!(slot.lock().unwrap().as_ref().unwrap().must_roll_back(now_ms()));
+    }
+
+    /// 已确认的规则也得能拆——这是兜底手册的命脉。
+    #[test]
+    fn rollback_of_a_committed_ticket_forces_a_teardown() {
+        let slot = empty_slot();
+        let mut t = ApplyTicket::pending(now_ms(), CONFIRM_WINDOW_MS, vec![4]);
+        t.confirm(now_ms()).unwrap();
+        *slot.lock().unwrap() = Some(t);
+
+        let out = do_rollback(&slot);
+        assert!(out.starts_with(OK_PREFIX), "{out}");
+        assert!(
+            slot.lock().unwrap().as_ref().unwrap().must_roll_back(now_ms()),
+            "已确认的也要能被强拆"
+        );
+    }
+
+    /// 重复拆除必须是拒绝，不是"又删一遍"——第二次删可能删到别人的规则。
+    #[test]
+    fn rolling_back_twice_is_denied() {
+        let slot = empty_slot();
+        let mut t = ApplyTicket::pending(now_ms(), CONFIRM_WINDOW_MS, vec![5]);
+        t.mark_rolled_back("已拆");
+        *slot.lock().unwrap() = Some(t);
+        assert!(do_rollback(&slot).starts_with(DENY_PREFIX));
+    }
+
+    /// Boot 层规则在**碰引擎之前**就被拒：装错了重启都清不掉。
+    #[test]
+    fn apply_refuses_boot_rules_before_touching_the_engine() {
+        let out = do_apply(&boot_plan(), &empty_slot());
+        assert!(out.starts_with(DENY_PREFIX), "{out}");
+        assert!(out.contains("Boot"), "{out}");
+    }
+
+    /// 并发下发会让回执和票据对不上，而回滚时"不知道哪批 id 是哪次装的"
+    /// 就是删错规则。
+    #[test]
+    fn a_second_apply_is_refused_while_one_is_pending() {
+        let slot = empty_slot();
+        *slot.lock().unwrap() =
+            Some(ApplyTicket::pending(now_ms(), CONFIRM_WINDOW_MS, vec![9]));
+        let out = do_apply(&boot_plan(), &slot);
+        assert!(out.starts_with(DENY_PREFIX), "{out}");
+        assert!(out.contains("待确认"), "{out}");
     }
 }
