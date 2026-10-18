@@ -44,6 +44,36 @@ const HEADER_LEN: usize = LOG_MAGIC.len() + 4;
 /// 一条记录里链节占的字节：seq(u64) + prev(32) + hash(32)。
 const LINK_LEN: usize = 8 + HASH_LEN + HASH_LEN;
 
+/// 一条记录声明的载荷长度的**合理上限**。
+///
+/// 一条审计事件的规范化编码远小于 1 MiB（进程路径 + 地址 + 少量字段）。
+/// 声明超过它的长度前缀不可能是"写到一半"，只可能是被改过——
+/// 不设这道上限，把长度前缀改成一个巨大的数就会被当成"掉电残记录"
+/// 静默丢掉，于是"篡改尾部"和"掉电"在证据上长得一模一样。
+const MAX_RECORD_LEN: u64 = 1 << 20;
+
+/// 文件末尾一条**被撕裂**的记录：写到一半掉电的典型产物。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TornTail {
+    /// 残记录的起始偏移。
+    pub offset: u64,
+    /// 它自己声明的载荷长度（长度前缀没写全时为 0）。
+    pub declared: u64,
+    /// 文件里实际剩下的字节数。
+    pub present: u64,
+}
+
+/// 一次扫描的结果。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Scan {
+    /// 连续且自洽的完整记录。
+    pub records: Vec<Record>,
+    /// 最后一条完整记录的结束偏移——文件应当被截断到这里。
+    pub valid_len: u64,
+    /// 末尾那条不完整的残记录；没有就是 `None`。
+    pub torn_tail: Option<TornTail>,
+}
+
 /// 读日志失败。
 #[derive(Debug, thiserror::Error)]
 pub enum ReadError {
@@ -59,6 +89,33 @@ pub enum ReadError {
         offset: u64,
         reason: String,
     },
+}
+
+/// [`AuditLog::open_or_create`] 这次对日志**实际做了什么**。
+///
+/// 拿出来给调用方打印，而不是悄悄处理完：一次重启是"续写"还是"修过残记录"，
+/// 对判断证据链可不可信是两回事。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OpenAction {
+    /// 文件不存在，新建了一个。
+    Created,
+    /// 接在已有日志后面续写。
+    Resumed { records: u64 },
+    /// 末尾有掉电残记录，已截断丢弃后接着写。
+    Repaired { records: u64, dropped: u64 },
+}
+
+impl std::fmt::Display for OpenAction {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Created => write!(f, "新建"),
+            Self::Resumed { records } => write!(f, "续写（已有 {records} 条）"),
+            Self::Repaired { records, dropped } => write!(
+                f,
+                "**修复**：末尾 {dropped} 字节残记录已截断丢弃，保留 {records} 条完整记录"
+            ),
+        }
+    }
 }
 
 /// 日志里的一条记录：事件本体 + 它的链节。
@@ -142,12 +199,46 @@ impl AuditLog {
 
     /// 打开一个**续接**的分片（前一个分片之后）。链头与计数接着传进来的上下文走。
     pub fn open_with(path: impl AsRef<Path>, ctx: ReadCtx) -> Result<Self, ReadError> {
+        Self::resume(path.as_ref().to_path_buf(), ctx).map(|(log, _)| log)
+    }
+
+    /// **存在就续写，不存在就新建**——守护进程重启该用的入口。
+    ///
+    /// ⚠ 直接用 [`Self::create`] 是错的：一次掉电留下的日志文件会让下一次
+    /// 启动因为"文件已存在"而失败，也就是**一次掉电永久性地让服务起不来**。
+    /// 返回 [`OpenAction`] 是为了让调用方**如实汇报**这次对日志做了什么——
+    /// "悄悄修好了"和"悄悄丢了几条"一样，都是不该静默发生的事。
+    pub fn open_or_create(path: impl AsRef<Path>) -> Result<(Self, OpenAction), ReadError> {
         let path = path.as_ref().to_path_buf();
-        let records = read_records_with(&path, ctx)?;
+        match Self::resume(path.clone(), ReadCtx::genesis()) {
+            Ok((log, torn)) => {
+                let records = log.len();
+                let action = match torn {
+                    None => OpenAction::Resumed { records },
+                    Some(t) => OpenAction::Repaired {
+                        records,
+                        dropped: t.present,
+                    },
+                };
+                Ok((log, action))
+            },
+            // 只有"文件不存在"才转去新建；打不开、读不懂、被改过，一律照实报错
+            Err(ReadError::Io(e)) if e.kind() == io::ErrorKind::NotFound => {
+                Ok((Self::create(&path)?, OpenAction::Created))
+            },
+            Err(e) => Err(e),
+        }
+    }
+
+    /// 重放一个分片并接着写；返回末尾残记录（没有则 `None`）。
+    fn resume(path: PathBuf, ctx: ReadCtx) -> Result<(Self, Option<TornTail>), ReadError> {
+        let scan = scan(&path, ctx)?;
+        let torn = scan.torn_tail;
+
         let mut chain = EvidenceChain::new();
         // 把起始上下文先灌进链：否则 commit 会以 GENESIS 为前驱而全部拒绝
         chain.advance_to(ctx.next_seq.saturating_sub(1), ctx.prev);
-        for r in &records {
+        for r in &scan.records {
             chain.commit(r.link).map_err(|e| ReadError::Corrupt {
                 index: r.link.seq,
                 offset: 0,
@@ -155,14 +246,26 @@ impl AuditLog {
             })?;
         }
 
+        // 残记录必须**真的从文件里删掉**，不能只是"读的时候跳过"。
+        // 留着它，下一条会接在残记录后面，于是文件中间出现一段谁也解析
+        // 不了的字节——下一次重开就会把它判成篡改，而它其实只是上次掉电的
+        // 遗物。截断到 valid_len 之后，文件末尾永远是一条完整记录的边界。
+        if torn.is_some() {
+            let f = OpenOptions::new().write(true).open(&path)?;
+            f.set_len(scan.valid_len)?;
+        }
+
         let mut file = OpenOptions::new().append(true).read(true).open(&path)?;
         let bytes = file.seek(SeekFrom::End(0))?;
-        Ok(Self {
-            path,
-            file,
-            chain,
-            bytes,
-        })
+        Ok((
+            Self {
+                path,
+                file,
+                chain,
+                bytes,
+            },
+            torn,
+        ))
     }
 
     pub fn path(&self) -> &Path {
@@ -262,8 +365,27 @@ pub fn read_records(path: &Path) -> Result<Vec<Record>, ReadError> {
     read_records_with(path, ReadCtx::genesis())
 }
 
-/// 按给定的起始上下文读一个分片。
+/// 按给定的起始上下文读一个分片。**末尾被撕裂的记录会被丢弃**（见 [`scan`]）。
 pub fn read_records_with(path: &Path, ctx: ReadCtx) -> Result<Vec<Record>, ReadError> {
+    Ok(scan(path, ctx)?.records)
+}
+
+/// 扫描一个分片：读出全部完整记录，并**单独报告**末尾的残记录。
+///
+/// # 为什么末尾残记录要单独报告、而不是混在"损坏"里
+///
+/// 掉电时最后一条写到一半，是**正常工况**，不是被人动过手脚。把它当成
+/// 损坏会让守护进程重启时起不来——而"守护进程起不来"意味着绝缘笼也装不上。
+/// 一次掉电就把系统永久降级成"没有防护"，这是不可接受的。
+///
+/// 判定严格限定在**可证明的不完整**这两种形态：
+///
+/// - 长度前缀本身没写全（不足 4 字节）；
+/// - 前缀写全了，但声明的长度超过文件里实际剩下的字节。
+///
+/// 除此之外一律照旧报 [`ReadError::Corrupt`]：内容哈希对不上、序号跳号、
+/// 前驱不连续、声明长度小到连链节都放不下——这些都只可能是改动，不是掉电。
+pub fn scan(path: &Path, ctx: ReadCtx) -> Result<Scan, ReadError> {
     let mut f = File::open(path)?;
 
     let mut header = [0u8; HEADER_LEN];
@@ -294,24 +416,48 @@ pub fn read_records_with(path: &Path, ctx: ReadCtx) -> Result<Vec<Record>, ReadE
     let mut pos = 0usize;
     let mut expect_seq = ctx.next_seq;
     let mut prev = ctx.prev;
+    let mut torn_tail = None;
 
     while pos < rest.len() {
         let offset = (HEADER_LEN + pos) as u64;
+
+        // ── 末尾撕裂判定（必须在"内容校验"之前）────────────────────
+        // 顺序不能反：先认掉电，再认篡改。反过来的话，一次掉电会被判成
+        // "证据被改"，而守护进程会因此拒绝启动。
         if rest.len() - pos < 4 {
-            return Err(ReadError::Corrupt {
-                index: expect_seq,
+            torn_tail = Some(TornTail {
                 offset,
-                reason: "长度前缀不完整".to_string(),
+                declared: 0,
+                present: (rest.len() - pos) as u64,
             });
+            break;
         }
         let payload_len =
             u32::from_le_bytes(rest[pos..pos + 4].try_into().expect("长度已检查")) as usize;
+        let avail = rest.len() - pos - 4;
+        if payload_len as u64 > avail as u64 {
+            // 声明长度离谱地大 → 不是掉电，是长度前缀被改过
+            if payload_len as u64 > MAX_RECORD_LEN {
+                return Err(ReadError::Corrupt {
+                    index: expect_seq,
+                    offset,
+                    reason: format!("声明 {payload_len} 字节，超过单条上限 {MAX_RECORD_LEN}"),
+                });
+            }
+            torn_tail = Some(TornTail {
+                offset,
+                declared: payload_len as u64,
+                present: avail as u64,
+            });
+            break;
+        }
+
         pos += 4;
-        if payload_len < LINK_LEN || rest.len() - pos < payload_len {
+        if payload_len < LINK_LEN {
             return Err(ReadError::Corrupt {
                 index: expect_seq,
                 offset,
-                reason: format!("声明 {payload_len} 字节，实际不足"),
+                reason: format!("声明 {payload_len} 字节，连链节都放不下"),
             });
         }
         let payload = &rest[pos..pos + payload_len];
@@ -367,7 +513,11 @@ pub fn read_records_with(path: &Path, ctx: ReadCtx) -> Result<Vec<Record>, ReadE
         expect_seq += 1;
     }
 
-    Ok(out)
+    Ok(Scan {
+        records: out,
+        valid_len: (HEADER_LEN + pos) as u64,
+        torn_tail,
+    })
 }
 
 #[cfg(test)]
@@ -632,6 +782,168 @@ mod tests {
         let _guard = RemoveOnDrop(&path);
         std::fs::write(&path, b"hello, not an audit log at all!!").unwrap();
         assert!(matches!(read_records(&path), Err(ReadError::BadMagic)));
+    }
+
+    // ── 崩溃安全：掉电 / 蓝屏之后重开会看到什么 ──────────────────────
+
+    /// 造一个"写了 n 条后掉电，最后一条只写了一半"的日志文件。
+    ///
+    /// 返回（完整字节、只含前 n-1 条的文件长度、最后一条的长度）。
+    fn torn_log(tag: &str, n: u16) -> (Vec<u8>, usize, usize) {
+        let full_path = tmp(&format!("{tag}-full"));
+        let short_path = tmp(&format!("{tag}-short"));
+        {
+            let mut log = AuditLog::create(&full_path).unwrap();
+            for i in 0..n {
+                log.append(&event(i)).unwrap();
+            }
+            log.sync().unwrap();
+        }
+        {
+            let mut log = AuditLog::create(&short_path).unwrap();
+            for i in 0..(n - 1) {
+                log.append(&event(i)).unwrap();
+            }
+            log.sync().unwrap();
+        }
+        let full = std::fs::read(&full_path).unwrap();
+        let short = std::fs::metadata(&short_path).unwrap().len() as usize;
+        let _ = std::fs::remove_file(&full_path);
+        let _ = std::fs::remove_file(&short_path);
+        let rec = full.len() - short;
+        assert!(rec > 8, "一条记录不该只有 {rec} 字节");
+        (full, short, rec)
+    }
+
+    /// **最重要的一条**：掉电后重开必须能接着走，不能让守护进程起不来。
+    ///
+    /// 逐个截断量试——从"只写了 1 个字节"到"只差 1 个字节写完"，
+    /// 覆盖长度前缀没写全和内容没写全两种形态。
+    #[test]
+    fn a_torn_tail_left_by_a_power_loss_does_not_brick_the_reopen() {
+        let path = tmp("torn");
+        let _guard = RemoveOnDrop(&path);
+        let (full, five_len, rec) = torn_log("torn", 6);
+
+        for cut in 1..=rec {
+            std::fs::write(&path, &full[..full.len() - cut]).unwrap();
+            let log = AuditLog::open(&path)
+                .unwrap_or_else(|e| panic!("截断 {cut} 字节后重开失败（掉电不该让服务起不来）：{e}"));
+            assert_eq!(log.len(), 5, "截断 {cut} 字节后应只剩 5 条完整记录");
+        }
+        let _ = five_len;
+    }
+
+    /// 残记录必须真的从文件里删掉：留着它，下一条会接在残记录后面，
+    /// 于是文件中间出现一段谁也解析不了的字节。
+    #[test]
+    fn an_incomplete_tail_is_trimmed_so_the_next_append_lands_cleanly() {
+        let path = tmp("trim");
+        let _guard = RemoveOnDrop(&path);
+        let (full, five_len, rec) = torn_log("trim", 6);
+
+        // 砍掉一半，模拟写到一半掉电
+        std::fs::write(&path, &full[..full.len() - rec / 2]).unwrap();
+
+        let head_before = read_records(&path).unwrap()[4].link.hash;
+        let mut log = AuditLog::open(&path).expect("掉电后重开应成功");
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().len() as usize,
+            five_len,
+            "重开时文件必须被截断到最后一条完整记录"
+        );
+
+        let link = log.append(&event(5)).unwrap();
+        log.sync().unwrap();
+        assert_eq!(link.seq, 6, "序号接着走，不因掉电跳号");
+        assert_eq!(link.prev, head_before, "前驱是掉电前最后一条的哈希");
+
+        // 关键：修完之后**再**读一遍，必须干净——不能留个残尾巴给下次
+        let records = read_records(&path).expect("修完再读不该报错");
+        assert_eq!(records.len(), 6);
+        assert_eq!(
+            crate::chain::verify(
+                &records.iter().map(|r| r.event.clone()).collect::<Vec<_>>(),
+                &records.iter().map(|r| r.link).collect::<Vec<_>>()
+            ),
+            Ok(()),
+            "跨掉电的整条链必须仍然自洽"
+        );
+    }
+
+    /// 掉电是掉电，篡改是篡改：改中间一个字节仍然必须报损坏。
+    #[test]
+    fn tampering_is_still_reported_even_though_power_loss_is_tolerated() {
+        let path = tmp("torn-tamper");
+        let _guard = RemoveOnDrop(&path);
+        let (full, _five, _rec) = torn_log("torn-tamper", 6);
+
+        // 改**第一条**里的一个字节（不是末尾）：这不是掉电能造成的形态
+        let mut raw = full.clone();
+        raw[HEADER_LEN + 40] ^= 0xFF;
+        std::fs::write(&path, &raw).unwrap();
+        assert!(
+            matches!(read_records(&path), Err(ReadError::Corrupt { .. })),
+            "中间被改必须报损坏，不能因为'容忍掉电'就放过"
+        );
+    }
+
+    /// 长度前缀被改成一个离谱的大数，不能当成"掉电残记录"静默丢掉。
+    #[test]
+    fn an_absurd_declared_length_is_tampering_not_power_loss() {
+        let path = tmp("absurd");
+        let _guard = RemoveOnDrop(&path);
+        let (full, five_len, _rec) = torn_log("absurd", 6);
+
+        let mut raw = full[..five_len].to_vec();
+        raw.extend_from_slice(&0xFFFF_FFFFu32.to_le_bytes());
+        raw.extend_from_slice(&[0u8; 8]);
+        std::fs::write(&path, &raw).unwrap();
+
+        let err = read_records(&path).expect_err("离谱的声明长度必须被抓");
+        assert!(
+            matches!(err, ReadError::Corrupt { .. }),
+            "应判为损坏而不是掉电：{err}"
+        );
+    }
+
+    /// 守护进程重启的正确入口：存在就续写，不存在就新建。
+    #[test]
+    fn open_or_create_resumes_an_existing_log_instead_of_refusing() {
+        let path = tmp("resume");
+        let _guard = RemoveOnDrop(&path);
+
+        let (mut log, action) = AuditLog::open_or_create(&path).expect("首次应新建");
+        assert_eq!(action, OpenAction::Created);
+        log.append(&event(0)).unwrap();
+        log.sync().unwrap();
+
+        let (log2, action2) = AuditLog::open_or_create(&path).expect("重启不该因为文件已存在而失败");
+        assert_eq!(action2, OpenAction::Resumed { records: 1 });
+        assert_eq!(log2.len(), 1, "计数必须接着走");
+    }
+
+    /// 重启时如实汇报"我修过"，不许悄悄处理完。
+    #[test]
+    fn open_or_create_reports_what_it_repaired() {
+        let path = tmp("repair");
+        let _guard = RemoveOnDrop(&path);
+        let (full, _five_len, rec) = torn_log("repair", 6);
+
+        std::fs::write(&path, &full[..full.len() - rec / 3]).unwrap();
+        let (log, action) = AuditLog::open_or_create(&path).expect("掉电后重启应成功");
+        assert_eq!(log.len(), 5);
+        match action {
+            OpenAction::Repaired { records, dropped } => {
+                assert_eq!(records, 5);
+                assert!(dropped > 0, "丢弃的字节数必须是实际值：{dropped}");
+            },
+            other => panic!("应汇报'修过'，实际：{other}"),
+        }
+        assert!(
+            action.to_string().contains("修复"),
+            "给运维看的话里必须出现'修复'：{action}"
+        );
     }
 
     struct RemoveOnDrop<'a>(&'a Path);

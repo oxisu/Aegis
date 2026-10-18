@@ -48,7 +48,8 @@ pub use event::{Action, AuditEvent, Protocol};
 pub use ring::AuditRing;
 pub use export::{iso8601_utc, to_csv, to_json, EvidencePackage, ExportFilter};
 pub use store::{
-    read_records, read_records_with, AuditLog, ReadCtx, ReadError, Record, LOG_MAGIC, LOG_VERSION,
+    read_records, read_records_with, scan, AuditLog, OpenAction, ReadCtx, ReadError, Record, Scan,
+    TornTail, LOG_MAGIC, LOG_VERSION,
 };
 
 // 审计记录里带着网卡角色，调用方构造事件时必然要用它。
