@@ -428,26 +428,62 @@ pub enum Severity {
     Warn,
 }
 
+/// 这条结论属于**哪一层**（对应 §20.6 的两层模型）。
+///
+/// - [`Self::Invariant`]：第一层**安全不变量**。是"宪法"，不参与普通规则
+///   排序，任何来源的用户定制都不得覆盖。违反它意味着"这份计划不配叫
+///   绝缘笼"，报给用户的第一句话必须是"底线没守住"。
+/// - [`Self::Hygiene`]：第二层写法问题。不违反底线，但会**静默失效**——
+///   比如权重越界被截断、条件自相矛盾。违反它意味着"这份计划写错了"。
+///
+/// ⚠ 分开的意义在于报错的可信度：两者都不能下发，但如果混为一谈，
+///   用户会把"权重写越界"误当成"我改了底线"，也会把"底线没兑现"
+///   误当成"只是没写好"。前者让人不敢定制，后者让人不当回事。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FindingKind {
+    /// 第一层：安全不变量，不可覆盖。
+    Invariant,
+    /// 第二层：写法问题，会静默失效但不触及底线。
+    Hygiene,
+}
+
+impl FindingKind {
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Invariant => "不变量",
+            Self::Hygiene => "写法",
+        }
+    }
+}
+
 /// 一条静态检查结论。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Finding {
+    /// 能不能下发（处置）。
     pub severity: Severity,
+    /// 属于哪一层（归属）。与 `severity` 正交：
+    /// `severity` 回答"要不要拦"，`kind` 回答"为什么拦"。
+    pub kind: FindingKind,
     pub code: &'static str,
     pub detail: String,
 }
 
 impl Finding {
-    fn error(code: &'static str, detail: impl Into<String>) -> Self {
+    /// 报一条问题。**必须显式声明归属层**——刻意没有不带 `kind` 的重载：
+    /// 逼每个检查点在写下时就想清楚"我这条到底是不变量还是写法问题"。
+    fn error(kind: FindingKind, code: &'static str, detail: impl Into<String>) -> Self {
         Self {
             severity: Severity::Error,
+            kind,
             code,
             detail: detail.into(),
         }
     }
 
-    fn warn(code: &'static str, detail: impl Into<String>) -> Self {
+    fn warn(kind: FindingKind, code: &'static str, detail: impl Into<String>) -> Self {
         Self {
             severity: Severity::Warn,
+            kind,
             code,
             detail: detail.into(),
         }
@@ -455,6 +491,11 @@ impl Finding {
 
     pub fn is_error(&self) -> bool {
         self.severity == Severity::Error
+    }
+
+    /// 这条是否命中第一层不变量。
+    pub fn is_invariant(&self) -> bool {
+        self.kind == FindingKind::Invariant
     }
 }
 
@@ -469,6 +510,7 @@ pub fn verify(plan: &[FilterSpec]) -> Vec<Finding> {
     for f in plan {
         if f.weight > WEIGHT_MAX {
             out.push(Finding::error(
+                FindingKind::Hygiene,
                 "WEIGHT_OUT_OF_RANGE",
                 format!("{} 权重 {} 超过上限 {}", f.name, f.weight, WEIGHT_MAX),
             ));
@@ -485,6 +527,7 @@ pub fn verify(plan: &[FilterSpec]) -> Vec<Finding> {
                 && plan[i].action != plan[j].action
             {
                 out.push(Finding::error(
+                    FindingKind::Hygiene,
                     "DUPLICATE_WEIGHT",
                     format!(
                         "{} 与 {} 在 {} 层权重同为 {} 但动作不同，评估顺序不确定",
@@ -511,6 +554,7 @@ pub fn verify(plan: &[FilterSpec]) -> Vec<Finding> {
             .any(|f| f.layer == layer && f.action == Action::Block && f.is_catch_all());
         if !has_default_deny && plan.iter().any(|f| f.layer == layer) {
             out.push(Finding::error(
+                FindingKind::Invariant,
                 "NO_DEFAULT_DENY",
                 format!("{} 层没有任何无条件阻断规则，绝缘笼没有兜底", layer.name()),
             ));
@@ -527,6 +571,7 @@ pub fn verify(plan: &[FilterSpec]) -> Vec<Finding> {
         });
         if shadowed {
             out.push(Finding::error(
+                FindingKind::Invariant,
                 "PERMIT_SHADOWED",
                 format!(
                     "{} 在 {} 层的放行被更高权重的默认拒绝遮蔽，永不生效",
@@ -547,6 +592,7 @@ pub fn verify(plan: &[FilterSpec]) -> Vec<Finding> {
                 .map(|c| c.to_string())
                 .collect();
             out.push(Finding::error(
+                FindingKind::Hygiene,
                 "BOOT_CONDITION_NOT_STATIC",
                 format!(
                     "{} 是引导时间规则，却用了非静态条件 [{}]，引导期永不匹配",
@@ -560,6 +606,7 @@ pub fn verify(plan: &[FilterSpec]) -> Vec<Finding> {
     // 8. Boot 层规则本身就要人看一眼 —— 这是 §28.2 的雷。
     if plan.iter().any(|f| f.tier == Tier::Boot) {
         out.push(Finding::warn(
+            FindingKind::Invariant,
             "BOOT_BACKBONE_PRESENT",
             "计划含引导时间持久规则：进程退出与重启都不会消失，装错即变砖，需显式确认后下发",
         ));
@@ -583,6 +630,7 @@ fn check_loopback(plan: &[FilterSpec], out: &mut Vec<Finding>) {
         if permits.is_empty() {
             if plan.iter().any(|f| f.layer == layer) {
                 out.push(Finding::error(
+                    FindingKind::Invariant,
                     "LOOPBACK_MISSING",
                     format!(
                         "{} 层没有回环放行，GUI 与服务将互相失联（自锁死）",
@@ -602,6 +650,7 @@ fn check_loopback(plan: &[FilterSpec], out: &mut Vec<Finding>) {
             });
             if shadowed {
                 out.push(Finding::error(
+                    FindingKind::Invariant,
                     "LOOPBACK_SHADOWED",
                     format!("{} 层的回环放行被更高权重的默认拒绝遮蔽", layer.name()),
                 ));
@@ -625,6 +674,7 @@ fn check_dhcp(plan: &[FilterSpec], out: &mut Vec<Finding>) {
     };
     if !plan.iter().any(is_dhcp) {
         out.push(Finding::error(
+            FindingKind::Invariant,
             "DHCP_MISSING",
             "没有任何 DHCP(67/68) 放行规则，开机将拿不到 IP 且无法恢复（永久锁死）",
         ));
@@ -639,10 +689,107 @@ fn check_dhcp(plan: &[FilterSpec], out: &mut Vec<Finding>) {
         });
         if shadowed {
             out.push(Finding::error(
+                FindingKind::Invariant,
                 "DHCP_SHADOWED",
                 "DHCP 放行被更高权重的默认拒绝遮蔽，开机必然断网",
             ));
         }
+    }
+}
+
+/// **策略兑现对账**：`CagePolicy` 声明了什么，`cage_plan` 是不是真的产出了什么。
+///
+/// # 为什么需要这一层
+///
+/// [`verify`] 回答的是"这份计划会不会把我锁死"，是自保视角。
+/// 但它**不管**"这份计划兑现了策略没有"——把 `dns_lock` 关掉，
+/// 计划照样自洽、照样安全，只是 DNS 不再被锁。用户从配置上看是"DNS 已锁"，
+/// 实际机器上是没锁的。**声明与产出脱节**是最阴的一类静默失败：
+/// 不报错、不崩溃、日志干净，只是底线悄悄没了。
+///
+/// # 最危险的是反方向
+///
+/// `boot_backbone = false` 却产出了 `Tier::Boot` 规则，比"声明了没做"更糟：
+/// Aegis 悄悄往机器上留了**进程退出与重启都清不掉**的东西，
+/// 而用户在配置里明明写的是"不要"。这一条单独给错误码，且**不可覆盖**。
+pub fn verify_policy(plan: &[FilterSpec], policy: &CagePolicy) -> Vec<Finding> {
+    let mut out = Vec::new();
+
+    // 声明锁 53，就得真有 53 阻断
+    if policy.dns_lock && !plan.iter().any(blocks_port(PORT_DNS)) {
+        out.push(Finding::error(
+            FindingKind::Invariant,
+            "POLICY_DNS_LOCK_NOT_HONORED",
+            format!(
+                "策略声明要锁 {} 端口，但计划里没有任何针对它的阻断 —— \
+                 用户以为 DNS 锁着，实际没锁",
+                PORT_DNS
+            ),
+        ));
+    }
+
+    // 声明校园网严格，就得真有广播泄密封锁
+    if policy.campus_strict && !PORTS_BROADCAST_LEAK.iter().all(|p| plan.iter().any(blocks_port(*p))) {
+        let missing: Vec<String> = PORTS_BROADCAST_LEAK
+            .iter()
+            .filter(|p| !plan.iter().any(blocks_port(**p)))
+            .map(|p| p.to_string())
+            .collect();
+        out.push(Finding::error(
+            FindingKind::Invariant,
+            "POLICY_BROADCAST_LOCK_NOT_HONORED",
+            format!(
+                "策略声明校园网严格，但广播泄漏端口 [{}] 没有对应阻断",
+                missing.join(", ")
+            ),
+        ));
+    }
+
+    // 声明要 Boot 背板，就得真有持久规则
+    if policy.boot_backbone && !plan.iter().any(|f| f.tier == Tier::Boot) {
+        out.push(Finding::error(
+            FindingKind::Invariant,
+            "POLICY_BOOT_BACKBONE_MISSING",
+            "策略声明启用引导时间持久背板，但计划里没有任何 Boot 层规则",
+        ));
+    }
+
+    // ⚠ 反方向：没声明却出现了持久规则。这是最危险的脱节。
+    if !policy.boot_backbone && plan.iter().any(|f| f.tier == Tier::Boot) {
+        out.push(Finding::error(
+            FindingKind::Invariant,
+            "UNDECLARED_BOOT_RULE",
+            "策略**没有**声明启用持久背板，计划里却有 Boot 层规则 —— \
+             Aegis 会往机器上留下进程退出与重启都清不掉的东西，\
+             而用户从配置上看不出来",
+        ));
+    }
+
+    out
+}
+
+/// 组合校验：`verify` + [`verify_policy`]。平时用这个。
+pub fn verify_with(plan: &[FilterSpec], policy: &CagePolicy) -> Vec<Finding> {
+    let mut out = verify(plan);
+    out.extend(verify_policy(plan, policy));
+    out
+}
+
+/// 有没有不变量被违反（**不可覆盖**，与"能不能下发"是两个维度）。
+///
+/// 之所以单独暴露：`is_safe` 只回答"要不要拦"，但运维需要知道
+/// "这次是被底线拦了，还是只是写错了"——两者的处置完全不同：
+/// 底线被违反要回头改策略，写法问题改规则就行。
+pub fn invariants_violated(findings: &[Finding]) -> bool {
+    findings.iter().any(|f| f.is_invariant() && f.is_error())
+}
+
+fn blocks_port(port: u16) -> impl Fn(&FilterSpec) -> bool {
+    move |f: &FilterSpec| {
+        f.action == Action::Block
+            && f.conditions
+                .iter()
+                .any(|c| matches!(c, Condition::RemotePort(p) if *p == port))
     }
 }
 
@@ -1235,6 +1382,230 @@ mod tests {
             .any(|x| x.code == "LOOPBACK_MISSING" && x.is_error()));
     }
 
+    // ── 结论的归属层（§20.6 两层模型）────────────────────────────────
+
+    /// 不变量类结论必须被标成 Invariant：它们不是"写得不好"，
+    /// 而是"底线没守住"，两者的处置完全不同。
+    #[test]
+    fn self_locking_findings_are_marked_as_invariants() {
+        // 只有一条无条件阻断：既无回环放行、也无 DHCP 放行
+        let bare = vec![spec("默认拒绝", Layer::AleAuthConnectV4, Action::Block, 5)];
+        // 有规则但没有任何无条件阻断 → 笼子没有兜底
+        let no_deny = vec![FilterSpec {
+            name: "53 封锁",
+            layer: Layer::AleAuthConnectV4,
+            action: Action::Block,
+            weight: W_DNS_LOCK,
+            conditions: vec![Condition::RemotePort(PORT_DNS)],
+            tier: Tier::Runtime,
+        }];
+        // 放行权重低于默认拒绝 → 永不见天日
+        let shadowed = vec![
+            spec("默认拒绝", Layer::AleAuthConnectV4, Action::Block, 10),
+            FilterSpec {
+                name: "低权重放行",
+                layer: Layer::AleAuthConnectV4,
+                action: Action::Permit,
+                weight: 5,
+                conditions: vec![Condition::Loopback],
+                tier: Tier::Runtime,
+            },
+        ];
+
+        for (code, plan) in [
+            ("LOOPBACK_MISSING", &bare),
+            ("DHCP_MISSING", &bare),
+            ("NO_DEFAULT_DENY", &no_deny),
+            ("PERMIT_SHADOWED", &shadowed),
+        ] {
+            let f = verify(plan);
+            let hit = f
+                .iter()
+                .find(|x| x.code == code)
+                .unwrap_or_else(|| panic!("{code} 应在该计划上触发：{f:?}"));
+            assert!(
+                hit.is_invariant(),
+                "{code} 属于第一层不变量，却被标成了 {:?}",
+                hit.kind
+            );
+            assert!(hit.is_error(), "{code} 必须阻止下发");
+        }
+    }
+
+    /// 写法问题不该被误标成不变量：否则用户会把"权重写越界"
+    /// 当成"我改了底线"，从此不敢定制。
+    #[test]
+    fn hygiene_findings_are_not_invariants() {
+        let mut plan = minimal_v4_plan();
+        plan[0].weight = WEIGHT_MAX + 1;
+        let f = verify(&plan);
+        let hit = f
+            .iter()
+            .find(|x| x.code == "WEIGHT_OUT_OF_RANGE")
+            .expect("应触发权重越界");
+        assert_eq!(hit.kind, FindingKind::Hygiene);
+        assert!(hit.is_error(), "写法问题同样不能下发");
+    }
+
+    /// `invariants_violated` 只看第一层：一个纯写法问题的计划
+    /// 不该被报成"底线被违反"。
+    #[test]
+    fn invariants_violated_looks_only_at_the_first_layer() {
+        let mut plan = minimal_v4_plan();
+        plan[0].weight = WEIGHT_MAX + 1;
+        assert!(!is_safe(&plan), "写法问题也要拦下");
+        assert!(
+            !invariants_violated(&verify(&plan)),
+            "权重越界不是不变量违反"
+        );
+
+        let broken = vec![spec("默认拒绝", Layer::AleAuthConnectV4, Action::Block, 5)];
+        assert!(invariants_violated(&verify(&broken)));
+    }
+
+    // ── 策略兑现对账：声明 vs 产出 ────────────────────────────────────
+
+    /// 生成器产出的计划必须兑现它自己的策略声明——这是回归防线，
+    /// 保证 cage_plan 与 verify_policy 不会因为各自演化而对不上。
+    #[test]
+    fn generated_plans_always_honor_their_own_policy() {
+        for policy in [
+            CagePolicy::default(),
+            CagePolicy {
+                dns_lock: true,
+                campus_strict: true,
+                boot_backbone: false,
+            },
+            CagePolicy {
+                dns_lock: true,
+                campus_strict: false,
+                boot_backbone: true,
+            },
+            CagePolicy {
+                dns_lock: false,
+                campus_strict: true,
+                boot_backbone: false,
+            },
+        ] {
+            let plan = cage_plan(policy);
+            let f = verify_policy(&plan, &policy);
+            assert!(f.is_empty(), "策略 {policy:?} 未被兑现：{f:?}");
+        }
+    }
+
+    /// 把 53 封锁从计划里抽掉，但策略仍声明要锁 —— 必须报不变量违反。
+    /// 这就是"用户以为 DNS 锁着、实际没锁"的那类静默失败。
+    #[test]
+    fn removing_the_dns_lock_from_the_plan_is_caught() {
+        let policy = CagePolicy {
+            dns_lock: true,
+            campus_strict: false,
+            boot_backbone: false,
+        };
+        let plan: Vec<FilterSpec> = cage_plan(policy)
+            .into_iter()
+            .filter(|f| {
+                !(f.action == Action::Block
+                    && f.conditions.contains(&Condition::RemotePort(PORT_DNS)))
+            })
+            .collect();
+        let f = verify_policy(&plan, &policy);
+        assert!(
+            f.iter()
+                .any(|x| x.code == "POLICY_DNS_LOCK_NOT_HONORED" && x.is_invariant()),
+            "抽掉 53 封锁必须被抓：{f:?}"
+        );
+        // 注意：光靠 verify() 抓不到这个 —— 计划照样自洽、照样"安全"
+        assert!(
+            is_safe(&plan),
+            "这正是 verify() 的盲区：计划没有自锁死问题"
+        );
+    }
+
+    /// 广播封锁缺失同理。
+    #[test]
+    fn removing_the_broadcast_lock_from_the_plan_is_caught() {
+        let policy = CagePolicy {
+            dns_lock: true,
+            campus_strict: true,
+            boot_backbone: false,
+        };
+        let plan: Vec<FilterSpec> = cage_plan(policy)
+            .into_iter()
+            .filter(|f| {
+                !(f.action == Action::Block
+                    && f.conditions.contains(&Condition::RemotePort(5353)))
+            })
+            .collect();
+        let f = verify_policy(&plan, &policy);
+        assert!(f
+            .iter()
+            .any(|x| x.code == "POLICY_BROADCAST_LOCK_NOT_HONORED"));
+    }
+
+    /// ⚠ 最危险的脱节：策略说不要持久背板，计划里却有 Boot 规则。
+    /// Aegis 会悄悄往机器上留下清不掉的东西，而用户在配置里看不到。
+    #[test]
+    fn an_undeclared_boot_rule_is_the_worst_kind_of_drift() {
+        let policy = CagePolicy {
+            dns_lock: true,
+            campus_strict: false,
+            boot_backbone: false,
+        };
+        let mut plan = cage_plan(policy);
+        plan.push(FilterSpec {
+            name: "偷偷加的持久规则",
+            layer: Layer::AleAuthConnectV4,
+            action: Action::Block,
+            weight: W_DEFAULT_DENY,
+            conditions: vec![Condition::RemotePort(9999)],
+            tier: Tier::Boot,
+        });
+        let f = verify_policy(&plan, &policy);
+        assert!(f
+            .iter()
+            .any(|x| x.code == "UNDECLARED_BOOT_RULE" && x.is_invariant()));
+        assert!(invariants_violated(&f));
+    }
+
+    /// 声明了要背板却没生成，也是脱节（方向相反，但同样要报）。
+    #[test]
+    fn a_declared_but_missing_backbone_is_caught() {
+        let policy = CagePolicy {
+            dns_lock: true,
+            campus_strict: false,
+            boot_backbone: true,
+        };
+        let plan: Vec<FilterSpec> = cage_plan(policy)
+            .into_iter()
+            .filter(|f| f.tier != Tier::Boot)
+            .collect();
+        let f = verify_policy(&plan, &policy);
+        assert!(f.iter().any(|x| x.code == "POLICY_BOOT_BACKBONE_MISSING"));
+    }
+
+    /// `verify_with` = verify + verify_policy，两者都得跑到。
+    #[test]
+    fn verify_with_runs_both_layers() {
+        let policy = CagePolicy::default();
+        let mut plan = cage_plan(policy);
+        // 造一个卫生问题
+        plan[0].weight = WEIGHT_MAX + 1;
+        let f = verify_with(&plan, &policy);
+        assert!(f.iter().any(|x| x.code == "WEIGHT_OUT_OF_RANGE"));
+        // 再造一个不变量问题
+        let plan2: Vec<FilterSpec> = cage_plan(policy)
+            .into_iter()
+            .filter(|f| {
+                !(f.action == Action::Block
+                    && f.conditions.contains(&Condition::RemotePort(PORT_DNS)))
+            })
+            .collect();
+        assert!(verify_with(&plan2, &policy)
+            .iter()
+            .any(|x| x.code == "POLICY_DNS_LOCK_NOT_HONORED"));
+    }
+
     /// 有回环放行还不够：权重低于默认拒绝就等于没有。
     #[test]
     fn loopback_shadowed_by_higher_default_deny_is_rejected() {
@@ -1520,9 +1891,9 @@ mod tests {
 
     #[test]
     fn finding_severity_helpers() {
-        let e = Finding::error("X", "d");
+        let e = Finding::error(FindingKind::Hygiene, "X", "d");
         assert!(e.is_error());
-        let w = Finding::warn("Y", "d");
+        let w = Finding::warn(FindingKind::Invariant, "Y", "d");
         assert!(!w.is_error());
     }
 
