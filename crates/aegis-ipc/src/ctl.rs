@@ -109,6 +109,54 @@ pub struct Status {
     pub wfp_rules: usize,
     /// 计划有没有违反安全不变量。
     pub wfp_invariants_ok: bool,
+    /// 守卫（下游规则生效性）当前的状态。见 [`GuardView`]。
+    pub guard: GuardView,
+}
+
+/// 守卫当前的状态。
+///
+/// # ⚠ 为什么它必须进 `Status`
+///
+/// 收紧 = **整机断网**。用户看到网断了却查不到原因，第一反应是卸掉
+/// Aegis——那才是真正的防护归零（`docs/DOWNSTREAM-GUARD.md` §5.2）。
+/// 所以"为什么断"必须能在 `aegisctl status` 里一眼看到，而不是只有守护
+/// 进程的日志里有。
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct GuardView {
+    /// 放行是否**真的**已被撤掉（收紧态 → 只剩拒绝底板 → 全都拒绝）。
+    ///
+    /// 取自票据上的实际状态（`permits_suspended`），不是"打算收紧"——
+    /// 这两者在看门狗执行前的 200 毫秒里是不一样的。
+    pub tightened: bool,
+    /// ⚠ **需要人工介入**：反复故障，或恢复失败到上限，已停止自动动作。
+    ///
+    /// 一旦置上就**不再自动清除**（进程内）：自动清除等于"又自动开关起来"，
+    /// 而把它交给人的前提正是"别再自己动了"。
+    pub needs_human: bool,
+    /// 最近一次结论，取值见 [`GUARD_EFFECTIVE`] 等常量。
+    pub verdict: String,
+    /// 人话原因。**收紧时必须非空**——断网不给理由，就是把人逼去卸载。
+    pub reason: String,
+}
+
+/// 守卫在干活，且判定为"生效"。
+pub const GUARD_EFFECTIVE: &str = "effective";
+/// 守卫判定"下游规则未生效"（会走向收紧）。
+pub const GUARD_INEFFECTIVE: &str = "ineffective";
+/// 证据不足，判不了。⚠ 它**不会**导致收紧。
+pub const GUARD_UNKNOWN: &str = "unknown";
+/// 守卫没在干活（缺 `proxy.mode`，或 `--guard-interval-secs 0`）。
+pub const GUARD_OFF: &str = "off";
+
+impl GuardView {
+    /// 守卫没启用。
+    pub fn off(reason: impl Into<String>) -> Self {
+        Self {
+            verdict: GUARD_OFF.to_string(),
+            reason: reason.into(),
+            ..Self::default()
+        }
+    }
 }
 
 impl Status {
@@ -137,6 +185,12 @@ impl Status {
                 }
                 .to_string(),
             ),
+            // 守卫字段统一 `guard_` 前缀：控制端一眼能认出这是同一组，
+            // 而且老控制端遇到不认识的前缀会整行跳过（向前兼容）。
+            line("guard_tightened", bool_text(self.guard.tightened)),
+            line("guard_needs_human", bool_text(self.guard.needs_human)),
+            line("guard_verdict", clean(&self.guard.verdict)),
+            line("guard_reason", clean(&self.guard.reason)),
         ];
         out.push(String::new());
         out.join("\n")
@@ -163,6 +217,7 @@ impl Status {
             audit_len: 0,
             wfp_rules: 0,
             wfp_invariants_ok: false,
+            guard: GuardView::default(),
         };
         let mut seen_state = false;
         let mut seen_insulation = false;
@@ -225,6 +280,22 @@ impl Status {
                         value: v.to_string(),
                     })?;
                 },
+                // ⚠ 守卫字段**缺失不算错**：老守护进程没有这组字段，
+                // 控制端读到默认的"没在干活"是对的——它确实没在干活。
+                "guard_tightened" => {
+                    s.guard.tightened = v.parse().map_err(|_| StatusError::BadField {
+                        key: "guard_tightened",
+                        value: v.to_string(),
+                    })?;
+                },
+                "guard_needs_human" => {
+                    s.guard.needs_human = v.parse().map_err(|_| StatusError::BadField {
+                        key: "guard_needs_human",
+                        value: v.to_string(),
+                    })?;
+                },
+                "guard_verdict" => s.guard.verdict = v.to_string(),
+                "guard_reason" => s.guard.reason = v.to_string(),
                 _ => continue,
             }
         }
@@ -253,6 +324,19 @@ impl Status {
     }
 }
 
+/// 布尔值一律写成 `true` / `false` 文本。
+///
+/// ⚠ 不用 `v.to_string()` 顺手写：它会拼出 `"true"` 但读回来解析成
+/// `bool` 时**大小写敏感**，一旦有人改成 Rust 的 `true` 显示风格就对不上。
+fn bool_text(b: bool) -> String {
+    if b {
+        "true"
+    } else {
+        "false"
+    }
+    .to_string()
+}
+
 /// 值里不允许出现换行与 `=`：会破坏行导向格式，
 /// 而且被破坏的方式是"多出一行伪字段"，解析器会把伪字段当真。
 fn clean(s: &str) -> String {
@@ -274,6 +358,12 @@ mod tests {
             audit_len: 1,
             wfp_rules: 9,
             wfp_invariants_ok: true,
+            guard: GuardView {
+                tightened: true,
+                needs_human: false,
+                verdict: GUARD_INEFFECTIVE.to_string(),
+                reason: "1 项未通过 [代理可达]".to_string(),
+            },
         }
     }
 
@@ -309,6 +399,36 @@ mod tests {
             Status::from_text(&t),
             Err(StatusError::BadField { key: "state", .. })
         ));
+    }
+
+    /// ⚠ 收紧 = 整机断网，原因**必须**能过 IPC 传出去。
+    /// 它要是被 `clean()` 吃掉（换行/`=`）或被解析丢掉，用户就只剩一句"网断了"。
+    #[test]
+    fn the_guard_reason_survives_the_text_protocol() {
+        let mut s = sample();
+        s.guard.reason = "下游规则未生效：2 项未通过 [承载体存在] [默认出口=承载体]".to_string();
+        let got = Status::from_text(&s.to_text()).unwrap();
+        // ⚠ `=` 会被 `clean()` 换成 `_`（行导向格式的硬约束：不然会多出一行
+        // 伪字段）。这里把它写进断言，是为了让"原因会变形"这件事显式可见，
+        // 而不是让人在某天看到 `[默认出口_承载体]` 时以为解析坏了。
+        assert_eq!(
+            got.guard.reason,
+            s.guard.reason.replace('=', "_"),
+            "`=` 必须被替换成 `_`"
+        );
+        assert!(got.guard.tightened, "收紧态必须传得出去");
+        assert!(!got.guard.reason.is_empty(), "收紧不给理由是会逼人卸载的");
+    }
+
+    /// 老守护进程（没有 `guard_*` 字段）→ 控制端读到"没在干活"，
+    /// 这是对的：它确实没在干活。⚠ 不能因此报字段缺失。
+    #[test]
+    fn a_status_from_an_older_daemon_reads_as_guard_off() {
+        let text = sample().to_text();
+        let kept: Vec<&str> = text.lines().filter(|l| !l.starts_with("guard_")).collect();
+        let older = kept.join("\n");
+        let got = Status::from_text(&older).unwrap();
+        assert_eq!(got.guard, GuardView::default());
     }
 
     /// 未知字段跳过：新守护进程加了字段，旧控制端不该因此读不了。

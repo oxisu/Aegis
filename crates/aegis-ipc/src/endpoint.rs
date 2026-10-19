@@ -13,6 +13,43 @@
 /// **Aegis** 之前的遗留。按 §31 的命名规范统一为 `aegis-` 前缀。
 pub const PIPE_NAME: &str = r"\\.\pipe\aegis";
 
+/// Win32 命名管道路径的前缀。
+pub const PIPE_PREFIX: &str = r"\\.\pipe\";
+
+/// 命令行里收到的管道名 → Win32 完整路径。**裸名也收。**
+///
+/// # 为什么必须有这个
+///
+/// 真机踩到的坑：`--pipe aegis-ob` 原样交给 `CreateNamedPipeW`，内核回
+/// **os error 123「文件名、目录名或卷标语法不正确」**，而启动日志那句提示
+/// 写的是"多半是已有实例占用"——**完全指错方向**，排查被带偏两次。
+///
+/// 更阴的是第二层：就算用户记得写完整路径 `\\.\pipe\aegis`，
+/// **Git Bash 会吃掉一个反斜杠**（MSYS 路径转换），写出来是对的、
+/// 传到进程里是错的。所以"让用户自己写对"这条路根本走不通，
+/// 只能在程序里补。
+///
+/// 命名管道不存在"相对路径"这种语义，裸名只可能是想要 `\\.\pipe\<name>`，
+/// 所以补前缀是安全的。
+pub fn normalize_pipe_name(name: &str) -> String {
+    if name.is_empty() {
+        return PIPE_NAME.to_string();
+    }
+    // 逐段剥，而不是拿完整前缀去比对：Git Bash 会把 `\\.\pipe\aegis` 吃掉
+    // 一个反斜杠变成 `\.\pipe\aegis`，而完整前缀比对认不出它，会当成裸名
+    // 补出双重前缀 `\\.\pipe\\.\pipe\aegis`——比不补还糟。
+    let t = name.trim_start_matches(['\\', '/']); // "\.\pipe\aegis" → ".\pipe\aegis"
+    let t = t.strip_prefix('.').unwrap_or(t); // → "\pipe\aegis"
+    let t = t.trim_start_matches(['\\', '/']); // → "pipe\aegis"
+    let body = t
+        .strip_prefix("pipe\\")
+        .or_else(|| t.strip_prefix("pipe/"))
+        .unwrap_or(t);
+    // 一律归一到**唯一**的规范写法，而不是"认得出来就原样返回"：
+    // 两种写法并存的话，对端拼出的名字可能和本机不一样。
+    format!("{PIPE_PREFIX}{body}")
+}
+
 /// 管道的安全描述符（SDDL）。
 ///
 /// ```text
@@ -63,6 +100,31 @@ const _: () = assert!(DEFAULT_TIMEOUT_MS <= 30_000, "再长就是让 GUI 假死"
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_bare_pipe_name_gets_the_win32_prefix() {
+        assert_eq!(normalize_pipe_name("aegis-ob"), r"\\.\pipe\aegis-ob");
+    }
+
+    /// 一律归一到唯一写法：两种写法并存的话，对端拼出来的名字可能和本机不一样。
+    #[test]
+    fn every_spelling_lands_on_the_one_canonical_form() {
+        assert_eq!(normalize_pipe_name(r"\\.\pipe\aegis"), r"\\.\pipe\aegis");
+        assert_eq!(normalize_pipe_name("//./pipe/aegis"), r"\\.\pipe\aegis");
+        assert_eq!(normalize_pipe_name(r"\.\pipe\aegis"), r"\\.\pipe\aegis");
+    }
+
+    #[test]
+    fn an_empty_pipe_name_falls_back_to_the_default() {
+        assert_eq!(normalize_pipe_name(""), PIPE_NAME);
+    }
+
+    /// Git Bash 吃掉一个反斜杠之后剩下 `\.\pipe\aegis`，这种**残缺**前缀
+    /// 也得认出来补回去——这正是把容错放在程序里而不是靠用户写对的原因。
+    #[test]
+    fn a_half_eaten_prefix_is_repaired() {
+        assert_eq!(normalize_pipe_name(r"\.\pipe\aegis"), r"\\.\pipe\aegis");
+    }
 
     #[test]
     fn pipe_name_is_a_local_named_pipe_with_aegis_prefix() {
