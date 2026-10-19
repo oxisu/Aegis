@@ -54,7 +54,7 @@ use std::io::Write as _;
 
 use aegis_audit::{Action, AuditEvent, AuditLog, InterfaceRole, Protocol};
 use aegis_config::{load_file, Config};
-use aegis_core::guard::{evaluate, GuardPolicy, GuardVerdict};
+use aegis_core::guard::{evaluate, GuardAction, GuardPolicy, GuardTracker, GuardVerdict};
 use aegis_core::role::{adjudicate_all, Confidence};
 use aegis_core::state::{insulation, State};
 use aegis_ipc::{
@@ -356,7 +356,14 @@ fn main() {
     // 为什么先做这一步：`Tighten` 的代价是**整机断网**，所以在真的接上动作
     // 之前，必须先确认这套判据在真机上不会平白无故报 `Ineffective`。
     // 方案见 docs/GUARD-WIRING.md §5；步 2 才会把动作接上去。
-    println!("守卫：下游规则生效性观测（步 1，只观测不动手）");
+    println!(
+        "守卫：下游规则生效性观测{}",
+        if args.guard_act {
+            "（步 2：Tighten 已接线，会真的撤放行）"
+        } else {
+            "（步 1：只观测不动手）"
+        }
+    );
     match config.guard_gap() {
         Some(gap) => {
             println!("  ⚠ 未启用：{gap}");
@@ -370,11 +377,20 @@ fn main() {
             println!("  周期      : {} 秒", args.guard_interval_secs);
             println!("  断言      : B 承载体在 / C 默认出口指向承载体");
             println!("  ⚠ 断言 A（代理可达）尚未接 SPI，暂按可达处理");
+            if args.guard_act {
+                println!("  动作      : **已接线**（--guard-act）");
+                println!("    Tighten → 撤掉放行（默认拒绝底板仍在 → 全都拒绝）");
+                println!("    Relax   → **步 3 未接线**，只会记一行，不会自动重新下发");
+            } else {
+                println!("  动作      : 只观测（加 --guard-act 才会真的收紧）");
+            }
             println!("  日志      : {}", log.display());
             spawn_guard_observer(
                 config.clone(),
                 Duration::from_secs(args.guard_interval_secs),
                 log,
+                Arc::clone(&ticket_slot),
+                args.guard_act,
             );
         },
     }
@@ -403,23 +419,126 @@ fn main() {
 
 // ── 守卫观测（步 1：只判不动手）─────────────────────────────────────
 
-/// 起一个观测线程。**它不碰 WFP、不改任何票据、不做任何动作。**
+/// 起一个观测线程。
+///
+/// `act = false`（默认）时**只观测**：不碰 WFP、不改票据、不做任何动作，
+/// 只在日志里写"若已接线此刻会收紧"。这是步 1 的形态，也是默认形态——
+/// **收紧的代价是整机断网，绝不能默认开。**
+///
+/// `act = true`（`--guard-act`）时走 [`observe_and_act`]，真撤放行。
 ///
 /// 进程退出时线程随之消失——不需要 join，也不需要停止标志：
 /// 守卫只在 aegisd 存活期间有意义，这正是动态会话的兜底性质。
-fn spawn_guard_observer(cfg: Config, interval: Duration, log: PathBuf) {
+fn spawn_guard_observer(
+    cfg: Config,
+    interval: Duration,
+    log: PathBuf,
+    ticket: TicketSlot,
+    act: bool,
+) {
     thread::spawn(move || {
-        let threshold = GuardPolicy::default().failure_threshold;
+        let policy = GuardPolicy::default();
+        let mut tracker = GuardTracker::new();
         let mut ticks = 0u64;
         let mut streak = 0u32;
         loop {
             thread::sleep(interval);
             ticks += 1;
-            let line = observe_once(&cfg, ticks, &mut streak, threshold);
+            let line = if act {
+                observe_and_act(&cfg, &ticket, &mut tracker, &policy, ticks)
+            } else {
+                observe_once(&cfg, ticks, &mut streak, policy.failure_threshold)
+            };
             println!("{line}");
             append_guard_line(&log, &line);
         }
     });
+}
+
+/// 步 2：判完**真的动手**。
+///
+/// ⚠ 与观测模式的 [`next_streak`] 是**两套状态**：观测模式故意不建模动作
+/// （没真的收紧过，"已收紧"这个状态就是假的，后续的 Relax 也是假的），
+/// 所以两者不能共用一个 tracker。
+fn observe_and_act(
+    cfg: &Config,
+    ticket: &TicketSlot,
+    tracker: &mut GuardTracker,
+    policy: &GuardPolicy,
+    tick: u64,
+) -> String {
+    let verdict = match collect_verdict(cfg, tick) {
+        Ok(v) => v,
+        Err(line) => return line,
+    };
+    let action = tracker.observe(&verdict, now_ms(), *policy);
+    match action {
+        GuardAction::Nothing => format!("[守卫 #{tick}] {}", verdict_brief(&verdict)),
+        GuardAction::Tighten(_) => tighten_now(ticket, tick, &verdict),
+        // 步 3 才接：重新 apply + 自动确认。这里**不能**谎称已经恢复。
+        GuardAction::Relax(_) => format!(
+            "[守卫 #{tick}] {} → 应放宽，但**步 3 未接线**：\
+             不会自动重新下发放行（放行仍然撤着）",
+            verdict_brief(&verdict)
+        ),
+        GuardAction::NeedsHuman { reason } => {
+            format!("[守卫 #{tick}] ⚠ 交给人工：{reason}")
+        },
+    }
+}
+
+/// 收紧：**撤掉放行**，不是新增拒绝规则。
+///
+/// 默认拒绝底板本来就装在同一次下发里，把放行撤掉，剩下的就是"全都拒绝"。
+/// 这条路的好处是它**不需要任何持久化**：放行本来就在动态会话里，
+/// 进程一死连"误收紧"都跟着消失，不会把机器卡在断网态。
+fn tighten_now(ticket: &TicketSlot, tick: u64, verdict: &GuardVerdict) -> String {
+    let mut g = match ticket.lock() {
+        Ok(g) => g,
+        Err(_) => return format!("[守卫 #{tick}] ⚠ 该收紧，但票据锁损坏，不动作"),
+    };
+    let n = match g.as_mut() {
+        // 从没下发过：压根没有放行可撤。此时**绝不能**临时去装一条拒绝规则——
+        // 那等于让守卫凭空造出它没能力安全撤掉的东西。
+        None => {
+            return format!(
+                "[守卫 #{tick}] ⚠ 该收紧，但当前**没有票据**（没下发过放行）→ 无放行可撤，不动作"
+            )
+        },
+        Some(t) => match t.phase {
+            // 已经撤过了：放行不在了，再删一次可能删到 id 复用后的别人的规则。
+            Phase::RolledBack => {
+                return format!("[守卫 #{tick}] ⚠ 该收紧，但票据已拆除过 → 放行已不在，不重复删")
+            },
+            Phase::Pending => {
+                let n = t.filter_ids.len();
+                t.request_abort();
+                n
+            },
+            Phase::Committed => {
+                let n = t.filter_ids.len();
+                t.force_teardown();
+                n
+            },
+        },
+    };
+    format!(
+        "[守卫 #{tick}] ⚠ **已收紧**：撤销 {n} 条放行（{}）。\
+         默认拒绝底板仍在 → 全都拒绝。看门狗 200 毫秒内执行。",
+        verdict_brief(verdict)
+    )
+}
+
+/// 一句话说清结论。
+///
+/// ⚠ 动作模式下日志里如果只写 `Nothing`，读的人分不清那是"生效"
+/// 还是"判不了"——而这两件事的后果完全不同。
+fn verdict_brief(v: &GuardVerdict) -> String {
+    match v {
+        GuardVerdict::Effective => "生效".to_string(),
+        GuardVerdict::Unknown { reason } => format!("判不了（{reason}）"),
+        GuardVerdict::Ineffective { reason, .. } => format!("未生效（{reason}）"),
+    }
 }
 
 /// 连续失败计数规则。
@@ -461,22 +580,26 @@ fn format_observation(tick: u64, verdict: &GuardVerdict, streak: u32, threshold:
     }
 }
 
+/// 采一次拓扑 → 构事实 → 判决。
+///
+/// 采不到就返回**已经拼好的日志行**，调用方直接返回即可：失败的原因必须
+/// 原样进日志，不能笼统归成"生效"或"判不了"——
+/// 采不到拓扑时**不能**当成"生效"（那等于放行）。
+fn collect_verdict(cfg: &Config, tick: u64) -> Result<GuardVerdict, String> {
+    let snap = snapshot()
+        .map_err(|e| format!("[守卫 #{tick}] 拓扑采集失败：{e} → Unknown，不动手"))?;
+    let facts = cfg
+        .guard_facts_from(&snap, PROXY_REACHABLE_PLACEHOLDER)
+        .ok_or_else(|| format!("[守卫 #{tick}] 配置缺 proxy.mode，无法构造事实，跳过"))?;
+    Ok(evaluate(facts))
+}
+
 /// 观测一次，返回一行日志。
 fn observe_once(cfg: &Config, tick: u64, streak: &mut u32, threshold: u32) -> String {
-    let snap = match snapshot() {
-        Ok(s) => s,
-        Err(e) => {
-            // 采不到拓扑就没有事实，此时**不能**当成"生效"
-            return format!("[守卫 #{tick}] 拓扑采集失败：{e} → Unknown，不动手");
-        },
+    let verdict = match collect_verdict(cfg, tick) {
+        Ok(v) => v,
+        Err(line) => return line,
     };
-
-    let facts = match cfg.guard_facts_from(&snap, PROXY_REACHABLE_PLACEHOLDER) {
-        Some(f) => f,
-        None => return format!("[守卫 #{tick}] 配置缺 proxy.mode，无法构造事实，跳过"),
-    };
-
-    let verdict = evaluate(facts);
     *streak = next_streak(&verdict, *streak);
     format_observation(tick, &verdict, *streak, threshold)
 }
@@ -846,6 +969,8 @@ struct Args {
     serve_secs: u64,
     /// 守卫观测周期（秒）。**0 = 关闭观测**。
     guard_interval_secs: u64,
+    /// 守卫是否**真的动手**（步 2）。默认 false —— 只观测。
+    guard_act: bool,
 }
 
 impl Args {
@@ -856,6 +981,7 @@ impl Args {
         let mut data_dir: Option<PathBuf> = None;
         let mut serve_secs: u64 = 30;
         let mut guard_interval_secs: u64 = DEFAULT_GUARD_INTERVAL_SECS;
+        let mut guard_act = false;
         let mut args = argv;
 
         while let Some(a) = args.next() {
@@ -873,6 +999,9 @@ impl Args {
                         .and_then(|v| v.parse().ok())
                         .unwrap_or(guard_interval_secs)
                 },
+                // 开关型参数，不带值：默认必须是"不动作"，
+                // 收紧的代价是整机断网，不能让一次手滑的命令行把它打开。
+                "--guard-act" => guard_act = true,
                 "--help" | "-h" => {
                     print_usage();
                     std::process::exit(0);
@@ -901,6 +1030,7 @@ impl Args {
             data_dir,
             serve_secs,
             guard_interval_secs,
+            guard_act,
         }
     }
 }
@@ -937,9 +1067,14 @@ fn print_usage() {
         "  --guard-interval-secs <n>  守卫观测周期（默认 {}，0 = 关闭）",
         DEFAULT_GUARD_INTERVAL_SECS
     );
+    println!(
+        "  --guard-act              守卫**真的动手**（默认只观测，见下）"
+    );
     println!();
-    println!("守卫当前处于**步 1（只观测不动手）**：只判『下游规则生效吗』并记日志，");
-    println!("不会收紧也不会放宽。日志落在 <data-dir>/guard-observe.log。");
+    println!("守卫默认处于**只观测**形态：只判『下游规则生效吗』并记日志，");
+    println!("不会收紧也不会放宽。加 --guard-act 之后 Tighten 才会真的撤掉放行");
+    println!("（默认拒绝底板仍在 → 全都拒绝）；Relax 属步 3，仍未接线，");
+    println!("所以**收紧后不会自动恢复**。日志落在 <data-dir>/guard-observe.log。");
     println!("启动过程不下发任何 WFP 规则。下发要由 `aegisctl apply` 发起，");
     println!("且该命令要求：持有 token + 控制端已提权 + 10 秒内 confirm。");
 }
@@ -1016,6 +1151,93 @@ mod tests {
     #[test]
     fn an_empty_pipe_name_falls_back_to_the_default() {
         assert_eq!(normalize_pipe_name(""), aegis_ipc::PIPE_NAME);
+    }
+
+    // ── 步 2：真的收紧 ──────────────────────────────────────────────
+
+    /// 收紧 = **撤放行**，不是新增拒绝规则。所以没有票据时只能"不动作"——
+    /// 凭空装一条拒绝规则，等于让守卫造出它没能力安全撤掉的东西。
+    #[test]
+    fn tightening_without_a_ticket_does_nothing_and_says_so() {
+        let slot = empty_slot();
+        let s = tighten_now(&slot, 1, &ineffective("x"));
+        assert!(s.contains("没有票据"), "{s}");
+        assert!(s.contains("不动作"), "{s}");
+        assert!(slot.lock().unwrap().is_none(), "绝不能凭空造票据");
+    }
+
+    /// 已拆除过的票据**不能再删一次**：filter id 是会复用的，
+    /// 第二次删的可能已经是别人的规则。
+    #[test]
+    fn tightening_an_already_rolled_back_ticket_does_not_delete_twice() {
+        let slot = empty_slot();
+        {
+            let mut t = ApplyTicket::pending(now_ms(), CONFIRM_WINDOW_MS, vec![4]);
+            t.mark_rolled_back("已拆除");
+            *slot.lock().unwrap() = Some(t);
+        }
+        let s = tighten_now(&slot, 2, &ineffective("x"));
+        assert!(s.contains("已拆除过"), "{s}");
+        assert!(!slot.lock().unwrap().as_ref().unwrap().force_teardown);
+    }
+
+    #[test]
+    fn tightening_a_committed_ticket_forces_a_teardown() {
+        let slot = empty_slot();
+        let mut t = ApplyTicket::pending(now_ms(), CONFIRM_WINDOW_MS, vec![4, 5, 6]);
+        t.confirm(now_ms()).expect("窗口内确认应成功");
+        *slot.lock().unwrap() = Some(t);
+
+        let s = tighten_now(&slot, 3, &ineffective("r"));
+        assert!(s.contains("已收紧"), "{s}");
+        assert!(s.contains("撤销 3 条放行"), "{s}");
+        assert!(slot.lock().unwrap().as_ref().unwrap().force_teardown);
+    }
+
+    /// 待确认期也要能撤：规则**已经装上了**，Pending 只表示还没点确认。
+    /// 但这里走普通 abort，不用强拆——强拆是给"已确认"用的紧急通道。
+    #[test]
+    fn tightening_a_pending_ticket_requests_a_plain_abort() {
+        let slot = empty_slot();
+        *slot.lock().unwrap() =
+            Some(ApplyTicket::pending(now_ms(), CONFIRM_WINDOW_MS, vec![9]));
+
+        let s = tighten_now(&slot, 4, &ineffective("r"));
+        assert!(s.contains("已收紧"), "{s}");
+        let t = slot.lock().unwrap().clone().unwrap();
+        assert!(t.abort_requested, "{t:?}");
+        assert!(!t.force_teardown, "Pending 不需要动用强拆通道：{t:?}");
+    }
+
+    /// 收紧的代价是整机断网，所以**默认必须是关的**。
+    #[test]
+    fn guard_act_is_off_unless_asked_for() {
+        let off = Args::parse(
+            ["--config", "c.toml"]
+                .iter()
+                .map(|s| s.to_string())
+                .collect::<Vec<_>>()
+                .into_iter(),
+        );
+        assert!(!off.guard_act, "默认只观测");
+
+        let on = Args::parse(
+            ["--config", "c.toml", "--guard-act"]
+                .iter()
+                .map(|s| s.to_string())
+                .collect::<Vec<_>>()
+                .into_iter(),
+        );
+        assert!(on.guard_act);
+    }
+
+    /// 一句话结论必须区分"生效"与"判不了"——动作模式下只写 `Nothing`
+    /// 会让人分不清这两件后果完全不同的事。
+    #[test]
+    fn the_verdict_brief_distinguishes_effective_from_unknown() {
+        assert_eq!(verdict_brief(&GuardVerdict::Effective), "生效");
+        assert!(verdict_brief(&unknown("读不到默认出口")).contains("判不了"));
+        assert!(verdict_brief(&ineffective("r")).contains("未生效"));
     }
 
     #[test]
