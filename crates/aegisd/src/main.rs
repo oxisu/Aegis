@@ -51,6 +51,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use std::fs::OpenOptions;
 use std::io::Write as _;
+use std::net::TcpStream;
 
 use aegis_audit::{Action, AuditEvent, AuditLog, InterfaceRole, Protocol};
 use aegis_config::{load_file, Config};
@@ -63,8 +64,9 @@ use aegis_ipc::{
 };
 use aegis_sense::{default_egress, snapshot};
 use aegis_wfp::{
-    apply, cage_plan, invariants_violated, preflight, rollback, verify_with, ApplyTicket,
-    CagePolicy, FilterSpec, Phase, Session, CONFIRM_WINDOW_MS,
+    apply, cage_plan, install, invariants_violated, preflight, rollback, verify_with,
+    Action as WfpAction, ApplyTicket, CagePolicy, FilterSpec, Phase, Session, CONFIRM_WINDOW_MS,
+    MAX_RESTORE_ATTEMPTS,
 };
 use aegis_version as version;
 
@@ -89,13 +91,12 @@ type TicketSlot = std::sync::Arc<std::sync::Mutex<Option<ApplyTicket>>>;
 /// 更慢则漏的时间太长。先跑起来再调。
 const DEFAULT_GUARD_INTERVAL_SECS: u64 = 3;
 
-/// ⚠ **断言 A 的占位值**：v1 还没接适配器 SPI，`proxy_reachable` 无法真判，
-/// 暂时一律按"可达"处理。
+/// 断言 A 的探测超时。
 ///
-/// 后果要说清楚：断言 A 永远不会失败，守卫只看 **B（TUN 在不在）** 与
-/// **C（默认出口是不是它）**。也就是说**"代理进程死了"这一条目前抓不到**。
-/// 接上 SPI 之后改用它返回的 `Op::Health` / `Op::RulesEffective` 的真实结果。
-const PROXY_REACHABLE_PLACEHOLDER: bool = true;
+/// ⚠ **必须带超时**：守卫线程每 3 秒跑一次，一个不设超时的 `connect` 在
+/// 目标把包丢掉（而不是拒绝）时能挂几十秒，守卫就卡死在那儿——
+/// 而它卡死的代价正好是"失效期间没人看着"。
+const CONTROL_PROBE_TIMEOUT: Duration = Duration::from_millis(800);
 
 fn main() {
     let args = Args::parse(std::env::args().skip(1));
@@ -375,12 +376,19 @@ fn main() {
         None => {
             let log = args.data_dir.join("guard-observe.log");
             println!("  周期      : {} 秒", args.guard_interval_secs);
-            println!("  断言      : B 承载体在 / C 默认出口指向承载体");
-            println!("  ⚠ 断言 A（代理可达）尚未接 SPI，暂按可达处理");
+            match config.proxy.control_addr {
+                Some(a) => println!("  断言      : A 代理可达（探测 {a}，超时 800ms）/ \
+                                     B 承载体在 / C 默认出口=承载体"),
+                None => println!(
+                    "  断言      : B 承载体在 / C 默认出口=承载体\n\
+                     \x20                 ⚠ 断言 A **判不了**：未配置 proxy.control_addr\n\
+                     \x20                   （判不了 = Unknown，永不收紧，不会假装可达）"
+                ),
+            }
             if args.guard_act {
                 println!("  动作      : **已接线**（--guard-act）");
-                println!("    Tighten → 撤掉放行（默认拒绝底板仍在 → 全都拒绝）");
-                println!("    Relax   → **步 3 未接线**，只会记一行，不会自动重新下发");
+                println!("    Tighten → 撤掉放行（拒绝底板保留 → 全都拒绝）");
+                println!("    Relax   → 把放行装回原会话（自动恢复，不再走 10s 确认）");
             } else {
                 println!("  动作      : 只观测（加 --guard-act 才会真的收紧）");
             }
@@ -472,27 +480,29 @@ fn observe_and_act(
         Err(line) => return line,
     };
     let action = tracker.observe(&verdict, now_ms(), *policy);
-    match action {
+    let line = match action {
         GuardAction::Nothing => format!("[守卫 #{tick}] {}", verdict_brief(&verdict)),
-        GuardAction::Tighten(_) => tighten_now(ticket, tick, &verdict),
-        // 步 3 才接：重新 apply + 自动确认。这里**不能**谎称已经恢复。
-        GuardAction::Relax(_) => format!(
-            "[守卫 #{tick}] {} → 应放宽，但**步 3 未接线**：\
-             不会自动重新下发放行（放行仍然撤着）",
-            verdict_brief(&verdict)
-        ),
+        GuardAction::Tighten(_) => suspend_permits(ticket, tick, &verdict),
+        GuardAction::Relax(_) => restore_permits(ticket, tick, &verdict),
         GuardAction::NeedsHuman { reason } => {
             format!("[守卫 #{tick}] ⚠ 交给人工：{reason}")
         },
+    };
+    // 已经判"该放宽"、但放行还没真的装回去 → 按**守卫周期**重试（3 秒），
+    // 不是看门狗的 200 毫秒。装不回去通常是环境变了，狂试没用，
+    // 但要试够几次再转人工。
+    match retry_restore(ticket, tick) {
+        Some(retry) => format!("{line}\n{retry}"),
+        None => line,
     }
 }
 
-/// 收紧：**撤掉放行**，不是新增拒绝规则。
+/// 收紧：**撤掉放行，留下拒绝底板**。
 ///
-/// 默认拒绝底板本来就装在同一次下发里，把放行撤掉，剩下的就是"全都拒绝"。
-/// 这条路的好处是它**不需要任何持久化**：放行本来就在动态会话里，
-/// 进程一死连"误收紧"都跟着消失，不会把机器卡在断网态。
-fn tighten_now(ticket: &TicketSlot, tick: u64, verdict: &GuardVerdict) -> String {
+/// ⚠ 不是"整个绝缘笼一起拆"。默认拒绝底板也在同一次下发里，
+/// 一起删掉的话机器就**完全不设防**——那不是"全都拒绝"，是"全都放行"，
+/// 兜底反了个向。这个坑踩过一次（早期实现直接 `force_teardown`）。
+fn suspend_permits(ticket: &TicketSlot, tick: u64, verdict: &GuardVerdict) -> String {
     let mut g = match ticket.lock() {
         Ok(g) => g,
         Err(_) => return format!("[守卫 #{tick}] ⚠ 该收紧，但票据锁损坏，不动作"),
@@ -505,28 +515,86 @@ fn tighten_now(ticket: &TicketSlot, tick: u64, verdict: &GuardVerdict) -> String
                 "[守卫 #{tick}] ⚠ 该收紧，但当前**没有票据**（没下发过放行）→ 无放行可撤，不动作"
             )
         },
-        Some(t) => match t.phase {
-            // 已经撤过了：放行不在了，再删一次可能删到 id 复用后的别人的规则。
-            Phase::RolledBack => {
-                return format!("[守卫 #{tick}] ⚠ 该收紧，但票据已拆除过 → 放行已不在，不重复删")
-            },
-            Phase::Pending => {
-                let n = t.filter_ids.len();
-                t.request_abort();
-                n
-            },
-            Phase::Committed => {
-                let n = t.filter_ids.len();
-                t.force_teardown();
-                n
-            },
+        Some(t) => {
+            if t.permits_suspended {
+                return format!("[守卫 #{tick}] 已在收紧态，不重复撤放行");
+            }
+            match t.phase {
+                // 已拆除过：整批规则都不在了（连拒绝底板也没了），
+                // 此时"撤放行"无从谈起，只能重新下发——那是步 3 之后的事。
+                Phase::RolledBack => {
+                    return format!(
+                        "[守卫 #{tick}] ⚠ 该收紧，但票据已拆除过 → 规则已全部不在，\
+                         需要重新下发（不是撤放行能解决的）"
+                    )
+                },
+                _ if t.permit_ids.is_empty() => {
+                    return format!(
+                        "[守卫 #{tick}] ⚠ 该收紧，但票据里没有放行 id → \
+                         不能为了收紧去动拒绝底板，不动作"
+                    )
+                },
+                _ => {
+                    let n = t.permit_ids.len();
+                    t.request_suspend_permits();
+                    n
+                },
+            }
         },
     };
     format!(
-        "[守卫 #{tick}] ⚠ **已收紧**：撤销 {n} 条放行（{}）。\
-         默认拒绝底板仍在 → 全都拒绝。看门狗 200 毫秒内执行。",
+        "[守卫 #{tick}] ⚠ **已收紧**：撤掉 {n} 条放行（{}）。\
+         拒绝底板保留 → 全都拒绝。看门狗 200 毫秒内执行。",
         verdict_brief(verdict)
     )
+}
+
+/// 放宽：把放行**装回去**（步 3）。
+///
+/// 走的是"往原会话里追加"，不是重新下发：没有"旧的拆了、新的没装上"这个
+/// 空窗，也不需要重新走 10 秒确认倒计时——**自动恢复不是新装**。
+/// ⚠ 但审计必须能看出这是自动恢复，所以 `note` 里写清楚。
+fn restore_permits(ticket: &TicketSlot, tick: u64, verdict: &GuardVerdict) -> String {
+    let mut g = match ticket.lock() {
+        Ok(g) => g,
+        Err(_) => return format!("[守卫 #{tick}] ⚠ 该放宽，但票据锁损坏，不动作"),
+    };
+    match g.as_mut() {
+        None => format!("[守卫 #{tick}] ⚠ 该放宽，但没有票据 → 需人工下发"),
+        Some(t) => {
+            if !t.permits_suspended {
+                return format!("[守卫 #{tick}] {} → 放行本来就在，无需恢复", verdict_brief(verdict));
+            }
+            t.request_restore_permits();
+            format!(
+                "[守卫 #{tick}] **已放宽**：正在把放行装回去（{}）。\
+                 看门狗 200 毫秒内执行。",
+                verdict_brief(verdict)
+            )
+        },
+    }
+}
+
+/// 放行还没装回去时的重试。到上限就**停手并转人工**，不再刷屏。
+fn retry_restore(ticket: &TicketSlot, tick: u64) -> Option<String> {
+    let mut g = ticket.lock().ok()?;
+    let t = g.as_mut()?;
+    if !t.permits_suspended || t.restore_requested {
+        return None;
+    }
+    if t.restore_failures >= MAX_RESTORE_ATTEMPTS {
+        return Some(format!(
+            "[守卫 #{tick}] ⚠ 放行仍未装回：已失败 {} 次（上限 {}），\
+             停止自动重试，**需人工**。当前仍处收紧态。",
+            t.restore_failures, MAX_RESTORE_ATTEMPTS
+        ));
+    }
+    let attempt = t.restore_failures + 1;
+    t.request_restore_permits();
+    Some(format!(
+        "[守卫 #{tick}] 放行仍未装回 → 第 {attempt} 次尝试恢复（上限 {}）",
+        MAX_RESTORE_ATTEMPTS
+    ))
 }
 
 /// 一句话说清结论。
@@ -589,9 +657,22 @@ fn collect_verdict(cfg: &Config, tick: u64) -> Result<GuardVerdict, String> {
     let snap = snapshot()
         .map_err(|e| format!("[守卫 #{tick}] 拓扑采集失败：{e} → Unknown，不动手"))?;
     let facts = cfg
-        .guard_facts_from(&snap, PROXY_REACHABLE_PLACEHOLDER)
+        .guard_facts_from(&snap, assertion_a(cfg))
         .ok_or_else(|| format!("[守卫 #{tick}] 配置缺 proxy.mode，无法构造事实，跳过"))?;
     Ok(evaluate(facts))
+}
+
+/// **断言 A**：代理控制面可连吗。
+///
+/// 返回 `None` 表示**判不了**，它和"不可达"是两回事：
+/// 没配 `proxy.control_addr` 时不该收紧（收紧 = 断网），只能判不了。
+///
+/// 后续接上适配器 SPI 之后，这里换成 `Op::RulesEffective` 的三态结果：
+/// `RulesEffective → Some(true)`、`RulesIneffective → Some(false)`、
+/// `RulesUnknown → None`。本函数退化为"没有适配器时的兜底判据"。
+fn assertion_a(cfg: &Config) -> Option<bool> {
+    let addr = cfg.proxy.control_addr?;
+    Some(TcpStream::connect_timeout(&addr, CONTROL_PROBE_TIMEOUT).is_ok())
 }
 
 /// 观测一次，返回一行日志。
@@ -813,10 +894,11 @@ fn do_apply(plan: &[FilterSpec], slot: &TicketSlot) -> String {
                         now,
                         CONFIRM_WINDOW_MS,
                         receipt.filter_ids,
+                        receipt.permit_ids,
                     ));
                 }
                 let _ = tx.send(Ok(n));
-                watch(&session, &watchdog_slot);
+                watch(&session, &watchdog_slot, &watchdog_plan);
             },
             Err(e) => {
                 let _ = tx.send(Err(e.to_string()));
@@ -843,33 +925,138 @@ fn do_apply(plan: &[FilterSpec], slot: &TicketSlot) -> String {
 /// ⚠ **会话必须一直握着**。它一旦关闭（哪怕只是离开作用域），内核就把
 /// 这次装的所有规则清掉——这正是动态会话的兜底性质，但也意味着
 /// "提前 return" 等于静默撤防。所以确认之后也不能 return，得继续守着。
-fn watch(session: &Session, slot: &TicketSlot) {
+fn watch(session: &Session, slot: &TicketSlot, plan: &[FilterSpec]) {
     loop {
         thread::sleep(Duration::from_millis(200));
         let now = now_ms();
 
-        let due = match slot.lock() {
-            Ok(g) => g.as_ref().is_some_and(|t| t.must_roll_back(now)),
-            Err(_) => false,
+        // 一次读清"现在该干什么"，再关掉锁去动手：
+        // 握着锁去调用 WFP 会让守卫线程（每 3 秒一次）被卡在这里。
+        let cmd = match slot.lock() {
+            Ok(g) => match g.as_ref() {
+                None => WatchCmd::Wait,
+                Some(t) => {
+                    if t.force_teardown {
+                        WatchCmd::Teardown
+                    } else if t.restore_requested {
+                        WatchCmd::Restore
+                    } else if t.suspend_requested {
+                        WatchCmd::Suspend
+                    } else if t.must_roll_back(now) {
+                        WatchCmd::Teardown
+                    } else {
+                        WatchCmd::Wait
+                    }
+                },
+            },
+            Err(_) => WatchCmd::Wait,
         };
-        if !due {
-            continue;
-        }
 
-        // 只会读一次 id 快照：回滚认的是 id，不是"现在计划里有什么"
-        let ids = match slot.lock() {
-            Ok(g) => g.as_ref().map(|t| t.filter_ids.clone()).unwrap_or_default(),
-            Err(_) => Vec::new(),
-        };
-        let removed = rollback(session, &ids).unwrap_or(0);
-        if let Ok(mut g) = slot.lock() {
-            if let Some(t) = g.as_mut() {
-                t.mark_rolled_back(format!("已拆除 {removed} 条规则"));
-            }
+        match cmd {
+            WatchCmd::Wait => {},
+
+            WatchCmd::Teardown => {
+                let ids = match slot.lock() {
+                    Ok(g) => g.as_ref().map(|t| t.filter_ids.clone()).unwrap_or_default(),
+                    Err(_) => Vec::new(),
+                };
+                let removed = rollback(session, &ids).unwrap_or(0);
+                if let Ok(mut g) = slot.lock() {
+                    if let Some(t) = g.as_mut() {
+                        t.mark_rolled_back(format!("已拆除 {removed} 条规则"));
+                    }
+                }
+                println!("  [IPC] 倒计时结束或收到拆除指令：已撤销 {removed} 条规则");
+                return;
+            },
+
+            // 守卫收紧：**只撤放行**。拒绝底板留在原处 → 剩下的就是全都拒绝。
+            WatchCmd::Suspend => {
+                let ids = match slot.lock() {
+                    Ok(g) => g.as_ref().map(|t| t.permit_ids.clone()).unwrap_or_default(),
+                    Err(_) => Vec::new(),
+                };
+                let removed = rollback(session, &ids).unwrap_or(0);
+                if let Ok(mut g) = slot.lock() {
+                    if let Some(t) = g.as_mut() {
+                        t.suspend_requested = false;
+                        t.permits_suspended = true;
+                        // id 已经不存在了，必须清空：留着会在恢复/回滚时
+                        // 删到 id 复用之后属于别人的规则。
+                        t.permit_ids.clear();
+                        t.note = format!("守卫收紧：撤掉 {removed} 条放行，拒绝底板保留");
+                    }
+                }
+                println!("  [守卫] 已撤掉 {removed} 条放行（拒绝底板保留 → 全都拒绝）");
+            },
+
+            // 守卫自动恢复：往**同一个会话**里把放行装回去。
+            // 不走重新下发，于是没有"旧的拆了、新的没装上"的空窗，
+            // 也不需要再走一次 10 秒确认——自动恢复不是新装。
+            WatchCmd::Restore => {
+                let permits: Vec<FilterSpec> = plan
+                    .iter()
+                    .filter(|s| s.action == WfpAction::Permit)
+                    .cloned()
+                    .collect();
+                match install(session, &permits) {
+                    Ok(ids) => {
+                        let n = ids.len();
+                        if let Ok(mut g) = slot.lock() {
+                            if let Some(t) = g.as_mut() {
+                                t.restore_requested = false;
+                                t.permits_suspended = false;
+                                t.restore_failures = 0;
+                                t.permit_ids = ids.clone();
+                                // 也要进 filter_ids：整批拆除时必须连它们一起删。
+                                t.filter_ids.extend(ids);
+                                t.note = format!("守卫自动恢复：装回 {n} 条放行");
+                            }
+                        }
+                        println!("  [守卫] 已装回 {n} 条放行（自动恢复）");
+                    },
+                    Err(e) => {
+                        let mut gave_up = false;
+                        let mut tries = 0;
+                        if let Ok(mut g) = slot.lock() {
+                            if let Some(t) = g.as_mut() {
+                                t.restore_failures = t.restore_failures.saturating_add(1);
+                                tries = t.restore_failures;
+                                if tries >= MAX_RESTORE_ATTEMPTS {
+                                    // 停手：再试也是同样的错，刷屏只会盖住真正的原因。
+                                    t.restore_requested = false;
+                                    gave_up = true;
+                                }
+                                t.note = if gave_up {
+                                    format!("守卫恢复失败 {tries} 次，停止自动重试，需人工：{e}")
+                                } else {
+                                    format!("守卫恢复失败（第 {tries} 次）：{e}")
+                                };
+                            }
+                        }
+                        if gave_up {
+                            println!(
+                                "  [守卫] ⚠ 恢复放行失败 {tries} 次，停止重试，需人工：{e}"
+                            );
+                        } else {
+                            println!("  [守卫] 恢复放行失败（第 {tries} 次）：{e}");
+                        }
+                    },
+                }
+            },
         }
-        println!("  [IPC] 倒计时结束或收到拆除指令：已撤销 {removed} 条规则");
-        return;
     }
+}
+
+/// 看门狗这一轮该干什么。
+enum WatchCmd {
+    Wait,
+    /// 整批拆除（超时 / 主动 abort / 人工强拆）。
+    Teardown,
+    /// 只撤放行（守卫收紧）。
+    Suspend,
+    /// 把放行装回去（守卫自动恢复）。
+    Restore,
 }
 
 fn do_confirm(slot: &TicketSlot) -> String {
@@ -1153,60 +1340,182 @@ mod tests {
         assert_eq!(normalize_pipe_name(""), aegis_ipc::PIPE_NAME);
     }
 
-    // ── 步 2：真的收紧 ──────────────────────────────────────────────
+    // ── 步 2/3：收紧与恢复 ───────────────────────────────────────────
 
     /// 收紧 = **撤放行**，不是新增拒绝规则。所以没有票据时只能"不动作"——
     /// 凭空装一条拒绝规则，等于让守卫造出它没能力安全撤掉的东西。
     #[test]
     fn tightening_without_a_ticket_does_nothing_and_says_so() {
         let slot = empty_slot();
-        let s = tighten_now(&slot, 1, &ineffective("x"));
+        let s = suspend_permits(&slot, 1, &ineffective("x"));
         assert!(s.contains("没有票据"), "{s}");
         assert!(s.contains("不动作"), "{s}");
         assert!(slot.lock().unwrap().is_none(), "绝不能凭空造票据");
     }
 
-    /// 已拆除过的票据**不能再删一次**：filter id 是会复用的，
-    /// 第二次删的可能已经是别人的规则。
+    /// ⚠ 这条钉的是"收紧 ≠ 拆笼子"：**绝不能**碰 `force_teardown`。
+    /// 强拆会把默认拒绝底板一起删掉，那不是"全都拒绝"，是"全都放行"——
+    /// 兜底反了个向，而且从日志上看不出来。
     #[test]
-    fn tightening_an_already_rolled_back_ticket_does_not_delete_twice() {
+    fn tightening_a_committed_ticket_only_suspends_the_permits() {
         let slot = empty_slot();
-        {
-            let mut t = ApplyTicket::pending(now_ms(), CONFIRM_WINDOW_MS, vec![4]);
-            t.mark_rolled_back("已拆除");
-            *slot.lock().unwrap() = Some(t);
-        }
-        let s = tighten_now(&slot, 2, &ineffective("x"));
-        assert!(s.contains("已拆除过"), "{s}");
-        assert!(!slot.lock().unwrap().as_ref().unwrap().force_teardown);
-    }
-
-    #[test]
-    fn tightening_a_committed_ticket_forces_a_teardown() {
-        let slot = empty_slot();
-        let mut t = ApplyTicket::pending(now_ms(), CONFIRM_WINDOW_MS, vec![4, 5, 6]);
+        let mut t =
+            ApplyTicket::pending(now_ms(), CONFIRM_WINDOW_MS, vec![4, 5, 6], vec![4, 5]);
         t.confirm(now_ms()).expect("窗口内确认应成功");
         *slot.lock().unwrap() = Some(t);
 
-        let s = tighten_now(&slot, 3, &ineffective("r"));
+        let s = suspend_permits(&slot, 3, &ineffective("r"));
         assert!(s.contains("已收紧"), "{s}");
-        assert!(s.contains("撤销 3 条放行"), "{s}");
-        assert!(slot.lock().unwrap().as_ref().unwrap().force_teardown);
+        assert!(s.contains("撤掉 2 条放行"), "{s}");
+
+        let t = slot.lock().unwrap().clone().unwrap();
+        assert!(t.suspend_requested, "{t:?}");
+        assert!(!t.force_teardown, "⚠ 绝不能整批强拆：{t:?}");
+        assert!(!t.abort_requested, "收紧不是 abort：{t:?}");
+        assert_eq!(t.filter_ids.len(), 3, "整批 id 一个都不能少：{t:?}");
     }
 
-    /// 待确认期也要能撤：规则**已经装上了**，Pending 只表示还没点确认。
-    /// 但这里走普通 abort，不用强拆——强拆是给"已确认"用的紧急通道。
+    /// 收紧过一次就不重复撤。重复删的后果是删到 id 复用后的别人的规则。
     #[test]
-    fn tightening_a_pending_ticket_requests_a_plain_abort() {
+    fn tightening_twice_does_not_delete_twice() {
         let slot = empty_slot();
         *slot.lock().unwrap() =
-            Some(ApplyTicket::pending(now_ms(), CONFIRM_WINDOW_MS, vec![9]));
+            Some(ApplyTicket::pending(now_ms(), CONFIRM_WINDOW_MS, vec![4, 5], vec![4]));
+        assert!(suspend_permits(&slot, 1, &ineffective("x")).contains("已收紧"));
 
-        let s = tighten_now(&slot, 4, &ineffective("r"));
-        assert!(s.contains("已收紧"), "{s}");
+        // 模拟看门狗执行完：清空 permit_ids 并置 suspended
+        {
+            let mut g = slot.lock().unwrap();
+            let t = g.as_mut().unwrap();
+            t.suspend_requested = false;
+            t.permits_suspended = true;
+            t.permit_ids.clear();
+        }
+        let s = suspend_permits(&slot, 2, &ineffective("x"));
+        assert!(s.contains("已在收紧态"), "{s}");
+        assert!(!slot.lock().unwrap().as_ref().unwrap().suspend_requested);
+    }
+
+    /// ⚠ 票据里没有放行 id 时**必须拒绝动手**。
+    /// 放行 id 为空还想"收紧"，下一步只可能去动拒绝底板——那是把防护拆了。
+    #[test]
+    fn tightening_refuses_when_the_ticket_has_no_permit_ids() {
+        let slot = empty_slot();
+        *slot.lock().unwrap() =
+            Some(ApplyTicket::pending(now_ms(), CONFIRM_WINDOW_MS, vec![7], vec![]));
+        let s = suspend_permits(&slot, 1, &ineffective("x"));
+        assert!(s.contains("没有放行 id"), "{s}");
+        assert!(!slot.lock().unwrap().as_ref().unwrap().suspend_requested);
+    }
+
+    /// 已经整批拆除过（人工强拆 / 超时）的票据：规则全没了，
+    /// "撤放行"无从谈起，只能重新下发。必须说清楚，不能假装收紧了。
+    #[test]
+    fn tightening_an_already_rolled_back_ticket_says_it_needs_a_reapply() {
+        let slot = empty_slot();
+        {
+            let mut t = ApplyTicket::pending(now_ms(), CONFIRM_WINDOW_MS, vec![4], vec![4]);
+            t.mark_rolled_back("已拆除");
+            *slot.lock().unwrap() = Some(t);
+        }
+        let s = suspend_permits(&slot, 2, &ineffective("x"));
+        assert!(s.contains("已拆除过"), "{s}");
+        assert!(s.contains("重新下发"), "{s}");
+    }
+
+    // ── 步 3：自动恢复 ────────────────────────────────────────────────
+
+    #[test]
+    fn restoring_asks_the_watchdog_to_put_the_permits_back() {
+        let slot = empty_slot();
+        {
+            let mut t = ApplyTicket::pending(now_ms(), CONFIRM_WINDOW_MS, vec![4, 5], vec![4]);
+            t.confirm(now_ms()).unwrap();
+            t.permits_suspended = true;
+            t.permit_ids.clear();
+            *slot.lock().unwrap() = Some(t);
+        }
+        let s = restore_permits(&slot, 1, &GuardVerdict::Effective);
+        assert!(s.contains("已放宽"), "{s}");
         let t = slot.lock().unwrap().clone().unwrap();
-        assert!(t.abort_requested, "{t:?}");
-        assert!(!t.force_teardown, "Pending 不需要动用强拆通道：{t:?}");
+        assert!(t.restore_requested, "{t:?}");
+        assert!(!t.suspend_requested, "{t:?}");
+    }
+
+    /// 放行本来就在时不能没事找事去重装一遍。
+    #[test]
+    fn restoring_when_the_permits_are_already_there_is_a_no_op() {
+        let slot = empty_slot();
+        *slot.lock().unwrap() =
+            Some(ApplyTicket::pending(now_ms(), CONFIRM_WINDOW_MS, vec![4, 5], vec![4]));
+        let s = restore_permits(&slot, 1, &GuardVerdict::Effective);
+        assert!(s.contains("无需恢复"), "{s}");
+        assert!(!slot.lock().unwrap().as_ref().unwrap().restore_requested);
+    }
+
+    /// 重试有上限：到上限就停手并转人工，不能无限刷屏，
+    /// 更不能一直卡在断网态还一声不吭。
+    #[test]
+    fn restore_retries_are_capped_and_then_handed_to_a_human() {
+        let slot = empty_slot();
+        {
+            let mut t = ApplyTicket::pending(now_ms(), CONFIRM_WINDOW_MS, vec![4, 5], vec![4]);
+            t.confirm(now_ms()).unwrap();
+            t.permits_suspended = true;
+            t.permit_ids.clear();
+            *slot.lock().unwrap() = Some(t);
+        }
+        // 前 MAX 次：每次都再请求一次恢复
+        for i in 0..MAX_RESTORE_ATTEMPTS {
+            let s = retry_restore(&slot, i as u64).expect("应继续重试");
+            assert!(s.contains("尝试恢复"), "{s}");
+            let mut g = slot.lock().unwrap();
+            let t = g.as_mut().unwrap();
+            assert!(t.restore_requested);
+            t.restore_requested = false;
+            t.restore_failures += 1; // 模拟看门狗上报失败
+        }
+        let s = retry_restore(&slot, 99).expect("超限也要说一句话");
+        assert!(s.contains("需人工"), "{s}");
+        assert!(!slot.lock().unwrap().as_ref().unwrap().restore_requested);
+    }
+
+    /// 没挂起（放行在）时不该有任何重试动作。
+    #[test]
+    fn restore_retry_stays_silent_when_the_permits_are_installed() {
+        let slot = empty_slot();
+        *slot.lock().unwrap() =
+            Some(ApplyTicket::pending(now_ms(), CONFIRM_WINDOW_MS, vec![4], vec![4]));
+        assert!(retry_restore(&slot, 1).is_none());
+    }
+
+    // ── 步 5：断言 A ──────────────────────────────────────────────────
+
+    /// ⚠ 没配 `control_addr` 时必须是 `None`（判不了），不是 `Some(true)`。
+    /// 早期版本一律按"可达"填，等于让"代理进程已经死了"这条永远通过。
+    #[test]
+    fn assertion_a_is_unknown_without_a_control_addr() {
+        let cfg = aegis_config::load_str(EXAMPLE_CONFIG).unwrap();
+        assert!(
+            cfg.proxy.control_addr.is_none(),
+            "样例配置不该自带 control_addr"
+        );
+        assert_eq!(assertion_a(&cfg), None);
+    }
+
+    /// 连一个几乎肯定没人监听的本机高端口 → 不可达（且要**快**，
+    /// 不能挂住守卫线程）。
+    #[test]
+    fn assertion_a_reports_unreachable_for_a_dead_local_port() {
+        let mut cfg = aegis_config::load_str(EXAMPLE_CONFIG).unwrap();
+        cfg.proxy.control_addr = Some("127.0.0.1:1".parse().unwrap());
+        let t0 = std::time::Instant::now();
+        assert_eq!(assertion_a(&cfg), Some(false));
+        assert!(
+            t0.elapsed() < Duration::from_secs(2),
+            "探测必须带超时，实测 {:?}",
+            t0.elapsed()
+        );
     }
 
     /// 收紧的代价是整机断网，所以**默认必须是关的**。
@@ -1280,6 +1589,10 @@ mod tests {
         Arc::new(Mutex::new(None))
     }
 
+    /// 直接用仓库里的样例配置，免得在测试里维护第二份 schema
+    /// （两份必然漂移，而漂移的表现是"测试过了、真机加载失败"）。
+    const EXAMPLE_CONFIG: &str = include_str!("../../../config/config.example.toml");
+
     fn boot_plan() -> Vec<FilterSpec> {
         vec![FilterSpec {
             name: "boot",
@@ -1318,6 +1631,7 @@ mod tests {
             now_ms(),
             CONFIRM_WINDOW_MS,
             vec![1, 2],
+            vec![1],
         ));
         let out = do_confirm(&slot);
         assert!(out.starts_with(OK_PREFIX), "{out}");
@@ -1330,7 +1644,7 @@ mod tests {
     fn confirming_a_stale_ticket_is_denied() {
         let slot = empty_slot();
         let past = now_ms() - CONFIRM_WINDOW_MS - 1;
-        *slot.lock().unwrap() = Some(ApplyTicket::pending(past, 0, vec![7]));
+        *slot.lock().unwrap() = Some(ApplyTicket::pending(past, 0, vec![7], vec![7]));
         let out = do_confirm(&slot);
         assert!(out.starts_with(DENY_PREFIX), "{out}");
         assert_eq!(slot.lock().unwrap().as_ref().unwrap().phase, Phase::Pending);
@@ -1340,7 +1654,7 @@ mod tests {
     fn rollback_of_a_pending_ticket_requests_an_abort() {
         let slot = empty_slot();
         *slot.lock().unwrap() =
-            Some(ApplyTicket::pending(now_ms(), CONFIRM_WINDOW_MS, vec![3]));
+            Some(ApplyTicket::pending(now_ms(), CONFIRM_WINDOW_MS, vec![3], vec![3]));
         let out = do_rollback(&slot);
         assert!(out.starts_with(OK_PREFIX), "{out}");
         assert!(slot.lock().unwrap().as_ref().unwrap().must_roll_back(now_ms()));
@@ -1350,7 +1664,7 @@ mod tests {
     #[test]
     fn rollback_of_a_committed_ticket_forces_a_teardown() {
         let slot = empty_slot();
-        let mut t = ApplyTicket::pending(now_ms(), CONFIRM_WINDOW_MS, vec![4]);
+        let mut t = ApplyTicket::pending(now_ms(), CONFIRM_WINDOW_MS, vec![4], vec![4]);
         t.confirm(now_ms()).unwrap();
         *slot.lock().unwrap() = Some(t);
 
@@ -1366,7 +1680,7 @@ mod tests {
     #[test]
     fn rolling_back_twice_is_denied() {
         let slot = empty_slot();
-        let mut t = ApplyTicket::pending(now_ms(), CONFIRM_WINDOW_MS, vec![5]);
+        let mut t = ApplyTicket::pending(now_ms(), CONFIRM_WINDOW_MS, vec![5], vec![5]);
         t.mark_rolled_back("已拆");
         *slot.lock().unwrap() = Some(t);
         assert!(do_rollback(&slot).starts_with(DENY_PREFIX));
@@ -1386,7 +1700,7 @@ mod tests {
     fn a_second_apply_is_refused_while_one_is_pending() {
         let slot = empty_slot();
         *slot.lock().unwrap() =
-            Some(ApplyTicket::pending(now_ms(), CONFIRM_WINDOW_MS, vec![9]));
+            Some(ApplyTicket::pending(now_ms(), CONFIRM_WINDOW_MS, vec![9], vec![9]));
         let out = do_apply(&boot_plan(), &slot);
         assert!(out.starts_with(DENY_PREFIX), "{out}");
         assert!(out.contains("待确认"), "{out}");
