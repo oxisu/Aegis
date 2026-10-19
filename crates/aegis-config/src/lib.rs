@@ -20,7 +20,7 @@
 //! 与 IPC 版本握手共用同一套规则，避免"IPC 认为不兼容、配置却放行了"。
 //! 特别注意本项目处于 0.x：**MINOR 不同即破坏性变更**。
 
-use std::net::Ipv4Addr;
+use std::net::{Ipv4Addr, SocketAddr};
 
 use aegis_core::guard::{collect, GuardFacts, ProxyMode};
 use aegis_version::compat::{check_compat, ParseError, Verdict, VersionTriple};
@@ -97,6 +97,16 @@ pub struct Proxy {
     /// TOML 支持十六进制整数字面量，写 `0x6008008000000000` 更接近
     /// `netsh` / `Get-NetAdapter` 里看到的形式。
     pub tun_luid: Option<u64>,
+    /// 代理**控制面**地址（形如 `127.0.0.1:9090`），守卫断言 A 的判据来源。
+    ///
+    /// ⚠ **不填 = 断言 A 判不了**（`None`，不是"可达"）。
+    /// 早期这里没有可判的入口，只能一律按"可达"填 `true`——那是假事实：
+    /// "代理进程已经死了"这条永远通过，守卫只剩 B/C 两条。
+    /// 判不了就如实判不了（`GuardVerdict::Unknown`），**永不触发收紧**。
+    ///
+    /// 后续接上适配器 SPI 之后，断言 A 会改用 `Op::RulesEffective`
+    /// 的三态结果（`RulesUnknown` 同样落到 `None`），本字段退化为无 SPI 时的兜底。
+    pub control_addr: Option<SocketAddr>,
 }
 
 /// `[[always_allow]]` 一条**永久放行**条目。
@@ -172,7 +182,7 @@ impl Config {
     /// 而不是自行挑一个默认值。
     pub fn guard_facts(
         &self,
-        proxy_reachable: bool,
+        proxy_reachable: Option<bool>,
         present_luids: &[u64],
         default_egress_luid: Option<u64>,
     ) -> Option<GuardFacts> {
@@ -194,7 +204,7 @@ impl Config {
     pub fn guard_facts_from(
         &self,
         snap: &aegis_core::model::TopologySnapshot,
-        proxy_reachable: bool,
+        proxy_reachable: Option<bool>,
     ) -> Option<GuardFacts> {
         let (present, egress) = aegis_core::guard::topology_inputs(snap);
         self.guard_facts(proxy_reachable, &present, egress)
@@ -546,6 +556,33 @@ known_free_ssids = ["MMi"]
         assert!(c.guard_gap().is_none(), "配齐了就不该有缺口");
     }
 
+    #[test]
+    fn control_addr_is_parsed_into_a_socket_addr() {
+        let c = load_str(&with(
+            "[proxy]\nmode = \"tun\"\ntun_luid = 7\ncontrol_addr = \"127.0.0.1:9090\"\n",
+        ))
+        .unwrap();
+        assert_eq!(
+            c.proxy.control_addr.map(|a| a.to_string()),
+            Some("127.0.0.1:9090".to_string())
+        );
+    }
+
+    /// ⚠ **写错的 control_addr 必须让配置加载失败**，不能静默变成"没配"。
+    /// 静默成"没配"的后果是断言 A 悄悄退化成 Unknown、守卫从此不再收紧，
+    /// 而日志上只看到"判不了"——没人会想到是自己打错了一个冒号。
+    #[test]
+    fn a_malformed_control_addr_is_a_load_error_not_a_silently_absent_one() {
+        let e = load_str(&with(
+            "[proxy]\nmode = \"tun\"\ntun_luid = 7\ncontrol_addr = \"127.0.0.1\"\n",
+        ))
+        .unwrap_err();
+        assert!(
+            e.to_string().contains("control_addr") || e.to_string().contains("proxy"),
+            "错误里该点名字段：{e}"
+        );
+    }
+
     /// ⚠ **`tun_luid = 0` 表示"还没填"，必须翻成 `None`**，与
     /// `TopologySnapshot::default_egress_luid` 是同一套约定。
     /// 若当成 `Some(0)`，守卫会永远判定"默认出口不是 TUN" → 持续收紧
@@ -570,14 +607,14 @@ known_free_ssids = ["MMi"]
     #[test]
     fn guard_facts_refuses_to_guess_the_mode() {
         let c = load_str(OK).unwrap();
-        assert!(c.guard_facts(true, &[1], Some(1)).is_none());
+        assert!(c.guard_facts(Some(true), &[1], Some(1)).is_none());
     }
 
     /// 端到端：配置 → 事实 → 判决。配齐且一切吻合 → 生效。
     #[test]
     fn a_fully_configured_tun_proxy_yields_an_effective_verdict() {
         let c = load_str(&with("[proxy]\nmode = \"tun\"\ntun_luid = 7\n")).unwrap();
-        let facts = c.guard_facts(true, &[1, 7], Some(7)).unwrap();
+        let facts = c.guard_facts(Some(true), &[1, 7], Some(7)).unwrap();
         assert_eq!(aegis_core::guard::evaluate(facts), GuardVerdict::Effective);
     }
 
@@ -585,7 +622,7 @@ known_free_ssids = ["MMi"]
     #[test]
     fn a_default_egress_that_is_not_the_tun_is_caught_by_the_config() {
         let c = load_str(&with("[proxy]\nmode = \"tun\"\ntun_luid = 7\n")).unwrap();
-        let facts = c.guard_facts(true, &[1, 7], Some(1)).unwrap();
+        let facts = c.guard_facts(Some(true), &[1, 7], Some(1)).unwrap();
         match aegis_core::guard::evaluate(facts) {
             GuardVerdict::Ineffective { failed, .. } => assert_eq!(
                 failed,
@@ -694,11 +731,11 @@ known_free_ssids = ["MMi"]
         let c = load_str(&with("[proxy]\nmode = \"tun\"\ntun_luid = 7\n")).unwrap();
 
         // TUN 在，且默认出口就是它
-        let ok = c.guard_facts_from(&snap(7, &[1, 7]), true).unwrap();
+        let ok = c.guard_facts_from(&snap(7, &[1, 7]), Some(true)).unwrap();
         assert_eq!(evaluate(ok), GuardVerdict::Effective);
 
         // TUN 还在，但默认出口跑到了别的卡上（那条最阴的静默失效）
-        let drifted = c.guard_facts_from(&snap(1, &[1, 7]), true).unwrap();
+        let drifted = c.guard_facts_from(&snap(1, &[1, 7]), Some(true)).unwrap();
         match evaluate(drifted) {
             GuardVerdict::Ineffective { failed, .. } => {
                 assert_eq!(failed, vec![Assertion::EgressIsBearer])
@@ -713,7 +750,7 @@ known_free_ssids = ["MMi"]
         use aegis_core::guard::evaluate;
 
         let c = load_str(&with("[proxy]\nmode = \"tun\"\ntun_luid = 7\n")).unwrap();
-        let f = c.guard_facts_from(&snap(0, &[1, 7]), true).unwrap();
+        let f = c.guard_facts_from(&snap(0, &[1, 7]), Some(true)).unwrap();
         assert!(
             !evaluate(f).is_effective(),
             "没有默认路由时不该判为规则生效"

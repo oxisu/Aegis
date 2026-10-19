@@ -81,7 +81,12 @@ impl fmt::Display for Assertion {
 pub struct GuardFacts {
     pub mode: ProxyMode,
     /// A：代理控制端口可连吗。
-    pub proxy_reachable: bool,
+    ///
+    /// ⚠ **`None` 表示判不了**，不是"可达"。
+    /// 历史上这里是个 `bool`，没接 SPI 时只能填 `true`——那是**假事实**：
+    /// 它让"代理进程已经死了"这一条永远通过，守卫形同只剩 B/C。
+    /// 判不了就必须是 `Unknown`：不清零也不累加，永不触发收紧。
+    pub proxy_reachable: Option<bool>,
     /// 配置里期望的承载体 LUID（`proxy.tun_luid`）。
     pub expected_bearer_luid: Option<u64>,
     /// B：上面那个 LUID 现在还在拓扑里吗。
@@ -149,7 +154,7 @@ pub fn topology_inputs(snap: &crate::model::TopologySnapshot) -> (Vec<u64>, Opti
 /// `expected` 为 `None` 时照样拿一个默认值去比对，凭空造出"承载体在"）。
 pub fn collect(
     mode: ProxyMode,
-    proxy_reachable: bool,
+    proxy_reachable: Option<bool>,
     expected_bearer_luid: Option<u64>,
     present_luids: &[u64],
     default_egress_luid: Option<u64>,
@@ -170,8 +175,12 @@ pub fn evaluate(facts: GuardFacts) -> GuardVerdict {
     let mut failed: Vec<Assertion> = Vec::new();
     let mut unknown: Vec<String> = Vec::new();
 
-    if !facts.proxy_reachable {
-        failed.push(Assertion::ProxyReachable);
+    match facts.proxy_reachable {
+        Some(true) => {},
+        Some(false) => failed.push(Assertion::ProxyReachable),
+        None => unknown.push(
+            "代理可达性判不了：未配置 proxy.control_addr，或适配器未实现 Op::Health".to_string(),
+        ),
     }
 
     match facts.mode {
@@ -362,7 +371,7 @@ mod tests {
     fn ok() -> GuardFacts {
         GuardFacts {
             mode: ProxyMode::Tun,
-            proxy_reachable: true,
+            proxy_reachable: Some(true),
             expected_bearer_luid: Some(0x600_8008_0000_0000),
             bearer_present: true,
             default_egress_luid: Some(0x600_8008_0000_0000),
@@ -427,8 +436,26 @@ mod tests {
     #[test]
     fn an_offline_machine_is_not_reported_as_effective() {
         let (present, egress) = topology_inputs(&snap(0, &[1, 7]));
-        let f = collect(ProxyMode::Tun, true, Some(7), &present, egress);
+        let f = collect(ProxyMode::Tun, Some(true), Some(7), &present, egress);
         assert!(!evaluate(f).is_effective());
+    }
+
+    /// ⚠ 断言 A 的核心：**判不了 ≠ 可达**。
+    /// 以前这里是个 `bool`，没接 SPI 时只能填 `true`——那等于让"代理进程
+    /// 已经死了"这条永远通过。现在必须是 `Unknown`（不清零、不累加、不收紧）。
+    #[test]
+    fn an_unknown_reachability_is_unknown_not_reachable() {
+        let f = GuardFacts {
+            proxy_reachable: None,
+            ..ok()
+        };
+        let v = evaluate(f);
+        assert!(!v.is_effective(), "判不了不能算生效");
+        assert!(
+            matches!(v, GuardVerdict::Unknown { .. }),
+            "判不了必须是 Unknown，不是 Ineffective：{v:?}"
+        );
+        assert!(v.reason().contains("代理可达性判不了"), "{}", v.reason());
     }
 
     // ── collect：派生量只算一次 ───────────────────────────────────────
@@ -437,7 +464,7 @@ mod tests {
     fn collect_marks_the_bearer_present_only_when_the_luid_is_in_the_topology() {
         let f = collect(
             ProxyMode::Tun,
-            true,
+            Some(true),
             Some(7),
             &[1, 7, 9],
             Some(7),
@@ -450,7 +477,7 @@ mod tests {
     /// 只报第一条会让运维以为只是网卡掉了、而路由没改——信息量就丢了。
     #[test]
     fn collect_marks_the_bearer_absent_when_its_luid_vanished() {
-        let f = collect(ProxyMode::Tun, true, Some(7), &[1, 9], Some(1));
+        let f = collect(ProxyMode::Tun, Some(true), Some(7), &[1, 9], Some(1));
         assert!(!f.bearer_present);
         assert_eq!(
             failed_of(&evaluate(f)),
@@ -462,7 +489,7 @@ mod tests {
     /// 完全没配好的情况下少报一条失败。
     #[test]
     fn collect_without_an_expected_luid_cannot_claim_presence() {
-        let f = collect(ProxyMode::Tun, true, None, &[1, 7], Some(1));
+        let f = collect(ProxyMode::Tun, Some(true), None, &[1, 7], Some(1));
         assert!(!f.bearer_present);
         assert!(!evaluate(f).is_effective(), "没配置就该是 Unknown");
     }
@@ -478,7 +505,7 @@ mod tests {
     #[test]
     fn an_unreachable_proxy_is_ineffective() {
         let f = GuardFacts {
-            proxy_reachable: false,
+            proxy_reachable: Some(false),
             ..ok()
         };
         let v = evaluate(f);
@@ -510,7 +537,7 @@ mod tests {
     #[test]
     fn every_failed_assertion_is_reported_not_just_the_first() {
         let f = GuardFacts {
-            proxy_reachable: false,
+            proxy_reachable: Some(false),
             bearer_present: false,
             default_egress_luid: Some(1),
             ..ok()
@@ -569,7 +596,7 @@ mod tests {
     #[test]
     fn a_definite_failure_outranks_an_unknown() {
         let f = GuardFacts {
-            proxy_reachable: false,
+            proxy_reachable: Some(false),
             expected_bearer_luid: None,
             ..ok()
         };
