@@ -1,7 +1,7 @@
-# 前端选型评估：Tauri 还是 Element Plus + Vue
+# 前端选型评估：Tauri（外壳）还是 Vue（界面）
 
-> 结论先说：**外壳选 Tauri v2，界面框架选 Vue 3 + Element Plus**。
-> 这两件事是**正交**的——"Element Plus + Vue"回答的是"界面用什么写"，
+> 结论先说：**外壳选 Tauri v2，界面选 Vue 3 + Tailwind 3 + Headless UI**。
+> 这两件事是**正交**的——"Vue + Tailwind"回答的是"界面用什么写"，
 > "Tauri"回答的是"这个界面跑在什么壳里"。原问题把它们当成了二选一，
 > 实际上可以、也应该两个都要。
 >
@@ -13,14 +13,31 @@
 
 | 维度 | 选择 | 理由 |
 |---|---|---|
-| 界面框架 | **Vue 3 + Element Plus** | 表格/表单/弹窗/Tabs/通知开箱即用，做仪表盘最快；中文文档与生态成熟 |
+| 界面 | **Vue 3 + TypeScript + Tailwind 3 + `@headlessui/vue` + `@heroicons/vue`** | 与既有项目（git-sync-hub → qzone-sync）同一套栈：设计令牌、组件类组织方式、主题机制可直接沿用 |
 | 桌面外壳 | **Tauri v2** | 后端本就是 Rust，**能直接 `use aegis_ipc`**，协议不可能漂移；体积小、无 Node 运行时 |
 | 通信方式 | 复用现有**命名管道**，GUI **不提权** | 不新增 localhost 端口，不新增攻击面 |
 | 前端语言 | TypeScript | 与 `Status` 文本协议的字段对齐要有类型兜底 |
 
 ⚠ 这条**修正了 `design-spec.md` §16 与 §21 第 4 项**原先写的
-"Tauri + React + Fluent UI v9"：框架那一层换成 Vue + Element Plus，
+"Tauri + React + Fluent UI v9"：界面那一层换成 Vue + Tailwind，
 外壳（Tauri）保持不变。
+
+### 0.1 为什么不用 Element Plus（2026-10-19 二次改定）
+
+中途曾定过 Element Plus，落地脚手架时改掉了。两条理由，第二条是决定性的：
+
+1. **视觉语言对不上**。既有项目用的是"设计令牌 + 原子类 + 少量组件类"
+   （`--accent` 令牌、`bg-surface-hover/60` 这类原子类、`.surface-card`
+   这种自研卡片类）。Element Plus 自带一套组件外观和 CSS 变量，
+   两套并存的结果是"表格是 Element 的，卡片是自研的"，接缝处看得出来。
+2. **⚠ 语义色会被绕开**。Aegis 有两组**不能写错**的语义色：绝缘等级
+   （`lv-*`）和守卫状态（`guard-*`）。它们的危险程度由令牌统一定义，
+   页面只能写 `text-guard-ineffective`。用 Element 的 `<el-tag type="danger">`
+   这类组件就等于把颜色决策交给组件库——"未生效"和"判不了"一旦同色，
+   人分不清"正在断网"和"只是能力缺口"。
+
+   把 `lv-*` / `guard-*` 注册进 Tailwind 色板就是为了**让写错的写法不存在**：
+   页面里写不出 `text-red-500`，只能从色板里挑。
 
 ---
 
@@ -53,7 +70,7 @@ cl.exe -nologo hw.c -Fe:hw.exe   →  编译 + 链接通过
 | 项 | 结果 | 怎么验的 |
 |---|---|---|
 | Node / npm | **v22.22.2 / 10.9.7** | `node -v` / `npm -v` |
-| npm 源可达 | ✅ `registry.npmjs.org` | `npm view` 取到 vue 3.5.44、element-plus 2.14.7、electron 44.9.0 |
+| npm 源可达 | ✅ `registry.npmjs.org` | 实际装上的：vue 3.5.44、vue-router 4.6.4、pinia 3.0.4、tailwindcss 3.4.19、`@headlessui/vue` 1.7.23、`@heroicons/vue` 2.2.0 |
 | MSVC 生成工具 | ✅ VC **14.44.35207**，`cl.exe`+`link.exe` 齐全 | `vswhere` + hello world 编译运行 |
 | Windows SDK | ✅ **10.0.26100.0**（Include/Lib 全在） | `ls .../Windows Kits/10/{Include,Lib}` |
 | WebView2 Runtime | ✅ **155.0.4283.62** 已装 | `ls .../Microsoft/EdgeWebView/Application` |
@@ -175,9 +192,20 @@ platform=win32  node=v22.22.2
 
    验收方式：把旧版 `aegisctl` 从 git 取回来编一遍，两边输出**逐字节 diff 为空**。
 
-2. **前端脚手架**（还不碰 Tauri）
-   `ui/`：Vite + Vue 3 + TypeScript + Element Plus，先用**假数据**把
-   仪表盘做出来，`npm run dev` 能看。
+2. ✅ **前端骨架**（已完成，不碰 Tauri）
+   `ui/`：Vite 6 + Vue 3 + TypeScript + Tailwind 3 + Headless UI + Pinia。
+
+   | 文件 | 作用 |
+   |---|---|
+   | `src/types.ts` | 与 `aegis-ipc` 的 `Status` **逐字段对应**；没有 IPC 字段的类型单独隔开并注明"不许自己造协议" |
+   | `src/data/mock.ts` | 假数据（三种场景）。⚠ 接真数据后**整个删掉**，不留开关 |
+   | `src/utils/format.ts` | 显示格式化。铁律与 `aegisctl` 同源：认不出的取值显示成 `**未知取值** x`，**不**回退成"正常" |
+   | `src/stores/status.ts` | 状态存储 |
+   | `src/layouts/` | 侧栏 + 顶栏 + **守卫横幅**（不可关闭） |
+   | `src/views/` | 总览 / 守卫 / 网卡与角色 / 审计 / 设置 |
+
+   五页骨架已成型，`vue-tsc --noEmit` 与 `vite build` 均通过。
+   主题沿用既有项目的 5 套（`aegis` 为默认），令牌与组件类同名同义。
 
 3. **接 Tauri**
    加 `@tauri-apps/cli` + Rust 侧 `tauri` + `aegis-ipc`，

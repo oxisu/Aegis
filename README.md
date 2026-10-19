@@ -129,9 +129,12 @@ Aegis 建立一张**独立于任何上层代理软件的 OS 级安全底座**：
 底座已经能跑，**缺的是一个让人看懂"现在什么状态"的界面**。
 选型结论与全部实测证据见 [`docs/FRONTEND-STACK.md`](docs/FRONTEND-STACK.md)。
 
-- **外壳 Tauri v2 + 界面 Vue 3 + Element Plus**——这两件事正交，不是二选一。
-  ⚠ 这条修正了设计文档原定的 React + Fluent UI v9：框架那层换成 Vue + Ele，
-  外壳不变。
+- **外壳 Tauri v2 + 界面 Vue 3 + Tailwind**——这两件事正交，不是二选一。
+  ⚠ 这条修正了设计文档原定的 React + Fluent UI v9：界面那层换成
+  Vue 3 + Tailwind（沿用既有项目 git-sync-hub → qzone-sync 的栈），外壳不变。
+- 界面骨架**已完成**：`ui/` 下 5 个页面（总览 / 守卫 / 网卡与角色 / 审计 / 设置）
+  + 5 套主题，目前跑在假数据上，`vue-tsc --noEmit` 与 `vite build` 均通过。
+  下一步是接 Tauri 外壳与真数据。
 - 选 Tauri 的决定性理由是**能直接 `use aegis_ipc`**：`PipeClient`、
   `Status::from_text`、`IpcToken`、帧编解码全是现成的，线协议不可能漂移。
   换成 Electron 就得在 JS 里把"握手 → 版本校验 → token 鉴权 → 请求 → 应答"

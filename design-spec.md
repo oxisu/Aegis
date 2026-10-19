@@ -483,16 +483,24 @@ sequenceDiagram
 - `notify` —— 监听配置变更、兜底同步。
 - `tokio` —— 异步调度。
 
-**前端：** 外壳用 **Tauri**（后端本就是 Rust，GUI 与引擎同语言、体积小、不打包 Chromium）；界面框架用 **Vue 3 + Element Plus**。
+**前端：** 外壳用 **Tauri**（后端本就是 Rust，GUI 与引擎同语言、体积小、不打包 Chromium）；
+界面用 **Vue 3 + TypeScript + Tailwind 3 + `@headlessui/vue`**（与既有项目同一套栈）。
 
 > ⚠ **2026-10-19 修正**：本节原写"Electron + 本地 Rust 服务"作为备选，
 > 而 §14 原写"Tauri + React + Fluent UI v9"。以实测为准改成
-> **Tauri（外壳）+ Vue 3 + Element Plus（框架）**，理由与全部实测证据见
+> **Tauri（外壳）+ Vue 3 + Tailwind（界面）**，理由与全部实测证据见
 > [`docs/FRONTEND-STACK.md`](docs/FRONTEND-STACK.md)：
 > ① Tauri 的硬前置（MSVC + SDK + WebView2）**本机全部实测满足**；
 > ② 选它的决定性理由是**能直接 `use aegis_ipc`**，线协议不可能漂移；
 > ③ 实测**浏览器 JS 打不开命名管道**，纯网页方案必须额外常驻桥进程 +
 > localhost 端口，已出局。GUI 只负责配置/日志/模式/告警。
+>
+> ⚠ **同日二次修正**：中途曾定过 **Element Plus**，落地脚手架时改掉了。
+> 决定性理由不是观感，是**语义色会被组件库绕开**：本项目的绝缘等级
+> （`lv-*`）与守卫状态（`guard-*`）两组色是"危险程度"的定义，
+> 用 `<el-tag type="danger">` 就等于把颜色决策交给组件库，
+> "未生效"与"判不了"一旦同色，人分不清"正在断网"和"只是能力缺口"。
+> 把这两组注册进 Tailwind 色板，是为了让 `text-red-500` 这种写法不存在。
 
 ---
 
@@ -545,8 +553,9 @@ sequenceDiagram
 **阶段 0 · 权限与骨架**
 - [x] GUI ↔ 服务的 named pipe 通道本身（显式 DACL + 一次性 token 鉴权）→ `aegis-ipc`
 - [ ] Windows Service 宿主 + 管理员自启动/提权逻辑（UAC / 服务安装）
-- [ ] GUI（**Tauri v2 + Vue 3 + Element Plus**，见 §21.5）↔ 服务通信**骨架**
-      ——通道已有，缺的是把 `aegisctl` 里那段会话流程抽成可复用的客户端
+- [x] GUI ↔ 服务通信的**客户端**（`aegisctl` 那段会话流程已抽成 `aegis_ipc::client`）
+- [ ] GUI（**Tauri v2 + Vue 3 + Tailwind**，见 §21.5）**外壳**——界面骨架已成型（5 页），
+      缺的是 Tauri 壳与真数据
 - [ ] 网络设置变更前的快照 + 退出还原机制（防断网残留）
 
 **阶段 1 · 感知 + Clash 接管（核心）**
@@ -719,8 +728,8 @@ Aegis 不碰 NAT、不碰代理链、不做转发。这样职责清晰，
 
 > ⚠ **2026-10-19 修正**：原推荐"Tauri + React + Fluent UI v9"以**复刻 HypoMux 观感**为目标。
 > 本项目当前阶段的目标是**最快做出一个能看懂状态的界面**，不是复刻观感，
-> 所以界面框架改为 **Vue 3 + Element Plus**（表格/表单/弹窗/Tabs/通知开箱即用）；
-> **外壳仍用 Tauri**，理由见 [`docs/FRONTEND-STACK.md`](docs/FRONTEND-STACK.md)。
+> 所以界面改为 **Vue 3 + Tailwind**（沿用既有项目 git-sync-hub → qzone-sync 的栈）；
+> **外壳用 Tauri**，理由见 [`docs/FRONTEND-STACK.md`](docs/FRONTEND-STACK.md)。
 > 若日后要严格复刻 Fluent 观感，再单独立项换组件库——那是纯前端替换，
 > 不动 Rust 侧，也不动 IPC。
 
@@ -740,8 +749,13 @@ Aegis 不碰 NAT、不碰代理链、不做转发。这样职责清晰，
 │ 设置     │  实时连接表（进程/目的/规则/速率/掐断）…            │
 └──────────┴───────────────────────────────────────────────┘
 ```
-- **主题**：浅色/深色切换（与 HypoMux 一致）。
-- **组件库**：Element Plus（Table / Form / Dialog / Tabs / Notification / Card）。
+- **主题**：5 套（`aegis` 为默认，另有 aurora / midnight / cyber / nothing），
+  沿用既有项目的令牌与组件类。**没有独立的浅色/深色模式**——
+  每套主题自带明暗，颜色全部由 `<html data-theme>` 决定。
+- **组件方式**：Tailwind 原子类 + 少量组件类（`.surface-card` / `.panel` /
+  `.btn-primary` / `.btn-danger` / `.input-field` / `.popover-panel`），
+  交互件用 `@headlessui/vue`。⚠ 语义色**只能**写 `lv-*` / `guard-*`，
+  写不出 `text-red-500` —— 见 §5 的二次修正。
   布局草图沿用上面的左侧导航 + 内容区；图表用轻量 SVG/Canvas 或 ECharts。
 - **实时性**：⚠ 现阶段 `REQ_STATUS` 是**请求/响应式**，先做**定时轮询**（1s 级）+ 节流渲染，
   不要一上来就上 ws 推送——推送要在服务端加事件通道，属于新增攻击面，留到真有性能问题再说。
@@ -1055,7 +1069,7 @@ Aegis 的审计规则、告警阈值、日志级别。
 1. **组件依赖图 + 时序图**（开机绝缘笼 → 拓扑指纹 → 角色放行 → 网口变动熔断）。
 2. **Rust 最小骨架**：Clash API + **WFP 动态会话绝缘笼 + 53 端口封锁** + **拓扑指纹(SHA-256)** + **`NotifyIpInterfaceChange` 网口熔断** + **Named Pipe 显式 DACL** + （可选）**Boot-Time 持久过滤器背板**。
 3. **规则集模板**：校园网纯国内白名单（`FINAL,REJECT` 收尾）/ 热点全规则 两套 YAML。
-4. **UI 原型**：**Tauri v2 + Vue 3 + Element Plus** 的仪表盘 + 角色分配控制台 + 实时连接表 + 每网卡遥测大屏（⚠ 2026-10-19 由 React + Fluent UI v9 改定，见 §21.5）。
+4. **UI**：**Tauri v2（外壳）+ Vue 3 + Tailwind（界面）** 的仪表盘 + 角色分配控制台 + 实时连接表 + 每网卡遥测大屏（⚠ 2026-10-19 由 React + Fluent UI v9 改定，见 §21.5）。**界面骨架已完成**（5 页，假数据），待接 Tauri 壳与真数据。
 5. **角色模型与 Clash/HypoMux 协同矩阵**：明确四角色下两程序的启停、TUN/系统代理、路由归属。
 6. **参考适配器 + fixture 契约测试**（§2A.4 ③）：先做 1 个参考适配器（建议 sing-box），把"适配"从形容词变成"这组 fixture 过没过"。
 
@@ -1076,10 +1090,11 @@ Aegis 的审计规则、告警阈值、日志级别。
 | 参考适配器 + 契约测试夹具 | ✅ | `aegis-orchestrator::reference` / `::contract`（§2A.4 ③） |
 | **下游规则失效兜底：运行时接线** | ✅ 步 1–5（步 5 剩一半） | `aegisd` + `aegis-ipc`；见 `docs/GUARD-WIRING.md` |
 | 规则集模板（校园网 / 热点两套 YAML） | ⬜ 未做 | §21 第 3 项 |
-| UI 原型 | ⬜ 未做（**选型已定，见 §21.5**） | §21 第 4 项 |
+| UI 界面骨架 | 🟨 **已做**（5 页 + 5 套主题，假数据；`vue-tsc` / `vite build` 通过） | `ui/` |
+| UI 接 Tauri 外壳 + 真数据 | ⬜ 未做（选型见 §21.5） | §21 第 4 项 |
 | **最小可运行链路** | ✅ | `aegisd` + `aegisctl`：配置 → IPC → 感知 → 裁决 → 干跑 → 审计 |
 
-### 21.5 ⚠ UI 原型的选型修正：不再默认 Tauri（2026-10-19 实测）
+### 21.5 ⚠ UI 选型修正（2026-10-19 实测，同日二次改定）
 
 §16 与本节第 4 项原本写的是 **Tauri + React + Fluent UI v9**。
 **以实测为准做了修正**，结论与证据在 [`docs/FRONTEND-STACK.md`](docs/FRONTEND-STACK.md)，要点：
@@ -1087,12 +1102,22 @@ Aegis 的审计规则、告警阈值、日志级别。
 - **Tauri 的硬前置在这台机器上是满足的**——MSVC 生成工具装在
   `D:\vs-buildtools`（VC 14.44），`cl.exe` / `link.exe` 齐全，
   编译链接运行实测通过。⚠ 这条修正了本机环境笔记里"VS Build Tools 装不上"的旧结论。
-- 但 Tauri 仍要求把**默认 Rust 工具链切成 msvc**，而本项目是 gnu 宿主
-  （`rust-toolchain.toml` 显式固定），切换等于全量重编且动摇现有基线。
-- 另一个实测：**浏览器 JS 打不开命名管道**，Node 可以。所以"纯网页"方案
-  必须额外引入一个常驻桥进程 + localhost 端口，反而比打包一个壳更糟。
-- **改定：Electron + Vue 3 + Element Plus**，非提权独立进程，
-  Node 主进程直连现有命名管道，不新增本地端口。
+- **不需要切换默认工具链**：`cargo +stable-x86_64-pc-windows-msvc` 加号指定即可，
+  实测编 `aegisd` 55s 通过，且不需要设 `INCLUDE` / `LIB`。
+  ⚠ 早期版本这里写过"要切默认工具链、代价太大"——那是错的，已更正。
+- **浏览器 JS 打不开命名管道**，Node 可以（实测）。所以"纯网页"方案
+  必须额外引入一个常驻桥进程 + localhost 端口，反而比打包一个壳更糟，已出局。
+  同理 Electron 也能连（Node 主进程），但它要**用 JS 重写一遍线协议**
+  （握手 → 版本校验 → token 鉴权 → 请求 → 应答），而这套流程里有两条
+  "写错了不报错、只会变弱"的纪律（握手必须在鉴权前；token 不对不许重试）。
+- **外壳定 Tauri v2**：Rust 侧能直接 `use aegis_ipc`，协议零漂移。
+- **界面同日二次改定**：曾定过 Element Plus，落地脚手架时换成
+  **Vue 3 + Tailwind + `@headlessui/vue`**。决定性理由是语义色
+  （`lv-*` / `guard-*`）不能被组件库绕过，详见 §5。
+
+> ⚠ 本节曾在两个版本里分别留过"Electron + Element Plus"和"不再默认 Tauri"
+> 的结论，与本文件 §5 / §14 及 `FRONTEND-STACK.md` 冲突。**以本节为准**：
+> Tauri v2 外壳 + Vue 3 + Tailwind 界面。
 
 ### 21.3 最小链路的启动顺序（不可调换）
 
