@@ -22,9 +22,15 @@ use crate::spi::{invoke_checked, Adapter};
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Input {
     /// `candidates` = Aegis 放行列表里认可的 TUN 名。
-    Tun { candidates: Vec<String> },
-    Egress { interface: String },
-    Fragment { profile: String },
+    Tun {
+        candidates: Vec<String>,
+    },
+    Egress {
+        interface: String,
+    },
+    Fragment {
+        profile: String,
+    },
     Health,
     Reload,
     Dns,
@@ -122,7 +128,10 @@ impl ContractReport {
             self.total()
         );
         for f in self.failures() {
-            s.push_str(&format!("\n  ✗ {}\n      期望 {}\n      实际 {}", f.name, f.want, f.got));
+            s.push_str(&format!(
+                "\n  ✗ {}\n      期望 {}\n      实际 {}",
+                f.name, f.want, f.got
+            ));
         }
         s
     }
@@ -153,7 +162,7 @@ fn matches_expect(got: &Result<Outcome, AdapterError>, expect: &Expect) -> bool 
         (Err(AdapterError::Failed { .. }), Expect::Failed) => true,
         (Err(AdapterError::InvariantViolation { invariant, .. }), Expect::Invariant(code)) => {
             invariant == code
-        }
+        },
         _ => false,
     }
 }
@@ -258,7 +267,9 @@ fn honest_cases(scenario: &Scenario, capability: Capability) -> Vec<HonestCase> 
                     candidates: scenario.tun_names.clone(),
                 },
                 match scenario.tun_names.first() {
-                    Some(first) => Expect::Outcome(Outcome::TunPresent { name: first.clone() }),
+                    Some(first) => Expect::Outcome(Outcome::TunPresent {
+                        name: first.clone(),
+                    }),
                     None => Expect::Outcome(Outcome::TunAbsent),
                 },
             )];
@@ -272,7 +283,7 @@ fn honest_cases(scenario: &Scenario, capability: Capability) -> Vec<HonestCase> 
                 ));
             }
             cases
-        }
+        },
 
         Capability::DefaultEgress => match &scenario.egress {
             Some(nic) => vec![
@@ -401,7 +412,10 @@ mod tests {
             .iter()
             .position(|c| *c == Capability::HealthProbe)
             .unwrap();
-        let rl = SUITE_ORDER.iter().position(|c| *c == Capability::Reload).unwrap();
+        let rl = SUITE_ORDER
+            .iter()
+            .position(|c| *c == Capability::Reload)
+            .unwrap();
         assert!(hp < rl);
     }
 
@@ -454,10 +468,9 @@ mod tests {
         );
         // 只有规则生效性说"没生效"
         match invoke_checked(&fresh, Op::RulesEffective).unwrap() {
-            Outcome::RulesIneffective { failed } => assert_eq!(
-                failed,
-                vec!["规则集加载为空（FINAL 走直连）".to_string()]
-            ),
+            Outcome::RulesIneffective { failed } => {
+                assert_eq!(failed, vec!["规则集加载为空（FINAL 走直连）".to_string()])
+            },
             other => panic!("期望 RulesIneffective，得到 {other:?}"),
         }
     }
@@ -543,8 +556,12 @@ mod tests {
     fn input_capability_matches_the_op_it_builds() {
         let inputs = [
             Input::Tun { candidates: vec![] },
-            Input::Egress { interface: "x".into() },
-            Input::Fragment { profile: "p".into() },
+            Input::Egress {
+                interface: "x".into(),
+            },
+            Input::Fragment {
+                profile: "p".into(),
+            },
             Input::Health,
             Input::Reload,
             Input::Dns,

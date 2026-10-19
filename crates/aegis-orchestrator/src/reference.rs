@@ -51,9 +51,13 @@ pub struct Scenario {
 pub enum RuleState {
     Effective,
     /// 没生效，并且说得出哪几条断言没过。
-    Ineffective { failed: Vec<String> },
+    Ineffective {
+        failed: Vec<String>,
+    },
     /// 自己也不知道。
-    Unknown { why: String },
+    Unknown {
+        why: String,
+    },
 }
 
 impl Scenario {
@@ -179,7 +183,7 @@ impl Adapter for ReferenceAdapter {
                 Ok(Outcome::Reloaded {
                     version: self.scenario.next_version.clone(),
                 })
-            }
+            },
             Op::Dns => self.dns(),
             Op::RulesEffective => Ok(match &self.scenario.rules {
                 RuleState::Effective => Outcome::RulesEffective,
@@ -239,13 +243,11 @@ impl ReferenceAdapter {
 
     fn dns(&self) -> Result<Outcome, AdapterError> {
         match &self.scenario.dns_owner {
-            Some(owner) if self.scenario.aegis_dns_lock => {
-                Err(AdapterError::InvariantViolation {
-                    capability: Capability::DnsOwnership,
-                    invariant: invariant::DNS_OWNERSHIP_CONFLICT,
-                    detail: format!("{owner} 与 Aegis 都要管 53，必然有一边静默失效"),
-                })
-            }
+            Some(owner) if self.scenario.aegis_dns_lock => Err(AdapterError::InvariantViolation {
+                capability: Capability::DnsOwnership,
+                invariant: invariant::DNS_OWNERSHIP_CONFLICT,
+                detail: format!("{owner} 与 Aegis 都要管 53，必然有一边静默失效"),
+            }),
             Some(owner) => Ok(Outcome::DnsOwned {
                 owner: owner.clone(),
             }),

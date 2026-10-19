@@ -107,7 +107,7 @@ impl Cursor<'_> {
                 let out = &self.buf[self.pos..e];
                 self.pos = e;
                 Ok(out)
-            }
+            },
             None => Err(DecodeError::Truncated {
                 need: n,
                 have: self.buf.len() - self.pos,
@@ -120,15 +120,21 @@ impl Cursor<'_> {
     }
 
     fn u16(&mut self) -> Result<u16, DecodeError> {
-        Ok(u16::from_le_bytes(self.take(2)?.try_into().expect("长度已检查")))
+        Ok(u16::from_le_bytes(
+            self.take(2)?.try_into().expect("长度已检查"),
+        ))
     }
 
     fn u32(&mut self) -> Result<u32, DecodeError> {
-        Ok(u32::from_le_bytes(self.take(4)?.try_into().expect("长度已检查")))
+        Ok(u32::from_le_bytes(
+            self.take(4)?.try_into().expect("长度已检查"),
+        ))
     }
 
     fn u64(&mut self) -> Result<u64, DecodeError> {
-        Ok(u64::from_le_bytes(self.take(8)?.try_into().expect("长度已检查")))
+        Ok(u64::from_le_bytes(
+            self.take(8)?.try_into().expect("长度已检查"),
+        ))
     }
 
     /// 长度前缀文本。长度本身也做了上界检查，防止一个恶意的巨大长度

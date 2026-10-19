@@ -61,12 +61,12 @@ pub enum Assertion {
 impl fmt::Display for Assertion {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let s = match self {
-        // ⚠ 这些是**检查项的名字**，会被拼进"未通过 [..] [..]"里。
-        // 别写成"承载体在"这种看上去像结论的说法——它会让
-        // "未生效：承载体在、默认出口指向承载体 断言失败"读成"承载体在（是好的）"。
-        Self::ProxyReachable => "代理可达",
-        Self::BearerPresent => "承载体存在",
-        Self::EgressIsBearer => "默认出口=承载体",
+            // ⚠ 这些是**检查项的名字**，会被拼进"未通过 [..] [..]"里。
+            // 别写成"承载体在"这种看上去像结论的说法——它会让
+            // "未生效：承载体在、默认出口指向承载体 断言失败"读成"承载体在（是好的）"。
+            Self::ProxyReachable => "代理可达",
+            Self::BearerPresent => "承载体存在",
+            Self::EgressIsBearer => "默认出口=承载体",
         };
         f.write_str(s)
     }
@@ -203,8 +203,9 @@ pub fn evaluate(facts: GuardFacts) -> GuardVerdict {
         // 系统代理模式下"该走代理"这件事写在系统代理开关里，
         // 而读它属于适配器 SPI —— 还没实现，所以**明确判不了**，
         // 不能顺手当成"生效"。
-        ProxyMode::SystemProxy => unknown
-            .push("系统代理模式下暂无可用断言（需要适配器 SPI 读代理开关）".to_string()),
+        ProxyMode::SystemProxy => {
+            unknown.push("系统代理模式下暂无可用断言（需要适配器 SPI 读代理开关）".to_string())
+        },
     }
 
     if !failed.is_empty() {
@@ -462,13 +463,7 @@ mod tests {
 
     #[test]
     fn collect_marks_the_bearer_present_only_when_the_luid_is_in_the_topology() {
-        let f = collect(
-            ProxyMode::Tun,
-            Some(true),
-            Some(7),
-            &[1, 7, 9],
-            Some(7),
-        );
+        let f = collect(ProxyMode::Tun, Some(true), Some(7), &[1, 7, 9], Some(7));
         assert!(f.bearer_present);
         assert_eq!(evaluate(f), GuardVerdict::Effective);
     }
@@ -624,7 +619,10 @@ mod tests {
                 assert!(reason.contains("2 项未通过"), "{reason}");
                 assert!(reason.contains("[承载体存在]"), "{reason}");
                 assert!(reason.contains("[默认出口=承载体]"), "{reason}");
-                assert!(!reason.contains("断言失败"), "别再用歧义的『断言失败』：{reason}");
+                assert!(
+                    !reason.contains("断言失败"),
+                    "别再用歧义的『断言失败』：{reason}"
+                );
             },
             other => panic!("期望 Ineffective，得到 {other:?}"),
         }
@@ -682,8 +680,11 @@ mod tests {
         for i in 0..3 {
             t.observe(&bad(), 1_000 + i, p);
         }
-        assert_eq!(t.observe(&bad(), 9_000, p), GuardAction::Nothing,
-                   "已收紧后再失败不该重复发收紧动作");
+        assert_eq!(
+            t.observe(&bad(), 9_000, p),
+            GuardAction::Nothing,
+            "已收紧后再失败不该重复发收紧动作"
+        );
     }
 
     // ── 冷却：收紧自动，放宽要等（模块头第 3 条）──────────────────────
@@ -702,7 +703,10 @@ mod tests {
         let p = GuardPolicy::default();
         let mut t = tightened(p);
         // 最后一次收紧发生在 1000+2 = 1002，冷却 30s → 31002 之前不放宽
-        assert_eq!(t.observe(&GuardVerdict::Effective, 3_000, p), GuardAction::Nothing);
+        assert_eq!(
+            t.observe(&GuardVerdict::Effective, 3_000, p),
+            GuardAction::Nothing
+        );
         assert!(t.is_tightened(), "冷却期内不能放宽");
     }
 
@@ -772,7 +776,10 @@ mod tests {
             }
         }
         assert_eq!(tightens, p.flap_limit_per_hour, "超过上限后不再自动收紧");
-        assert!(human_calls > 0, "超限后应当停在原地转人工，而不是继续自动开关");
+        assert!(
+            human_calls > 0,
+            "超限后应当停在原地转人工，而不是继续自动开关"
+        );
     }
 
     #[test]

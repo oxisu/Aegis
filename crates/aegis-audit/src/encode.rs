@@ -117,7 +117,7 @@ fn put_opt_str(out: &mut Vec<u8>, s: Option<&str>) {
         Some(v) => {
             out.push(1);
             put_str(out, v);
-        }
+        },
         None => out.push(0),
     }
 }
@@ -127,11 +127,11 @@ fn put_addr(out: &mut Vec<u8>, addr: SocketAddr) {
         IpAddr::V4(v4) => {
             out.push(4);
             out.extend_from_slice(&v4.octets());
-        }
+        },
         IpAddr::V6(v6) => {
             out.push(6);
             out.extend_from_slice(&v6.octets());
-        }
+        },
     }
     out.extend_from_slice(&addr.port().to_le_bytes());
 }

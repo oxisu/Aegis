@@ -29,7 +29,7 @@ use std::fs::{File, OpenOptions};
 use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
-use crate::chain::{link_hash, EvidenceChain, Hash, Link, HASH_LEN, GENESIS};
+use crate::chain::{link_hash, EvidenceChain, Hash, Link, GENESIS, HASH_LEN};
 use crate::decode::{decode, DecodeError};
 use crate::encode::canonical_bytes;
 use crate::event::AuditEvent;
@@ -400,11 +400,7 @@ pub fn scan(path: &Path, ctx: ReadCtx) -> Result<Scan, ReadError> {
     if &header[..LOG_MAGIC.len()] != LOG_MAGIC {
         return Err(ReadError::BadMagic);
     }
-    let version = u32::from_le_bytes(
-        header[LOG_MAGIC.len()..]
-            .try_into()
-            .expect("长度已检查"),
-    );
+    let version = u32::from_le_bytes(header[LOG_MAGIC.len()..].try_into().expect("长度已检查"));
     if version != LOG_VERSION {
         return Err(ReadError::UnsupportedVersion(version));
     }
@@ -550,7 +546,10 @@ mod tests {
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_nanos())
             .unwrap_or(0);
-        p.push(format!("aegis-audit-{tag}-{}-{nanos}.log", std::process::id()));
+        p.push(format!(
+            "aegis-audit-{tag}-{}-{nanos}.log",
+            std::process::id()
+        ));
         p
     }
 
@@ -741,7 +740,7 @@ mod tests {
 
         match read_records(&path) {
             Ok(records) => assert!(records.len() < 6, "截断后不该仍报 6 条"),
-            Err(ReadError::Corrupt { .. }) => {}
+            Err(ReadError::Corrupt { .. }) => {},
             Err(e) => panic!("截断应报损坏：{e}"),
         }
     }
@@ -827,8 +826,9 @@ mod tests {
 
         for cut in 1..=rec {
             std::fs::write(&path, &full[..full.len() - cut]).unwrap();
-            let log = AuditLog::open(&path)
-                .unwrap_or_else(|e| panic!("截断 {cut} 字节后重开失败（掉电不该让服务起不来）：{e}"));
+            let log = AuditLog::open(&path).unwrap_or_else(|e| {
+                panic!("截断 {cut} 字节后重开失败（掉电不该让服务起不来）：{e}")
+            });
             assert_eq!(log.len(), 5, "截断 {cut} 字节后应只剩 5 条完整记录");
         }
         let _ = five_len;
@@ -918,7 +918,8 @@ mod tests {
         log.append(&event(0)).unwrap();
         log.sync().unwrap();
 
-        let (log2, action2) = AuditLog::open_or_create(&path).expect("重启不该因为文件已存在而失败");
+        let (log2, action2) =
+            AuditLog::open_or_create(&path).expect("重启不该因为文件已存在而失败");
         assert_eq!(action2, OpenAction::Resumed { records: 1 });
         assert_eq!(log2.len(), 1, "计数必须接着走");
     }

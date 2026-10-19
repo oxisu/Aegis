@@ -45,7 +45,10 @@ fn main() {
     }
 
     println!("监听地址族：{}   时长：{seconds} 秒", family.label());
-    println!("去抖窗口：{} ms", ShockDebouncer::with_default_window().window_ms());
+    println!(
+        "去抖窗口：{} ms",
+        ShockDebouncer::with_default_window().window_ms()
+    );
     println!();
 
     let watcher = match InterfaceWatcher::register(family) {
@@ -53,7 +56,7 @@ fn main() {
         Err(e) => {
             eprintln!("[FATAL] 注册网口变动通知失败：{e}");
             std::process::exit(1);
-        }
+        },
     };
     println!("已注册。现在插拔网线 / 关开 Wi-Fi 就能看到反应。");
     println!("──────────────────────────────────────────────────────────────");
@@ -98,7 +101,14 @@ fn main() {
 
     println!("──────────────────────────────────────────────────────────────");
     println!("累计观测变动：{} 次", watcher.signal().total());
-    println!("末次绝缘状态：{}", if fuse.is_insulated() { "已绝缘" } else { "已放行" });
+    println!(
+        "末次绝缘状态：{}",
+        if fuse.is_insulated() {
+            "已绝缘"
+        } else {
+            "已放行"
+        }
+    );
     println!();
     println!("全程只读：没有下发任何 WFP 规则，没有修改任何系统状态。");
     println!();
@@ -114,7 +124,11 @@ fn main() {
         println!(
             "  {:<20} 响应={}  结构变化={}",
             k.label(),
-            if aegis_fuse::should_react(k) { "是" } else { "否" },
+            if aegis_fuse::should_react(k) {
+                "是"
+            } else {
+                "否"
+            },
             if k.is_structural() { "是" } else { "否" }
         );
     }

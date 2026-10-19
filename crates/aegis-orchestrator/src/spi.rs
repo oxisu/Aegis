@@ -254,7 +254,7 @@ fn verify_outcome(
                     "reload 报了 {version}，但健康检查仍报 {current} —— 这个 Reload 是假的"
                 ),
             }
-        }
+        },
         _ => DeclarationCheck::Honest(capability),
     }
 }
@@ -292,7 +292,9 @@ mod tests {
         }
         fn invoke(&self, op: Op<'_>) -> Result<Outcome, AdapterError> {
             match op {
-                Op::Dns => Ok(Outcome::Healthy { version: "1".into() }),
+                Op::Dns => Ok(Outcome::Healthy {
+                    version: "1".into(),
+                }),
                 _ => Ok(Outcome::DnsNotOwned),
             }
         }
@@ -426,9 +428,12 @@ mod tests {
     fn an_adapter_that_declares_but_returns_unsupported_is_lying() {
         let checks = audit_declaration(&Liar);
         assert_eq!(checks.len(), 1);
-        assert_eq!(checks[0], DeclarationCheck::Lie {
-            capability: Capability::Reload
-        });
+        assert_eq!(
+            checks[0],
+            DeclarationCheck::Lie {
+                capability: Capability::Reload
+            }
+        );
         assert!(!checks[0].is_honest());
     }
 
@@ -464,7 +469,10 @@ mod tests {
             .iter()
             .find(|c| c.capability() == Capability::Reload)
             .unwrap();
-        assert!(matches!(reload, DeclarationCheck::Broken { .. }), "{reload:?}");
+        assert!(
+            matches!(reload, DeclarationCheck::Broken { .. }),
+            "{reload:?}"
+        );
     }
 
     /// 把自检的副作用钉住：它会**真的** reload 一次，之后 Health 报新版本。
@@ -480,7 +488,9 @@ mod tests {
                 version: "2026.10.18-1".into()
             }
         );
-        assert!(audit_declaration(&a).iter().all(DeclarationCheck::is_honest));
+        assert!(audit_declaration(&a)
+            .iter()
+            .all(DeclarationCheck::is_honest));
         assert_eq!(
             invoke_checked(&a, Op::Health).unwrap(),
             Outcome::Healthy {

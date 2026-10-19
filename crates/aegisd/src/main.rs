@@ -59,17 +59,17 @@ use aegis_core::guard::{evaluate, GuardAction, GuardPolicy, GuardTracker, GuardV
 use aegis_core::role::{adjudicate_all, Confidence};
 use aegis_core::state::{insulation, State};
 use aegis_ipc::{
-    check_compat, encode_handshake, msg_type, IpcToken, PipeServer, Status, DENY_PREFIX,
-    GuardView, OK_PREFIX, REQ_APPLY, REQ_CONFIRM, REQ_PING, REQ_ROLLBACK, REQ_STATUS,
-    GUARD_EFFECTIVE, GUARD_INEFFECTIVE, GUARD_UNKNOWN,
+    check_compat, encode_handshake, msg_type, GuardView, IpcToken, PipeServer, Status, DENY_PREFIX,
+    GUARD_EFFECTIVE, GUARD_INEFFECTIVE, GUARD_UNKNOWN, OK_PREFIX, REQ_APPLY, REQ_CONFIRM, REQ_PING,
+    REQ_ROLLBACK, REQ_STATUS,
 };
 use aegis_sense::{default_egress, snapshot};
+use aegis_version as version;
 use aegis_wfp::{
     apply, cage_plan, install, invariants_violated, preflight, rollback, verify_with,
     Action as WfpAction, ApplyTicket, CagePolicy, FilterSpec, Phase, Session, CONFIRM_WINDOW_MS,
     MAX_RESTORE_ATTEMPTS,
 };
-use aegis_version as version;
 
 /// 退出码。**刻意各不相同**：运维看到码就知道卡在哪一步，
 /// 不用去翻日志猜。
@@ -130,11 +130,14 @@ fn main() {
         },
     };
     println!("  schema      : {}", config.meta.config_schema_version);
-    println!("  可信指纹    : {}", if config.topology.trusted_fingerprint.is_empty() {
-        "（空，首次开机）"
-    } else {
-        &config.topology.trusted_fingerprint
-    });
+    println!(
+        "  可信指纹    : {}",
+        if config.topology.trusted_fingerprint.is_empty() {
+            "（空，首次开机）"
+        } else {
+            &config.topology.trusted_fingerprint
+        }
+    );
     for w in &config.warnings {
         println!("  [WARN] {w}");
     }
@@ -167,7 +170,10 @@ fn main() {
         std::process::exit(exit::IPC);
     }
     println!("  管道      : {}", args.pipe);
-    println!("  token 文件 : {}（DACL: SY/BA 完全控制，AU 只读）", args.token_file.display());
+    println!(
+        "  token 文件 : {}（DACL: SY/BA 完全控制，AU 只读）",
+        args.token_file.display()
+    );
     println!("  ⚠ AU 仍可读 token（GUI 不提权，必须能读）。危险命令另有提权检查。");
 
     // ⚠ `PipeServer` 里握着一个原始 HANDLE，**不是 `Send`**，不能跨线程搬。
@@ -229,7 +235,10 @@ fn main() {
         },
     };
     println!("  物理网卡  : {} 张", snap.physical_interfaces().count());
-    println!("  参与指纹  : {} 张（{}）", snap.fingerprint_participants, snap.fingerprint_scope);
+    println!(
+        "  参与指纹  : {} 张（{}）",
+        snap.fingerprint_participants, snap.fingerprint_scope
+    );
     println!("  指纹      : {}", snap.fingerprint);
     match default_egress() {
         Ok(Some(r)) => println!(
@@ -281,11 +290,23 @@ fn main() {
     let findings = verify_with(&plan, &cage);
     let ok = !invariants_violated(&findings);
     println!("  规则条数  : {}", plan.len());
-    println!("  锁 53     : {} / 校园网严格 : {} / Boot 背板 : {}",
-        cage.dns_lock, cage.campus_strict, cage.boot_backbone);
-    println!("  静态自检  : {} 项，不变量{}", findings.len(), if ok { " OK" } else { " **违反**" });
+    println!(
+        "  锁 53     : {} / 校园网严格 : {} / Boot 背板 : {}",
+        cage.dns_lock, cage.campus_strict, cage.boot_backbone
+    );
+    println!(
+        "  静态自检  : {} 项，不变量{}",
+        findings.len(),
+        if ok { " OK" } else { " **违反**" }
+    );
     for f in &findings {
-        println!("      [{:?}/{}] {}: {}", f.severity, f.kind.name(), f.code, f.detail);
+        println!(
+            "      [{:?}/{}] {}: {}",
+            f.severity,
+            f.kind.name(),
+            f.code,
+            f.detail
+        );
     }
     // ⚠ 逐条打印。让人在**下发之前**就能看清要装的是什么——
     // "装了 10 条规则"这种数字没有任何判断价值，
@@ -329,7 +350,10 @@ fn main() {
         eprintln!("  [FATAL] 审计落盘失败：{e}");
         std::process::exit(exit::AUDIT);
     }
-    println!("  事件      : rule={:?} role={} pid={}", event.rule, event.role, event.pid);
+    println!(
+        "  事件      : rule={:?} role={} pid={}",
+        event.rule, event.role, event.pid
+    );
     println!("  链节 seq  : {}", link.seq);
     println!("  链头      : {}", aegis_audit::hex(&link.hash));
     println!("  落盘      : {}", audit_path.display());
@@ -403,8 +427,10 @@ fn main() {
             let log = args.data_dir.join("guard-observe.log");
             println!("  周期      : {} 秒", args.guard_interval_secs);
             match config.proxy.control_addr {
-                Some(a) => println!("  断言      : A 代理可达（探测 {a}，超时 800ms）/ \
-                                     B 承载体在 / C 默认出口=承载体"),
+                Some(a) => println!(
+                    "  断言      : A 代理可达（探测 {a}，超时 800ms）/ \
+                                     B 承载体在 / C 默认出口=承载体"
+                ),
                 None => println!(
                     "  断言      : B 承载体在 / C 默认出口=承载体\n\
                      \x20                 ⚠ 断言 A **判不了**：未配置 proxy.control_addr\n\
@@ -436,7 +462,10 @@ fn main() {
     if args.serve_secs == 0 {
         println!("--serve-secs 0：不等客户端，直接退出。");
     } else {
-        println!("等待 aegisctl 连接 {} 秒（--serve-secs 可调）…", args.serve_secs);
+        println!(
+            "等待 aegisctl 连接 {} 秒（--serve-secs 可调）…",
+            args.serve_secs
+        );
         println!("另开一个终端：");
         println!(
             "  cargo run -p aegisctl -- --token-file {} --pipe {}",
@@ -485,7 +514,7 @@ fn spawn_guard_observer(
             let line = if act {
                 observe_and_act(&cfg, &ticket, &mut tracker, &policy, ticks, &view, &audit)
             } else {
-                    let l = observe_once(&cfg, ticks, &mut streak, policy.failure_threshold);
+                let l = observe_once(&cfg, ticks, &mut streak, policy.failure_threshold);
                 // 观测模式也要更新状态：`aegisctl status` 里得能看到
                 // "守卫在看着，结论是什么"，否则和没启用分辨不出来。
                 publish(&view, &ticket, &audit, None, &l, None);
@@ -583,9 +612,9 @@ impl GuardEvent {
 
     fn reason(&self) -> &str {
         match self {
-            Self::Tightened { reason }
-            | Self::Relaxed { reason }
-            | Self::NeedsHuman { reason } => reason,
+            Self::Tightened { reason } | Self::Relaxed { reason } | Self::NeedsHuman { reason } => {
+                reason
+            },
         }
     }
 }
@@ -617,7 +646,11 @@ fn append_guard_audit(audit: &AuditSlot, event: GuardEvent) {
             GuardEvent::Relaxed { .. } => Action::Allow,
         },
     };
-    match log.append(&e).and_then(|_| log.flush()).and_then(|()| log.sync()) {
+    match log
+        .append(&e)
+        .and_then(|_| log.flush())
+        .and_then(|()| log.sync())
+    {
         Ok(()) => println!("  [审计] 已记录 {}", event.rule()),
         Err(err) => eprintln!("  [审计] ⚠ 写入失败（守卫动作已执行）：{err}"),
     }
@@ -777,7 +810,10 @@ fn restore_permits(ticket: &TicketSlot, tick: u64, verdict: &GuardVerdict) -> St
         None => format!("[守卫 #{tick}] ⚠ 该放宽，但没有票据 → 需人工下发"),
         Some(t) => {
             if !t.permits_suspended {
-                return format!("[守卫 #{tick}] {} → 放行本来就在，无需恢复", verdict_brief(verdict));
+                return format!(
+                    "[守卫 #{tick}] {} → 放行本来就在，无需恢复",
+                    verdict_brief(verdict)
+                );
             }
             t.request_restore_permits();
             format!(
@@ -868,8 +904,8 @@ fn format_observation(tick: u64, verdict: &GuardVerdict, streak: u32, threshold:
 /// 原样进日志，不能笼统归成"生效"或"判不了"——
 /// 采不到拓扑时**不能**当成"生效"（那等于放行）。
 fn collect_verdict(cfg: &Config, tick: u64) -> Result<GuardVerdict, String> {
-    let snap = snapshot()
-        .map_err(|e| format!("[守卫 #{tick}] 拓扑采集失败：{e} → Unknown，不动手"))?;
+    let snap =
+        snapshot().map_err(|e| format!("[守卫 #{tick}] 拓扑采集失败：{e} → Unknown，不动手"))?;
     let facts = cfg
         .guard_facts_from(&snap, assertion_a(cfg))
         .ok_or_else(|| format!("[守卫 #{tick}] 配置缺 proxy.mode，无法构造事实，跳过"))?;
@@ -1095,7 +1131,10 @@ fn do_apply(plan: &[FilterSpec], slot: &TicketSlot) -> String {
     // 而"不知道哪批 id 是哪次装的"在回滚时就是删错规则。
     if let Ok(g) = slot.lock() {
         if g.as_ref().is_some_and(|t| t.phase == Phase::Pending) {
-            return format!("{}已有一个待确认的下发，先 confirm 或 rollback。", DENY_PREFIX);
+            return format!(
+                "{}已有一个待确认的下发，先 confirm 或 rollback。",
+                DENY_PREFIX
+            );
         }
     }
 
@@ -1259,9 +1298,7 @@ fn watch(session: &Session, slot: &TicketSlot, plan: &[FilterSpec]) {
                             }
                         }
                         if gave_up {
-                            println!(
-                                "  [守卫] ⚠ 恢复放行失败 {tries} 次，停止重试，需人工：{e}"
-                            );
+                            println!("  [守卫] ⚠ 恢复放行失败 {tries} 次，停止重试，需人工：{e}");
                         } else {
                             println!("  [守卫] 恢复放行失败（第 {tries} 次）：{e}");
                         }
@@ -1402,7 +1439,10 @@ impl Args {
                 "--token-file" => token_file = args.next().map(PathBuf::from),
                 "--data-dir" => data_dir = args.next().map(PathBuf::from),
                 "--serve-secs" => {
-                    serve_secs = args.next().and_then(|v| v.parse().ok()).unwrap_or(serve_secs)
+                    serve_secs = args
+                        .next()
+                        .and_then(|v| v.parse().ok())
+                        .unwrap_or(serve_secs)
                 },
                 "--guard-interval-secs" => {
                     guard_interval_secs = args
@@ -1431,8 +1471,7 @@ impl Args {
                 std::process::exit(exit::CONFIG);
             },
         };
-        let token_file =
-            token_file.unwrap_or_else(|| data_dir.join("ipc.token"));
+        let token_file = token_file.unwrap_or_else(|| data_dir.join("ipc.token"));
 
         Self {
             config,
@@ -1450,7 +1489,10 @@ fn print_usage() {
     println!("用法：aegisd --config <配置文件> [选项]");
     println!();
     println!("  --config <path>      配置文件（**必填**，读不到就退出）");
-    println!("  --pipe <name>        IPC 管道名（默认 {}，裸名会补成 \\\\.\\pipe\\<name>）", aegis_ipc::PIPE_NAME);
+    println!(
+        "  --pipe <name>        IPC 管道名（默认 {}，裸名会补成 \\\\.\\pipe\\<name>）",
+        aegis_ipc::PIPE_NAME
+    );
     println!("  --token-file <path>  IPC token 落盘路径（默认 <data-dir>/ipc.token）");
     println!("  --data-dir <dir>     运行数据目录（默认 .aegis-run）");
     println!("  --serve-secs <n>     IPC 服务时长（默认 30，0 = 启动完就退出）");
@@ -1458,9 +1500,7 @@ fn print_usage() {
         "  --guard-interval-secs <n>  守卫观测周期（默认 {}，0 = 关闭）",
         DEFAULT_GUARD_INTERVAL_SECS
     );
-    println!(
-        "  --guard-act              守卫**真的动手**（默认只观测，见下）"
-    );
+    println!("  --guard-act              守卫**真的动手**（默认只观测，见下）");
     println!();
     println!("守卫默认处于**只观测**形态：只判『下游规则生效吗』并记日志，");
     println!("不会收紧也不会放宽。加 --guard-act 之后 Tighten 才会真的撤掉放行");
@@ -1493,11 +1533,7 @@ mod tests {
     fn the_streak_rule_matches_the_guard_tracker() {
         assert_eq!(next_streak(&GuardVerdict::Effective, 5), 0, "好一次就清零");
         assert_eq!(next_streak(&ineffective("x"), 2), 3, "失败累加");
-        assert_eq!(
-            next_streak(&unknown("y"), 2),
-            2,
-            "⚠ 判不了既不清零也不累加"
-        );
+        assert_eq!(next_streak(&unknown("y"), 2), 2, "⚠ 判不了既不清零也不累加");
     }
 
     #[test]
@@ -1566,8 +1602,7 @@ mod tests {
     #[test]
     fn tightening_a_committed_ticket_only_suspends_the_permits() {
         let slot = empty_slot();
-        let mut t =
-            ApplyTicket::pending(now_ms(), CONFIRM_WINDOW_MS, vec![4, 5, 6], vec![4, 5]);
+        let mut t = ApplyTicket::pending(now_ms(), CONFIRM_WINDOW_MS, vec![4, 5, 6], vec![4, 5]);
         t.confirm(now_ms()).expect("窗口内确认应成功");
         *slot.lock().unwrap() = Some(t);
 
@@ -1586,8 +1621,12 @@ mod tests {
     #[test]
     fn tightening_twice_does_not_delete_twice() {
         let slot = empty_slot();
-        *slot.lock().unwrap() =
-            Some(ApplyTicket::pending(now_ms(), CONFIRM_WINDOW_MS, vec![4, 5], vec![4]));
+        *slot.lock().unwrap() = Some(ApplyTicket::pending(
+            now_ms(),
+            CONFIRM_WINDOW_MS,
+            vec![4, 5],
+            vec![4],
+        ));
         assert!(suspend_permits(&slot, 1, &ineffective("x")).contains("已收紧"));
 
         // 模拟看门狗执行完：清空 permit_ids 并置 suspended
@@ -1608,8 +1647,12 @@ mod tests {
     #[test]
     fn tightening_refuses_when_the_ticket_has_no_permit_ids() {
         let slot = empty_slot();
-        *slot.lock().unwrap() =
-            Some(ApplyTicket::pending(now_ms(), CONFIRM_WINDOW_MS, vec![7], vec![]));
+        *slot.lock().unwrap() = Some(ApplyTicket::pending(
+            now_ms(),
+            CONFIRM_WINDOW_MS,
+            vec![7],
+            vec![],
+        ));
         let s = suspend_permits(&slot, 1, &ineffective("x"));
         assert!(s.contains("没有放行 id"), "{s}");
         assert!(!slot.lock().unwrap().as_ref().unwrap().suspend_requested);
@@ -1653,8 +1696,12 @@ mod tests {
     #[test]
     fn restoring_when_the_permits_are_already_there_is_a_no_op() {
         let slot = empty_slot();
-        *slot.lock().unwrap() =
-            Some(ApplyTicket::pending(now_ms(), CONFIRM_WINDOW_MS, vec![4, 5], vec![4]));
+        *slot.lock().unwrap() = Some(ApplyTicket::pending(
+            now_ms(),
+            CONFIRM_WINDOW_MS,
+            vec![4, 5],
+            vec![4],
+        ));
         let s = restore_permits(&slot, 1, &GuardVerdict::Effective);
         assert!(s.contains("无需恢复"), "{s}");
         assert!(!slot.lock().unwrap().as_ref().unwrap().restore_requested);
@@ -1691,8 +1738,12 @@ mod tests {
     #[test]
     fn restore_retry_stays_silent_when_the_permits_are_installed() {
         let slot = empty_slot();
-        *slot.lock().unwrap() =
-            Some(ApplyTicket::pending(now_ms(), CONFIRM_WINDOW_MS, vec![4], vec![4]));
+        *slot.lock().unwrap() = Some(ApplyTicket::pending(
+            now_ms(),
+            CONFIRM_WINDOW_MS,
+            vec![4],
+            vec![4],
+        ));
         assert!(retry_restore(&slot, 1).is_none());
     }
 
@@ -1780,7 +1831,14 @@ mod tests {
         let (audit, path) = temp_audit_with_path();
 
         let before = audit.lock().unwrap().len();
-        publish(&view, &ticket, &audit, Some(&GuardVerdict::Effective), "生效", None);
+        publish(
+            &view,
+            &ticket,
+            &audit,
+            Some(&GuardVerdict::Effective),
+            "生效",
+            None,
+        );
         assert_eq!(audit.lock().unwrap().len(), before, "常态不该写审计");
 
         publish(
@@ -1802,7 +1860,9 @@ mod tests {
         aegis_audit::verify(&events, &links).expect("链必须完整");
         let last = events.last().unwrap();
         assert!(
-            last.rule.as_deref().is_some_and(|r| r.starts_with("GUARD:TIGHTEN")),
+            last.rule
+                .as_deref()
+                .is_some_and(|r| r.starts_with("GUARD:TIGHTEN")),
             "守卫事件要带 GUARD: 前缀，导出证据包时才过滤得掉：{last:?}"
         );
     }
@@ -2001,7 +2061,10 @@ mod tests {
         ));
         let out = do_confirm(&slot);
         assert!(out.starts_with(OK_PREFIX), "{out}");
-        assert_eq!(slot.lock().unwrap().as_ref().unwrap().phase, Phase::Committed);
+        assert_eq!(
+            slot.lock().unwrap().as_ref().unwrap().phase,
+            Phase::Committed
+        );
     }
 
     /// 晚了就确认不了——否则"超时自动回滚 → 再确认一次 → 又装回去"，
@@ -2019,11 +2082,20 @@ mod tests {
     #[test]
     fn rollback_of_a_pending_ticket_requests_an_abort() {
         let slot = empty_slot();
-        *slot.lock().unwrap() =
-            Some(ApplyTicket::pending(now_ms(), CONFIRM_WINDOW_MS, vec![3], vec![3]));
+        *slot.lock().unwrap() = Some(ApplyTicket::pending(
+            now_ms(),
+            CONFIRM_WINDOW_MS,
+            vec![3],
+            vec![3],
+        ));
         let out = do_rollback(&slot);
         assert!(out.starts_with(OK_PREFIX), "{out}");
-        assert!(slot.lock().unwrap().as_ref().unwrap().must_roll_back(now_ms()));
+        assert!(slot
+            .lock()
+            .unwrap()
+            .as_ref()
+            .unwrap()
+            .must_roll_back(now_ms()));
     }
 
     /// 已确认的规则也得能拆——这是兜底手册的命脉。
@@ -2037,7 +2109,11 @@ mod tests {
         let out = do_rollback(&slot);
         assert!(out.starts_with(OK_PREFIX), "{out}");
         assert!(
-            slot.lock().unwrap().as_ref().unwrap().must_roll_back(now_ms()),
+            slot.lock()
+                .unwrap()
+                .as_ref()
+                .unwrap()
+                .must_roll_back(now_ms()),
             "已确认的也要能被强拆"
         );
     }
@@ -2065,8 +2141,12 @@ mod tests {
     #[test]
     fn a_second_apply_is_refused_while_one_is_pending() {
         let slot = empty_slot();
-        *slot.lock().unwrap() =
-            Some(ApplyTicket::pending(now_ms(), CONFIRM_WINDOW_MS, vec![9], vec![9]));
+        *slot.lock().unwrap() = Some(ApplyTicket::pending(
+            now_ms(),
+            CONFIRM_WINDOW_MS,
+            vec![9],
+            vec![9],
+        ));
         let out = do_apply(&boot_plan(), &slot);
         assert!(out.starts_with(DENY_PREFIX), "{out}");
         assert!(out.contains("待确认"), "{out}");

@@ -39,11 +39,11 @@ impl IpcToken {
     /// 从系统随机数源生成一个新 token。
     pub fn generate() -> Result<Self, TokenError> {
         let mut buf = [0u8; TOKEN_BYTES];
-        let status = unsafe {
-            BCryptGenRandom(None, &mut buf, BCRYPT_USE_SYSTEM_PREFERRED_RNG)
-        };
+        let status = unsafe { BCryptGenRandom(None, &mut buf, BCRYPT_USE_SYSTEM_PREFERRED_RNG) };
         if status.0 != 0 {
-            return Err(TokenError { status: status.0 as u32 });
+            return Err(TokenError {
+                status: status.0 as u32,
+            });
         }
         Ok(Self(buf))
     }
@@ -151,7 +151,9 @@ mod tests {
         let t = IpcToken::generate().unwrap();
         let hex = t.to_hex();
         assert_eq!(hex.len(), TOKEN_HEX_LEN);
-        assert!(hex.chars().all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()));
+        assert!(hex
+            .chars()
+            .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()));
         let back = IpcToken::from_hex(&hex).expect("自己编的码必须能解回来");
         assert_eq!(back.as_bytes(), t.as_bytes());
         assert!(t.verify_hex(&hex));
@@ -241,7 +243,10 @@ mod tests {
 
     #[test]
     fn hex_decode_matches_known_values() {
-        assert_eq!(hex_decode("000f10ff").unwrap(), vec![0x00, 0x0f, 0x10, 0xff]);
+        assert_eq!(
+            hex_decode("000f10ff").unwrap(),
+            vec![0x00, 0x0f, 0x10, 0xff]
+        );
         assert_eq!(hex_decode("").unwrap(), Vec::<u8>::new());
         assert!(hex_decode("0g").is_none());
     }

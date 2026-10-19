@@ -20,7 +20,10 @@ use aegis_orchestrator::{
 };
 
 fn main() {
-    println!("Aegis 适配器 SPI 干跑 —— {}", aegis_orchestrator::full_version());
+    println!(
+        "Aegis 适配器 SPI 干跑 —— {}",
+        aegis_orchestrator::full_version()
+    );
     println!("全程不碰系统：不启进程、不改路由表、不提权。\n");
 
     let scenario = Scenario::sample();
@@ -56,11 +59,7 @@ fn main() {
     println!("2. 契约测试（§2A.4 ③：适配 = 这组 fixture 过没过）");
     let report: ContractReport = check(&adapter, &scenario);
     for r in &report.results {
-        println!(
-            "   {} {}",
-            if r.pass { "✓" } else { "✗" },
-            r.name
-        );
+        println!("   {} {}", if r.pass { "✓" } else { "✗" }, r.name);
     }
     println!("   {}", report.summary().lines().next().unwrap_or(""));
     println!();
@@ -73,10 +72,10 @@ fn main() {
             DeclarationCheck::Lie { capability } => format!("撒谎！    {}", capability.tag()),
             DeclarationCheck::Broken { capability, reason } => {
                 format!("做不了    {} —— {reason}", capability.tag())
-            }
+            },
             DeclarationCheck::Unverifiable { capability, reason } => {
                 format!("无法自检  {} —— {reason}", capability.tag())
-            }
+            },
         };
         println!("   {verdict}");
     }
@@ -89,14 +88,26 @@ fn main() {
     let candidates = ["sing-box-tun".to_string(), "utun7".to_string()];
     println!(
         "   → {:?}",
-        invoke_checked(&adapter, Op::TunPresent { candidates: &candidates }).unwrap()
+        invoke_checked(
+            &adapter,
+            Op::TunPresent {
+                candidates: &candidates
+            }
+        )
+        .unwrap()
     );
     println!();
 
     // ── 5. TUN 起来了但没被放行：必须报错，不能静默说"没有" ───────────
     println!("5. 问 TUN：本机有 TUN 起来了，但没一张在放行列表里");
     let candidates = [UNPERMITTED_TUN.to_string()];
-    let e = invoke_checked(&adapter, Op::TunPresent { candidates: &candidates }).unwrap_err();
+    let e = invoke_checked(
+        &adapter,
+        Op::TunPresent {
+            candidates: &candidates,
+        },
+    )
+    .unwrap_err();
     println!("   码   {} —— {}", e.code(), e);
     println!("   处置 {}", e.disposition());
     println!();
@@ -108,10 +119,13 @@ fn main() {
         Outcome::Fragment { text, notes } => {
             println!("   片段 {} 字节，注解 {} 条", text.len(), notes.len());
             print!("   内容：{}", text.replace('\n', "\n         "));
-        }
+        },
         other => println!("   {other:?}"),
     }
-    println!("   参考实现产出的是同一段文本：{} 字节", fragment_text("campus").len());
+    println!(
+        "   参考实现产出的是同一段文本：{} 字节",
+        fragment_text("campus").len()
+    );
     println!();
 
     // ── 7. 故障一：撒谎的适配器 ───────────────────────────────────────
@@ -131,10 +145,17 @@ fn main() {
     // ── 9. 故障三：契约全绿，但能力不够 ───────────────────────────────
     println!("9. 故障三 —— 诚实但能力不够（最阴的一种）");
     let mut partial = ReferenceAdapter::new("半吊子", scenario.clone());
-    partial.declare(&[Capability::TunInterfacePresent, Capability::ConfigFragmentGenerate]);
+    partial.declare(&[
+        Capability::TunInterfacePresent,
+        Capability::ConfigFragmentGenerate,
+    ]);
     let partial_matrix = matrix(&partial);
     let partial_report = check(&partial, &scenario);
-    println!("   契约：{}/{} 通过（一条都没红）", partial_report.passed_count(), partial_report.total());
+    println!(
+        "   契约：{}/{} 通过（一条都没红）",
+        partial_report.passed_count(),
+        partial_report.total()
+    );
     println!(
         "   矩阵：Fail-Closed 缺口 = {:?}",
         partial_matrix
@@ -143,7 +164,14 @@ fn main() {
             .map(|c| c.tag())
             .collect::<Vec<_>>()
     );
-    println!("   出口可用：{}", if partial_matrix.usable() { "是" } else { "否 ← 契约红了才怪" });
+    println!(
+        "   出口可用：{}",
+        if partial_matrix.usable() {
+            "是"
+        } else {
+            "否 ← 契约红了才怪"
+        }
+    );
     println!();
 
     println!("结论：契约过 ≠ 能用。契约验的是「诚不诚实」，矩阵验的是「够不够」。");
@@ -179,7 +207,9 @@ impl Adapter for Confused {
     }
     fn invoke(&self, op: Op<'_>) -> Result<Outcome, AdapterError> {
         match op {
-            Op::Dns => Ok(Outcome::Healthy { version: "1".into() }),
+            Op::Dns => Ok(Outcome::Healthy {
+                version: "1".into(),
+            }),
             _ => ReferenceAdapter::new("inner", Scenario::sample()).invoke(op),
         }
     }

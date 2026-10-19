@@ -138,7 +138,10 @@ mod tests {
     #[test]
     fn pipe_sddl_grants_access_to_standard_users() {
         assert!(PIPE_SDDL.starts_with("D:"), "{PIPE_SDDL}");
-        assert!(PIPE_SDDL.contains("(A;;GRGW;;;AU)"), "标准用户必须能读写：{PIPE_SDDL}");
+        assert!(
+            PIPE_SDDL.contains("(A;;GRGW;;;AU)"),
+            "标准用户必须能读写：{PIPE_SDDL}"
+        );
         assert!(PIPE_SDDL.contains("(A;;GA;;;SY)"), "服务自己是 SYSTEM");
     }
 
@@ -154,7 +157,10 @@ mod tests {
     /// token 文件本身不能被标准用户改写，否则门闩就形同虚设。
     #[test]
     fn token_file_sddl_is_read_only_for_standard_users() {
-        assert!(TOKEN_FILE_SDDL.contains("(A;;GR;;;AU)"), "{TOKEN_FILE_SDDL}");
+        assert!(
+            TOKEN_FILE_SDDL.contains("(A;;GR;;;AU)"),
+            "{TOKEN_FILE_SDDL}"
+        );
         assert!(
             !TOKEN_FILE_SDDL.contains("(A;;GRGW;;;AU)"),
             "token 文件不该让 AU 可写：{TOKEN_FILE_SDDL}"

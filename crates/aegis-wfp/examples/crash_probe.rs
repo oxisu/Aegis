@@ -86,7 +86,11 @@ fn main() {
             return;
         },
     };
-    println!("已装      ：{} 条，filterId={:?}", receipt.len(), receipt.filter_ids);
+    println!(
+        "已装      ：{} 条，filterId={:?}",
+        receipt.len(),
+        receipt.filter_ids
+    );
     println!("装之后    ：{}", word(reachable(ip)));
     if reachable(ip) {
         println!("[FATAL] 装了却没拦住 —— 后面的崩溃测试没有意义。");
@@ -121,5 +125,9 @@ fn reachable(ip: Ipv4Addr) -> bool {
 }
 
 fn word(ok: bool) -> &'static str {
-    if ok { "通" } else { "断" }
+    if ok {
+        "通"
+    } else {
+        "断"
+    }
 }

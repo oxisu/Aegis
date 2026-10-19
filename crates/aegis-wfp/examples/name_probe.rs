@@ -71,8 +71,14 @@ fn act_one() {
     println!("  {CONTROL} → {} 个 IP：{:?}", control.len(), control);
     println!();
 
-    println!("  基线：{TARGET}:{PORT} {}", word(reachable_host(TARGET, PORT)));
-    println!("       {CONTROL}:{PORT} {}", word(reachable_host(CONTROL, PORT)));
+    println!(
+        "  基线：{TARGET}:{PORT} {}",
+        word(reachable_host(TARGET, PORT))
+    );
+    println!(
+        "       {CONTROL}:{PORT} {}",
+        word(reachable_host(CONTROL, PORT))
+    );
     println!();
 
     let plan: Vec<FilterSpec> = targets
@@ -113,7 +119,11 @@ fn act_one() {
     println!(
         "  {} 第一幕：按 IP 集合拦{}",
         if ok { "✅" } else { "❌" },
-        if ok { "可行" } else { "不对，看上面打叉的项" }
+        if ok {
+            "可行"
+        } else {
+            "不对，看上面打叉的项"
+        }
     );
     if ok {
         println!();
@@ -140,7 +150,10 @@ fn act_two() {
             return;
         },
     };
-    println!("  基线：{TARGET}({ip}):{PORT} {}", word(reachable(ip, PORT)));
+    println!(
+        "  基线：{TARGET}({ip}):{PORT} {}",
+        word(reachable(ip, PORT))
+    );
 
     let spec = FilterSpec {
         name: "按名字拦·探针",

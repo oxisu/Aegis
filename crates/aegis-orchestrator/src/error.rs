@@ -85,7 +85,7 @@ impl AdapterError {
                 } else {
                     format!("换适配器，或接受降级：{}", f.note())
                 }
-            }
+            },
             Self::Failed { capability, .. } => {
                 let f = capability.fallback();
                 if f.is_fail_closed() {
@@ -93,16 +93,16 @@ impl AdapterError {
                 } else {
                     format!("声明了该能力却失败，按降级处置：{}", f.note())
                 }
-            }
+            },
             Self::InvariantViolation {
                 invariant, detail, ..
             } => match *invariant {
                 invariant::TUN_NOT_PERMITTED => {
                     format!("把该 TUN 加入放行列表，否则流量会被默认拒绝吃掉：{detail}")
-                }
+                },
                 invariant::DNS_OWNERSHIP_CONFLICT => {
                     format!("确定唯一的 53 所有者，两边都管必然有一边静默失效：{detail}")
-                }
+                },
                 _ => format!("指出冲突的具体不变量，不改就拒绝下发：{detail}"),
             },
         }
@@ -118,10 +118,12 @@ impl fmt::Display for AdapterError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Unsupported(c) => write!(f, "[{}] 适配器不支持 {}", c.tag(), c.description()),
-            Self::Failed {
-                capability,
-                reason,
-            } => write!(f, "[{}] 适配器执行 {} 失败：{reason}", self.code(), capability.tag()),
+            Self::Failed { capability, reason } => write!(
+                f,
+                "[{}] 适配器执行 {} 失败：{reason}",
+                self.code(),
+                capability.tag()
+            ),
             Self::InvariantViolation {
                 capability,
                 invariant,

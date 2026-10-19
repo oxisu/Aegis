@@ -108,7 +108,10 @@ fn main() {
 
     // ── 收尾复核 ───────────────────────────────────────────────────────
     let restored = reachable(ip);
-    println!("收尾后      : {}   （期望：通 —— 规则都拆干净了）", w(restored));
+    println!(
+        "收尾后      : {}   （期望：通 —— 规则都拆干净了）",
+        w(restored)
+    );
     println!();
 
     println!("─── 结论 ───");
@@ -165,7 +168,11 @@ fn run(title: &str, layer: Layer, luid: u64, ip: Ipv4Addr, expect: &str) -> OneR
             return OneRun { blocked: false };
         },
     };
-    println!("  已装 {} 条（filterId={:?}）", receipt.len(), receipt.filter_ids);
+    println!(
+        "  已装 {} 条（filterId={:?}）",
+        receipt.len(),
+        receipt.filter_ids
+    );
 
     // ⚠ `w()` 收的是"能不能通"，不是"有没有被拦"。传错一个布尔量，
     // 整张表就是反的——而反过来的表会让人得出完全相反的结论。
@@ -198,5 +205,9 @@ fn reachable(ip: Ipv4Addr) -> bool {
 }
 
 fn w(ok: bool) -> &'static str {
-    if ok { "通" } else { "断" }
+    if ok {
+        "通"
+    } else {
+        "断"
+    }
 }

@@ -845,7 +845,11 @@ pub fn verify_policy(plan: &[FilterSpec], policy: &CagePolicy) -> Vec<Finding> {
     }
 
     // 声明校园网严格，就得真有广播泄密封锁
-    if policy.campus_strict && !PORTS_BROADCAST_LEAK.iter().all(|p| plan.iter().any(blocks_port(*p))) {
+    if policy.campus_strict
+        && !PORTS_BROADCAST_LEAK
+            .iter()
+            .all(|p| plan.iter().any(blocks_port(*p)))
+    {
         let missing: Vec<String> = PORTS_BROADCAST_LEAK
             .iter()
             .filter(|p| !plan.iter().any(blocks_port(**p)))
@@ -1636,10 +1640,7 @@ mod tests {
             "抽掉 53 封锁必须被抓：{f:?}"
         );
         // 注意：光靠 verify() 抓不到这个 —— 计划照样自洽、照样"安全"
-        assert!(
-            is_safe(&plan),
-            "这正是 verify() 的盲区：计划没有自锁死问题"
-        );
+        assert!(is_safe(&plan), "这正是 verify() 的盲区：计划没有自锁死问题");
     }
 
     /// 广播封锁缺失同理。
@@ -1658,8 +1659,7 @@ mod tests {
         let plan: Vec<FilterSpec> = cage_plan(policy)
             .into_iter()
             .filter(|f| {
-                !(f.action == Action::Block
-                    && f.conditions.contains(&Condition::RemotePort(5353)))
+                !(f.action == Action::Block && f.conditions.contains(&Condition::RemotePort(5353)))
             })
             .collect();
         let f = verify_policy(&plan, &policy);
@@ -1668,9 +1668,21 @@ mod tests {
             .find(|x| x.code == "POLICY_BROADCAST_LOCK_NOT_HONORED")
             .expect("抽掉 5353 封锁必须被抓");
         assert!(hit.is_invariant());
-        assert!(hit.detail.contains("5353"), "必须点名缺的那个端口：{}", hit.detail);
-        assert!(!hit.detail.contains("5355"), "5355 还在，不该报成缺失：{}", hit.detail);
-        assert!(!hit.detail.contains("137"), "137 还在，不该报成缺失：{}", hit.detail);
+        assert!(
+            hit.detail.contains("5353"),
+            "必须点名缺的那个端口：{}",
+            hit.detail
+        );
+        assert!(
+            !hit.detail.contains("5355"),
+            "5355 还在，不该报成缺失：{}",
+            hit.detail
+        );
+        assert!(
+            !hit.detail.contains("137"),
+            "137 还在，不该报成缺失：{}",
+            hit.detail
+        );
     }
 
     /// ⚠ 最危险的脱节：策略说不要持久背板，计划里却有 Boot 规则。
@@ -1909,13 +1921,15 @@ mod tests {
             .iter()
             .any(|f| f.conditions.contains(&Condition::SystemServiceHost)));
         assert!(
-            plan.iter().any(|f| f.conditions.contains(&Condition::LocalPort(68))
-                && f.conditions.contains(&Condition::RemotePort(67))),
+            plan.iter()
+                .any(|f| f.conditions.contains(&Condition::LocalPort(68))
+                    && f.conditions.contains(&Condition::RemotePort(67))),
             "DHCP 客户端方向（本地 68 → 远端 67）必须存在"
         );
         assert!(
-            plan.iter().any(|f| f.conditions.contains(&Condition::LocalPort(67))
-                && f.conditions.contains(&Condition::RemotePort(68))),
+            plan.iter()
+                .any(|f| f.conditions.contains(&Condition::LocalPort(67))
+                    && f.conditions.contains(&Condition::RemotePort(68))),
             "DHCP 服务端方向（本地 67 → 远端 68）必须存在"
         );
     }

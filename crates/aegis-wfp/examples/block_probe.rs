@@ -37,9 +37,7 @@
 use std::net::{Ipv4Addr, SocketAddr, TcpStream, ToSocketAddrs};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use aegis_wfp::{
-    apply, rollback, Action, Condition, FilterSpec, Layer, Tier,
-};
+use aegis_wfp::{apply, rollback, Action, Condition, FilterSpec, Layer, Tier};
 
 /// 用来做对照的目标。443 被拦、80 不拦。
 const TARGET_HOST: &str = "www.baidu.com";
@@ -109,7 +107,11 @@ fn main() {
             return;
         },
     };
-    println!("  已装 {} 条，filterId={:?}", receipt.len(), receipt.filter_ids);
+    println!(
+        "  已装 {} 条，filterId={:?}",
+        receipt.len(),
+        receipt.filter_ids
+    );
     println!();
 
     // ⚠ 装得上 ≠ 拦得住。`FWPM_CONDITION_IP_REMOTE_ADDRESS` 的值是 UINT32，

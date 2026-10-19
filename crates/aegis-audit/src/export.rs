@@ -169,7 +169,7 @@ fn cell(s: &str) -> String {
             '"' => {
                 v.push('"');
                 v.push('"');
-            }
+            },
             // 控制字符写成转义序列**文本**，而不是原样放进去。
             //
             // RFC 4180 允许引用字段里含换行，但那样一条记录就占了多行，
@@ -272,7 +272,7 @@ fn json_str(s: &str) -> String {
             '\t' => out.push_str("\\t"),
             c if (c as u32) < 0x20 => {
                 out.push_str(&format!("\\u{:04x}", c as u32));
-            }
+            },
             c => out.push(c),
         }
     }
@@ -450,7 +450,10 @@ mod tests {
         let link = EvidenceChain::new().append(&e);
         let pkg = EvidencePackage::build(vec![Record { event: e, link }], link.hash, 0);
         let s = to_json(&pkg);
-        assert!(s.contains(r#""process_path":"C:\\path\\with\"quote\\and\\backslash.exe""#), "{s}");
+        assert!(
+            s.contains(r#""process_path":"C:\\path\\with\"quote\\and\\backslash.exe""#),
+            "{s}"
+        );
         assert!(s.trim_end().ends_with('}'));
     }
 

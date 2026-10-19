@@ -63,21 +63,31 @@ impl Op<'_> {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Outcome {
     /// 放行列表里有一张 TUN 起来了。
-    TunPresent { name: String },
+    TunPresent {
+        name: String,
+    },
     /// 放行列表里的 TUN 一张都没起来。
     TunAbsent,
     /// 默认出口已落到该网卡。
-    EgressTaken { interface: String },
+    EgressTaken {
+        interface: String,
+    },
     /// 产出的配置片段。
     Fragment {
         text: String,
         /// 适配器自己加的注解（不参与 Aegis 的校验，只给人看）。
         notes: Vec<String>,
     },
-    Healthy { version: String },
-    Reloaded { version: String },
+    Healthy {
+        version: String,
+    },
+    Reloaded {
+        version: String,
+    },
     /// 53 归它管。
-    DnsOwned { owner: String },
+    DnsOwned {
+        owner: String,
+    },
     /// 没人管 53。
     DnsNotOwned,
     /// 规则确认生效。
@@ -94,7 +104,9 @@ pub enum Outcome {
     /// 三态缺一不可：把"不知道"塞进前两者之一，会造出一个假的确定性——
     /// 而守卫对"判不了"的处理（保持现状）与对"没生效"的处理（收紧）
     /// 是**相反**的，猜错方向就是误断网或漏放行。
-    RulesUnknown { why: String },
+    RulesUnknown {
+        why: String,
+    },
 }
 
 impl Outcome {
@@ -107,9 +119,9 @@ impl Outcome {
             Self::Healthy { .. } => Capability::HealthProbe,
             Self::Reloaded { .. } => Capability::Reload,
             Self::DnsOwned { .. } | Self::DnsNotOwned => Capability::DnsOwnership,
-            Self::RulesEffective
-            | Self::RulesIneffective { .. }
-            | Self::RulesUnknown { .. } => Capability::RuleEffectiveness,
+            Self::RulesEffective | Self::RulesIneffective { .. } | Self::RulesUnknown { .. } => {
+                Capability::RuleEffectiveness
+            },
         }
     }
 }
@@ -148,13 +160,13 @@ mod tests {
         let c = Capability::RuleEffectiveness;
         assert_eq!(Outcome::RulesEffective.capability(), c);
         assert_eq!(
-            Outcome::RulesIneffective { failed: vec!["x".into()] }.capability(),
+            Outcome::RulesIneffective {
+                failed: vec!["x".into()]
+            }
+            .capability(),
             c
         );
-        assert_eq!(
-            Outcome::RulesUnknown { why: "y".into() }.capability(),
-            c
-        );
+        assert_eq!(Outcome::RulesUnknown { why: "y".into() }.capability(), c);
     }
 
     /// "适配器答非所问"要靠这个不变式抓出来：
@@ -162,15 +174,24 @@ mod tests {
     #[test]
     fn outcomes_of_different_capabilities_are_distinguishable() {
         let asked = Op::Dns.capability();
-        let answered = Outcome::Healthy { version: "1".into() }.capability();
+        let answered = Outcome::Healthy {
+            version: "1".into(),
+        }
+        .capability();
         assert_ne!(asked, answered);
     }
 
     #[test]
     fn absent_and_not_owned_are_facts_of_the_same_capability() {
-        assert_eq!(Outcome::TunAbsent.capability(), Capability::TunInterfacePresent);
         assert_eq!(
-            Outcome::TunPresent { name: "utun".into() }.capability(),
+            Outcome::TunAbsent.capability(),
+            Capability::TunInterfacePresent
+        );
+        assert_eq!(
+            Outcome::TunPresent {
+                name: "utun".into()
+            }
+            .capability(),
             Capability::TunInterfacePresent
         );
         assert_eq!(Outcome::DnsNotOwned.capability(), Capability::DnsOwnership);

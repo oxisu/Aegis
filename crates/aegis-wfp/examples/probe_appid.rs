@@ -38,7 +38,10 @@ fn main() {
         .encode_utf16()
         .chain(std::iter::once(0))
         .collect();
-    let mut desc: Vec<u16> = "read-only".encode_utf16().chain(std::iter::once(0)).collect();
+    let mut desc: Vec<u16> = "read-only"
+        .encode_utf16()
+        .chain(std::iter::once(0))
+        .collect();
     let session = wfp::FWPM_SESSION0 {
         sessionKey: windows::core::GUID::zeroed(),
         displayData: wfp::FWPM_DISPLAY_DATA0 {
@@ -88,21 +91,20 @@ fn main() {
 fn probe(what: &str) {
     let mut wide: Vec<u16> = what.encode_utf16().chain(std::iter::once(0)).collect();
     let mut blob: *mut wfp::FWP_BYTE_BLOB = ptr::null_mut();
-    let rc = unsafe {
-        wfp::FwpmGetAppIdFromFileName0(PCWSTR(wide.as_mut_ptr()), &mut blob)
-    };
+    let rc = unsafe { wfp::FwpmGetAppIdFromFileName0(PCWSTR(wide.as_mut_ptr()), &mut blob) };
     if rc != 0 || blob.is_null() {
         println!("  {what:<60} → 失败 0x{rc:08X}");
         return;
     }
     let (size, data) = unsafe {
         let b = &*blob;
-        (
-            b.size,
-            std::slice::from_raw_parts(b.data, b.size as usize),
-        )
+        (b.size, std::slice::from_raw_parts(b.data, b.size as usize))
     };
-    println!("  {:<60} → {size} 字节  {}", truncate(what, 60), preview(data));
+    println!(
+        "  {:<60} → {size} 字节  {}",
+        truncate(what, 60),
+        preview(data)
+    );
     unsafe {
         wfp::FwpmFreeMemory0(&mut blob as *mut _ as *mut *mut core::ffi::c_void);
     }
@@ -117,7 +119,12 @@ fn preview(data: &[u8]) -> String {
         .map(|c| u16::from_le_bytes([c[0], c[1]]))
         .collect();
     let text = String::from_utf16_lossy(&head);
-    let hex: String = data.iter().take(16).map(|b| format!("{b:02X}")).collect::<Vec<_>>().join(" ");
+    let hex: String = data
+        .iter()
+        .take(16)
+        .map(|b| format!("{b:02X}"))
+        .collect::<Vec<_>>()
+        .join(" ");
     format!("{:?} | {hex}", text.trim_end_matches('\0'))
 }
 

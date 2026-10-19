@@ -329,12 +329,7 @@ impl Status {
 /// ⚠ 不用 `v.to_string()` 顺手写：它会拼出 `"true"` 但读回来解析成
 /// `bool` 时**大小写敏感**，一旦有人改成 Rust 的 `true` 显示风格就对不上。
 fn bool_text(b: bool) -> String {
-    if b {
-        "true"
-    } else {
-        "false"
-    }
-    .to_string()
+    if b { "true" } else { "false" }.to_string()
 }
 
 /// 值里不允许出现换行与 `=`：会破坏行导向格式，
@@ -394,7 +389,11 @@ mod tests {
     #[test]
     fn missing_essential_fields_are_errors() {
         let mut t = sample().to_text();
-        t = t.lines().filter(|l| !l.starts_with("state=")).collect::<Vec<_>>().join("\n");
+        t = t
+            .lines()
+            .filter(|l| !l.starts_with("state="))
+            .collect::<Vec<_>>()
+            .join("\n");
         assert!(matches!(
             Status::from_text(&t),
             Err(StatusError::BadField { key: "state", .. })
@@ -443,7 +442,10 @@ mod tests {
         let t = sample().to_text().replace("audit_len=1", "audit_len=lots");
         assert!(matches!(
             Status::from_text(&t),
-            Err(StatusError::BadField { key: "audit_len", .. })
+            Err(StatusError::BadField {
+                key: "audit_len",
+                ..
+            })
         ));
     }
 

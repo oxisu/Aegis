@@ -349,7 +349,10 @@ pub fn preflight(plan: &[FilterSpec]) -> Result<(), RefuseReason> {
     // 这里只查**路径存在**，不调 `FwpmGetAppIdFromFileName0`：
     // [preflight] 的契约是"不碰引擎"，而那个 API 需要一个已打开的会话。
     // 真正的解析留到下发时，失败则整批回滚（见 [apply]）。
-    if plan.iter().any(|f| f.conditions.contains(&Condition::SystemServiceHost)) {
+    if plan
+        .iter()
+        .any(|f| f.conditions.contains(&Condition::SystemServiceHost))
+    {
         let path = system_service_host_path();
         if path.is_empty() || !std::path::Path::new(&path).exists() {
             return Err(RefuseReason::ServiceHostMissing { path });
@@ -469,7 +472,12 @@ pub fn add_persistent(
     spec: &FilterSpec,
     provider_key: Option<GUID>,
 ) -> Result<u64, WfpError> {
-    add_one_with_flags(session, spec, wfp::FWPM_FILTER_FLAG_PERSISTENT.0, provider_key)
+    add_one_with_flags(
+        session,
+        spec,
+        wfp::FWPM_FILTER_FLAG_PERSISTENT.0,
+        provider_key,
+    )
 }
 
 fn add_one(session: &Session, spec: &FilterSpec) -> Result<u64, WfpError> {
@@ -617,9 +625,7 @@ fn add_one_with_flags(
     // union 的字段赋值在语义上就是"整体替换"，写成一次构造更贴近真相。
     let weight = wfp::FWP_VALUE0 {
         r#type: wfp::FWP_UINT8,
-        Anonymous: wfp::FWP_VALUE0_0 {
-            uint8: spec.weight,
-        },
+        Anonymous: wfp::FWP_VALUE0_0 { uint8: spec.weight },
     };
 
     let mut filter = wfp::FWPM_FILTER0::default();
@@ -873,7 +879,10 @@ mod tests {
         t.confirm(now()).unwrap();
         assert!(!t.must_roll_back(now()), "普通拆除不该推翻已确认的决定");
         t.force_teardown();
-        assert!(t.must_roll_back(now()), "强拆必须立即生效，不看阶段也不看倒计时");
+        assert!(
+            t.must_roll_back(now()),
+            "强拆必须立即生效，不看阶段也不看倒计时"
+        );
     }
 
     /// 撤完之后不能照着同一个强拆标记再撤一遍——
@@ -910,7 +919,11 @@ mod tests {
     #[test]
     fn remaining_ms_never_underflows() {
         let t = ticket(1_000);
-        assert_eq!(t.remaining_ms(now() + 5_000), 0, "过期后必须是 0，不是负数回绕");
+        assert_eq!(
+            t.remaining_ms(now() + 5_000),
+            0,
+            "过期后必须是 0，不是负数回绕"
+        );
     }
 
     // ── 条件白名单 ────────────────────────────────────────────────────
@@ -921,7 +934,10 @@ mod tests {
     #[test]
     fn a_condition_that_only_pretends_to_match_is_not_mappable() {
         assert!(!mappable(&Condition::RemoteName("www.baidu.com")));
-        assert_eq!(describe(&Condition::RemoteName("x")), "RemoteName(实测不按域名匹配)");
+        assert_eq!(
+            describe(&Condition::RemoteName("x")),
+            "RemoteName(实测不按域名匹配)"
+        );
         assert_eq!(
             unmappable_conditions(&[FilterSpec {
                 name: "按名字拦",
@@ -944,10 +960,14 @@ mod tests {
     fn mappable_conditions_are_exactly_the_six_we_can_translate() {
         assert!(mappable(&Condition::RemotePort(53)));
         assert!(mappable(&Condition::LocalPort(68)));
-        assert!(mappable(&Condition::RemoteAddrV4(std::net::Ipv4Addr::new(127, 0, 0, 1))));
+        assert!(mappable(&Condition::RemoteAddrV4(std::net::Ipv4Addr::new(
+            127, 0, 0, 1
+        ))));
         assert!(mappable(&Condition::Loopback));
         assert!(mappable(&Condition::SystemServiceHost));
-        assert!(mappable(&Condition::EgressInterfaceLuid(0x600_8008_0000_0000)));
+        assert!(mappable(&Condition::EgressInterfaceLuid(
+            0x600_8008_0000_0000
+        )));
         assert!(!mappable(&Condition::ProcessId(1)));
         assert!(!mappable(&Condition::PhysicalInterface));
     }

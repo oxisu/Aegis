@@ -24,12 +24,12 @@ pub mod state;
 pub use aegis_model as model;
 pub use aegis_version as version;
 
-pub use self::role::{
-    adjudicate, adjudicate_all, Confidence, InterfaceRole, RoleDecision, RolePolicy, RoleTable,
-};
 pub use self::guard::{
     collect, evaluate, topology_inputs, Assertion, GuardAction, GuardFacts, GuardPolicy,
     GuardTracker, GuardVerdict, ProxyMode, DEFAULT_COOLDOWN_MS, DEFAULT_FAILURE_THRESHOLD,
     DEFAULT_FLAP_LIMIT_PER_HOUR, FLAP_WINDOW_MS,
+};
+pub use self::role::{
+    adjudicate, adjudicate_all, Confidence, InterfaceRole, RoleDecision, RolePolicy, RoleTable,
 };
 pub use self::state::{awaits_user, insulation, Event, Insulation, State};

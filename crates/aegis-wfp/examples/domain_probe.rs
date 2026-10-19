@@ -65,8 +65,7 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(3);
 const FILTER_NAME: &str = "域名集探针";
 const PROVIDER_NAME: &str = "Aegis 域名集探针";
 /// 与 `persist_probe` 不同的 key：两个实验互不干扰，各自 purge 自己的。
-const PROVIDER_KEY: GUID =
-    GUID::from_u128(0x0a15_6754_0c0f_4a1e_9d3b_0002_ae15_0002);
+const PROVIDER_KEY: GUID = GUID::from_u128(0x0a15_6754_0c0f_4a1e_9d3b_0002_ae15_0002);
 
 fn main() {
     let mut args = std::env::args().skip(1);
@@ -81,7 +80,10 @@ fn main() {
             println!("  目的：验证「屏蔽整个主域名」在 WFP 层能做到哪一步");
             println!("  结论：做**不到**按域名拦，只能拦住域名此刻解析出的 IP 集合（快照）");
             println!();
-            println!("  arm    解析 {} 个域名 → 逐个 IP 装持久化阻断", HOSTS.len());
+            println!(
+                "  arm    解析 {} 个域名 → 逐个 IP 装持久化阻断",
+                HOSTS.len()
+            );
             println!("  check  **另起一个进程**逐域名测连通性");
             println!("  purge  全部删掉并复核为 0 —— 测完必须跑");
         },
@@ -203,7 +205,12 @@ fn check() {
         } else {
             "部分通"
         };
-        println!("    {h:<18} {} 个 IP，能连上 {} 个 → {}", got.len(), up, verdict);
+        println!(
+            "    {h:<18} {} 个 IP，能连上 {} 个 → {}",
+            got.len(),
+            up,
+            verdict
+        );
     }
 
     println!();
@@ -212,8 +219,10 @@ fn check() {
     println!("  · 「通」= 它换了一批 IP，而装规则时没有那批 —— **这就是快照的漏点**；");
     println!("  · 「部分通」= 一半命中一半没命中，最典型的快照漂移。");
     println!();
-    println!("  另一个进程里能看到这 {0} 条规则，且它们不是这个进程装的",
-             installed.len());
+    println!(
+        "  另一个进程里能看到这 {0} 条规则，且它们不是这个进程装的",
+        installed.len()
+    );
     println!("  → 这证明的是「跨进程存活」，不是「按域名匹配」。");
 }
 
@@ -248,7 +257,10 @@ fn purge() {
             if left.is_empty() {
                 println!("  ✅ 清干净了。");
             } else {
-                println!("  ❌ 没清干净，剩下 id={:?}", left.iter().map(|f| f.id).collect::<Vec<_>>());
+                println!(
+                    "  ❌ 没清干净，剩下 id={:?}",
+                    left.iter().map(|f| f.id).collect::<Vec<_>>()
+                );
             }
         },
         Err(e) => println!("  ❌ 复核枚举失败：{e}"),

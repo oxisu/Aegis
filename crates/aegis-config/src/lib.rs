@@ -155,19 +155,21 @@ impl Config {
     /// （并且必须让用户知道），错的才拒绝加载。
     pub fn guard_gap(&self) -> Option<String> {
         match self.proxy.mode {
-            None => Some("未配置 proxy.mode：不知道代理工作在哪种模式，\
+            None => Some(
+                "未配置 proxy.mode：不知道代理工作在哪种模式，\
                           守卫无法选择断言"
-                .to_string()),
-            Some(ProxyMode::Tun) if self.proxy.tun_luid.is_none() => {
-                Some("已配置为 TUN 模式但缺少 proxy.tun_luid：\
+                    .to_string(),
+            ),
+            Some(ProxyMode::Tun) if self.proxy.tun_luid.is_none() => Some(
+                "已配置为 TUN 模式但缺少 proxy.tun_luid：\
                       无法验证默认出口是不是代理承载体"
-                    .to_string())
-            },
-            Some(ProxyMode::SystemProxy) => {
-                Some("系统代理模式的守卫断言需要适配器 SPI（读系统代理开关），\
+                    .to_string(),
+            ),
+            Some(ProxyMode::SystemProxy) => Some(
+                "系统代理模式的守卫断言需要适配器 SPI（读系统代理开关），\
                       尚未实现"
-                    .to_string())
-            },
+                    .to_string(),
+            ),
             Some(ProxyMode::Tun) => None,
         }
     }
@@ -551,7 +553,10 @@ known_free_ssids = ["MMi"]
     /// TOML 支持十六进制字面量，LUID 用十六进制写更接近 `netsh` 里的形式。
     #[test]
     fn tun_luid_accepts_a_hex_literal() {
-        let c = load_str(&with("[proxy]\nmode = \"tun\"\ntun_luid = 0x6008008000000000\n")).unwrap();
+        let c = load_str(&with(
+            "[proxy]\nmode = \"tun\"\ntun_luid = 0x6008008000000000\n",
+        ))
+        .unwrap();
         assert_eq!(c.proxy.tun_luid, Some(0x6008_0080_0000_0000));
         assert!(c.guard_gap().is_none(), "配齐了就不该有缺口");
     }
@@ -624,10 +629,9 @@ known_free_ssids = ["MMi"]
         let c = load_str(&with("[proxy]\nmode = \"tun\"\ntun_luid = 7\n")).unwrap();
         let facts = c.guard_facts(Some(true), &[1, 7], Some(1)).unwrap();
         match aegis_core::guard::evaluate(facts) {
-            GuardVerdict::Ineffective { failed, .. } => assert_eq!(
-                failed,
-                vec![aegis_core::guard::Assertion::EgressIsBearer]
-            ),
+            GuardVerdict::Ineffective { failed, .. } => {
+                assert_eq!(failed, vec![aegis_core::guard::Assertion::EgressIsBearer])
+            },
             other => panic!("期望 Ineffective，得到 {other:?}"),
         }
     }
@@ -666,7 +670,10 @@ known_free_ssids = ["MMi"]
             "[[always_allow]]\nname = \"  \"\nremote_ip = \"10.0.0.1\"\nports = [80]\n",
         ))
         .unwrap_err();
-        assert!(matches!(err, ConfigError::InvalidAlwaysAllow { index: 0, .. }));
+        assert!(matches!(
+            err,
+            ConfigError::InvalidAlwaysAllow { index: 0, .. }
+        ));
     }
 
     #[test]
@@ -675,7 +682,10 @@ known_free_ssids = ["MMi"]
             "[[always_allow]]\nname = \"x\"\nremote_ip = \"10.0.0.1\"\nports = [0]\n",
         ))
         .unwrap_err();
-        assert!(matches!(err, ConfigError::InvalidAlwaysAllow { index: 0, .. }));
+        assert!(matches!(
+            err,
+            ConfigError::InvalidAlwaysAllow { index: 0, .. }
+        ));
     }
 
     /// 后门条目里的拼写错误也必须报错（`deny_unknown_fields`），

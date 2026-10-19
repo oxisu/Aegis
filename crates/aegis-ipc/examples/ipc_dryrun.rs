@@ -46,8 +46,7 @@ fn main() {
         // 首帧：版本握手
         let hs = end.recv(&mut reader).expect("收握手失败");
         assert_eq!(hs.msg_type, msg_type::HANDSHAKE);
-        let peer =
-            aegis_ipc::HandshakePayload::decode(&hs.payload).expect("握手载荷解析失败");
+        let peer = aegis_ipc::HandshakePayload::decode(&hs.payload).expect("握手载荷解析失败");
         let verdict = check_compat(peer.to_triple(), aegis_ipc::local_version());
 
         // 第二帧：token 鉴权

@@ -158,8 +158,8 @@ impl Session {
         persistent: bool,
     ) -> Result<(), WfpError> {
         let mut name_w: Vec<u16> = name.encode_utf16().chain(std::iter::once(0)).collect();
-        let mut svc_w: Option<Vec<u16>> = service_name
-            .map(|s| s.encode_utf16().chain(std::iter::once(0)).collect());
+        let mut svc_w: Option<Vec<u16>> =
+            service_name.map(|s| s.encode_utf16().chain(std::iter::once(0)).collect());
 
         let flags = if persistent {
             wfp::FWPM_PROVIDER_FLAG_PERSISTENT
@@ -199,7 +199,10 @@ impl Session {
 
     /// 列出名字里带 `needle` 的过滤器（用于逃生舱的"删完再复核一遍"）。
     #[cfg_attr(test, mutants::skip)]
-    pub fn filters_named(&self, needle: &str) -> Result<Vec<crate::model::FilterSummary>, WfpError> {
+    pub fn filters_named(
+        &self,
+        needle: &str,
+    ) -> Result<Vec<crate::model::FilterSummary>, WfpError> {
         Ok(self
             .snapshot()?
             .filters
@@ -713,14 +716,7 @@ mod tests {
 
     #[test]
     fn collect_filters_skips_null_rows_and_empty_input() {
-        let (_n, r) = filter_row(
-            9,
-            "f",
-            wfp::FWPM_LAYER_ALE_AUTH_CONNECT_V6,
-            true,
-            0,
-            None,
-        );
+        let (_n, r) = filter_row(9, "f", wfp::FWPM_LAYER_ALE_AUTH_CONNECT_V6, true, 0, None);
         assert_eq!(collect_filters(&[None, Some(&r)], &[]).len(), 1);
         assert!(collect_filters(&[], &[]).is_empty());
     }

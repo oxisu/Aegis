@@ -35,12 +35,12 @@
 use std::path::PathBuf;
 use std::process::ExitCode;
 
-use aegis_ipc::{
-    check_compat, classify, encode_handshake, msg_type, IpcToken, PipeClient, Status, REQ_APPLY,
-    REQ_CONFIRM, REQ_PING, REQ_ROLLBACK, REQ_STATUS, GUARD_EFFECTIVE, GUARD_INEFFECTIVE,
-    GUARD_OFF, GUARD_UNKNOWN,
-};
 use aegis_ipc::GuardView;
+use aegis_ipc::{
+    check_compat, classify, encode_handshake, msg_type, IpcToken, PipeClient, Status,
+    GUARD_EFFECTIVE, GUARD_INEFFECTIVE, GUARD_OFF, GUARD_UNKNOWN, REQ_APPLY, REQ_CONFIRM, REQ_PING,
+    REQ_ROLLBACK, REQ_STATUS,
+};
 use aegis_version as version;
 
 /// 子命令。
@@ -80,7 +80,10 @@ fn main() -> ExitCode {
     println!("Aegis · aegisctl —— {}", version::full());
     println!("管道：{}", args.pipe);
     if args.cmd.dangerous() {
-        println!("⚠ `{}` 会改变本机网络状态，服务端会额外检查本进程是否已提权。", args.cmd.word());
+        println!(
+            "⚠ `{}` 会改变本机网络状态，服务端会额外检查本进程是否已提权。",
+            args.cmd.word()
+        );
     }
     println!();
 
@@ -97,7 +100,10 @@ fn main() -> ExitCode {
     let token = match IpcToken::from_hex(&hex) {
         Some(t) => t,
         None => {
-            eprintln!("[FATAL] token 文件格式不对（应为 {} 个 hex 字符）", aegis_ipc::TOKEN_HEX_LEN);
+            eprintln!(
+                "[FATAL] token 文件格式不对（应为 {} 个 hex 字符）",
+                aegis_ipc::TOKEN_HEX_LEN
+            );
             return ExitCode::from(2);
         },
     };
@@ -171,12 +177,12 @@ fn main() -> ExitCode {
         },
     };
     let ok = auth.payload == b"ok";
-    println!(
-        "6. ← 鉴权{}",
-        if ok { "通过" } else { "失败" }
-    );
+    println!("6. ← 鉴权{}", if ok { "通过" } else { "失败" });
     if !ok {
-        eprintln!("[FATAL] 鉴权失败：{}", String::from_utf8_lossy(&auth.payload));
+        eprintln!(
+            "[FATAL] 鉴权失败：{}",
+            String::from_utf8_lossy(&auth.payload)
+        );
         eprintln!("  不重试。自动重试会把「token 不对」变成一次慢速拒绝服务。");
         return ExitCode::from(5);
     }
@@ -206,7 +212,10 @@ fn main() -> ExitCode {
         Err(reason) => {
             eprintln!("[拒绝] {reason}");
             if args.cmd.dangerous() {
-                eprintln!("  提示：`{}` 要求本终端**以管理员身份运行**。", args.cmd.word());
+                eprintln!(
+                    "  提示：`{}` 要求本终端**以管理员身份运行**。",
+                    args.cmd.word()
+                );
                 eprintln!("  （token 只证明你是本机客户端，证明不了你有权改网络状态）");
             }
             return ExitCode::from(8);
@@ -250,10 +259,17 @@ fn main() -> ExitCode {
     println!("  物理网卡        : {} 张", status.physical_nics);
     println!("  待人工确认      : {} 张", status.pending_confirm);
     println!("  审计事件        : {} 条", status.audit_len);
-    println!("  绝缘笼规则      : {} 条（**干跑，未下发**）", status.wfp_rules);
+    println!(
+        "  绝缘笼规则      : {} 条（**干跑，未下发**）",
+        status.wfp_rules
+    );
     println!(
         "  不变量自检      : {}",
-        if status.wfp_invariants_ok { "通过" } else { "**违反**" }
+        if status.wfp_invariants_ok {
+            "通过"
+        } else {
+            "**违反**"
+        }
     );
     print_guard(&status.guard);
 
@@ -292,9 +308,7 @@ impl Args {
             match a.as_str() {
                 // 与 aegisd 一样收裸名：Git Bash 会吃掉 `\.\pipeegis`
                 // 里的一个反斜杠，靠"让用户写对"这条路根本走不通。
-                "--pipe" => pipe = aegis_ipc::normalize_pipe_name(
-                    &args.next().unwrap_or(pipe),
-                ),
+                "--pipe" => pipe = aegis_ipc::normalize_pipe_name(&args.next().unwrap_or(pipe)),
                 "--token-file" => token_file = args.next().map(PathBuf::from),
                 // `--ping` 是历史写法，等价于 `ping` 子命令
                 "--ping" => cmd = Cmd::Ping,
@@ -346,7 +360,11 @@ fn print_guard(g: &GuardView) {
     println!("── 守卫（下游规则生效性）──────────────────────────────────────");
     println!(
         "  放行            : {}",
-        if g.tightened { "**已撤掉**（只剩拒绝底板 → 全都拒绝）" } else { "正常" }
+        if g.tightened {
+            "**已撤掉**（只剩拒绝底板 → 全都拒绝）"
+        } else {
+            "正常"
+        }
     );
     println!("  最近结论        : {}", verdict_text(&g.verdict));
     if !g.reason.is_empty() {
@@ -389,7 +407,10 @@ fn print_usage() {
     println!("  rollback   立即拆除，含已确认规则的强拆（**危险**）");
     println!();
     println!("选项：");
-    println!("  --pipe <name>                IPC 管道名（默认 {}）", aegis_ipc::PIPE_NAME);
+    println!(
+        "  --pipe <name>                IPC 管道名（默认 {}）",
+        aegis_ipc::PIPE_NAME
+    );
     println!("  --token-file <path>          token 文件（默认 .aegis-run/ipc.token）");
     println!("  --ping                       等价于 `ping` 子命令（历史写法）");
     println!("  --expect-fingerprint <hex>   校验拓扑指纹，不一致则以 7 退出");
@@ -406,7 +427,11 @@ mod tests {
     use super::*;
 
     fn argv(words: &[&str]) -> std::vec::IntoIter<String> {
-        words.iter().map(|s| (*s).to_string()).collect::<Vec<_>>().into_iter()
+        words
+            .iter()
+            .map(|s| (*s).to_string())
+            .collect::<Vec<_>>()
+            .into_iter()
     }
 
     #[test]

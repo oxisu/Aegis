@@ -102,7 +102,10 @@ fn main() {
     }
     println!("1. 回调侧推入 5 条，缓冲容量只有 3");
     println!("   缓冲内剩余：{} 条", ring.len());
-    println!("   被覆盖丢弃：{} 条（必须可见，否则 UI 那张表会被当成全量）", ring.dropped());
+    println!(
+        "   被覆盖丢弃：{} 条（必须可见，否则 UI 那张表会被当成全量）",
+        ring.dropped()
+    );
     println!();
 
     // ── 2. 完整捕获一遍（容量给足），建链 ─────────────────────────────
@@ -163,10 +166,7 @@ fn main() {
 
     // ── 6. 尾部截断：抓不住 ───────────────────────────────────────────
     println!("6. 尾部截断 —— 把最后两条连着删掉：");
-    println!(
-        "   {:?}",
-        aegis_audit::verify(&events[..3], &links[..3])
-    );
+    println!("   {:?}", aegis_audit::verify(&events[..3], &links[..3]));
     println!("   → 仍然通过。哈希链**抓不住**尾部删除：剩下那部分自洽，");
     println!("     链头就变成了新的结尾。这是固有性质，不是实现缺陷。");
     println!("     唯一的缓解是定期把链头写到攻击者改不到的地方。");
@@ -208,13 +208,18 @@ fn main() {
     };
 
     let mut reopened = aegis_audit::AuditLog::open(&path).expect("重开");
-    println!("   重开后：{} 条，链头 = {}…", reopened.len(), &chain::hex(&reopened.head())[..16]);
     println!(
-        "   与关掉前一致：{}",
-        reopened.head() == head_before
+        "   重开后：{} 条，链头 = {}…",
+        reopened.len(),
+        &chain::hex(&reopened.head())[..16]
     );
+    println!("   与关掉前一致：{}", reopened.head() == head_before);
     let resumed = reopened.append(&events[0]).expect("续写");
-    println!("   续写这条是第 {} 号，前驱 = {}…", resumed.seq, &chain::hex(&resumed.prev)[..16]);
+    println!(
+        "   续写这条是第 {} 号，前驱 = {}…",
+        resumed.seq,
+        &chain::hex(&resumed.prev)[..16]
+    );
     reopened.flush().expect("刷盘");
     println!();
 
@@ -240,7 +245,10 @@ fn main() {
             link: *l,
         })
         .collect();
-    let head = records.last().map(|r| r.link.hash).unwrap_or(chain::GENESIS);
+    let head = records
+        .last()
+        .map(|r| r.link.hash)
+        .unwrap_or(chain::GENESIS);
     println!("   {}", "─".repeat(60));
     for line in aegis_audit::to_csv(&records).trim_end().split('\n') {
         // 列很多，只打前几列，能看清结构就行
@@ -256,7 +264,14 @@ fn main() {
     println!("   Aegis 版本：{}", pkg.aegis_version);
     println!("   链头      ：{}…", &chain::hex(&pkg.chain_head)[..16]);
     println!("   条数      ：{}", pkg.chain_len);
-    println!("   校验      ：{}", if pkg.verified { "通过" } else { "**未通过**" });
+    println!(
+        "   校验      ：{}",
+        if pkg.verified {
+            "通过"
+        } else {
+            "**未通过**"
+        }
+    );
     let json = aegis_audit::to_json(&pkg);
     println!("   JSON {} 字节，前 2 行：", json.len());
     for line in json.lines().take(2) {

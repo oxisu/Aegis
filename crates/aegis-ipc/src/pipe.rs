@@ -21,13 +21,11 @@ use std::mem::size_of;
 
 use windows::core::{Error as WinError, HRESULT, PCWSTR};
 use windows::Win32::Foundation::{
-    CloseHandle, LocalFree, BOOL, HANDLE, HLOCAL, INVALID_HANDLE_VALUE, ERROR_BROKEN_PIPE,
-    ERROR_NO_DATA, ERROR_PIPE_CONNECTED, ERROR_PIPE_NOT_CONNECTED,
-};
-use windows::Win32::Security::{
-    PSECURITY_DESCRIPTOR, SECURITY_ATTRIBUTES,
+    CloseHandle, LocalFree, BOOL, ERROR_BROKEN_PIPE, ERROR_NO_DATA, ERROR_PIPE_CONNECTED,
+    ERROR_PIPE_NOT_CONNECTED, HANDLE, HLOCAL, INVALID_HANDLE_VALUE,
 };
 use windows::Win32::Security::Authorization::ConvertStringSecurityDescriptorToSecurityDescriptorW;
+use windows::Win32::Security::{PSECURITY_DESCRIPTOR, SECURITY_ATTRIBUTES};
 use windows::Win32::Storage::FileSystem::{
     CreateFileW, FlushFileBuffers, ReadFile, WriteFile, FILE_FLAG_FIRST_PIPE_INSTANCE,
     FILE_GENERIC_READ, FILE_GENERIC_WRITE, FILE_SHARE_MODE, OPEN_EXISTING, PIPE_ACCESS_DUPLEX,
@@ -197,10 +195,12 @@ impl PipeServer {
     /// 阻塞等待一个客户端连上。
     pub fn accept(&self) -> Result<PipeEnd, PipeError> {
         match unsafe { ConnectNamedPipe(self.handle, None) } {
-            Ok(()) => {}
+            Ok(()) => {},
             Err(e) => accept_outcome(&e)?,
         };
-        Ok(PipeEnd { handle: self.handle })
+        Ok(PipeEnd {
+            handle: self.handle,
+        })
     }
 
     /// 断开当前客户端，之后可再次 [`Self::accept`]。
@@ -246,7 +246,9 @@ impl PipeClient {
     }
 
     pub fn end(&self) -> PipeEnd {
-        PipeEnd { handle: self.handle }
+        PipeEnd {
+            handle: self.handle,
+        }
     }
 }
 
@@ -429,7 +431,11 @@ mod tests {
         let end = server.accept().expect("accept 应成功");
         let mut reader = FrameReader::new();
         assert_eq!(end.recv(&mut reader), Err(PipeError::Disconnected));
-        assert_eq!(end.try_recv(&mut reader), Ok(None), "try_recv 应把断开当正常退出");
+        assert_eq!(
+            end.try_recv(&mut reader),
+            Ok(None),
+            "try_recv 应把断开当正常退出"
+        );
     }
 
     /// 纯函数层：不需要真管道就能验证"什么算断开"。
@@ -475,7 +481,10 @@ mod tests {
         let name = test_name("badsddl");
         // 直接走底层：用一个非法 SDDL 串，确认转换失败而不是静默通过
         let r = SecurityDescriptor::from_sddl("this is not sddl");
-        assert!(matches!(r, Err(PipeError::BadSddl(_))), "非法 SDDL 应报错：{r:?}");
+        assert!(
+            matches!(r, Err(PipeError::BadSddl(_))),
+            "非法 SDDL 应报错：{r:?}"
+        );
         let _ = name;
     }
 

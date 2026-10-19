@@ -34,8 +34,8 @@
 //! 16+N 4  载荷校验和（FNV-1a 32）
 //! ```
 
-pub mod endpoint;
 pub mod ctl;
+pub mod endpoint;
 pub mod peer;
 pub mod pipe;
 pub mod token;
@@ -43,15 +43,15 @@ pub mod tokenfile;
 pub mod version;
 
 pub use ctl::{
-    classify, risk_of, GuardView, Status, StatusError, DENY_PREFIX, OK_PREFIX, REQ_APPLY,
-    REQ_CONFIRM, REQ_PING, REQ_ROLLBACK, REQ_STATUS, GUARD_EFFECTIVE, GUARD_INEFFECTIVE,
-    GUARD_OFF, GUARD_UNKNOWN, STATUS_V1,
+    classify, risk_of, GuardView, Status, StatusError, DENY_PREFIX, GUARD_EFFECTIVE,
+    GUARD_INEFFECTIVE, GUARD_OFF, GUARD_UNKNOWN, OK_PREFIX, REQ_APPLY, REQ_CONFIRM, REQ_PING,
+    REQ_ROLLBACK, REQ_STATUS, STATUS_V1,
 };
-pub use peer::{allows, is_elevated, Risk};
-pub use tokenfile::{write_protected, TokenFileError};
 pub use endpoint::{normalize_pipe_name, PIPE_NAME, PIPE_PREFIX, PIPE_SDDL, TOKEN_FILE_SDDL};
+pub use peer::{allows, is_elevated, Risk};
 pub use pipe::{PipeClient, PipeEnd, PipeError, PipeServer};
 pub use token::{constant_time_eq, IpcToken, TokenError, TOKEN_BYTES, TOKEN_HEX_LEN};
+pub use tokenfile::{write_protected, TokenFileError};
 pub use version::{
     check_compat, HandshakePayload, Note, ParseError, RejectReason, Verdict, VersionTriple,
 };

@@ -288,7 +288,10 @@ mod tests {
     fn flipping_a_blocked_action_to_allow_is_detected() {
         let (mut events, links) = build(3);
         events[1].action = Action::Allow;
-        assert_eq!(verify(&events, &links), Err(ChainError::HashMismatch { seq: 2 }));
+        assert_eq!(
+            verify(&events, &links),
+            Err(ChainError::HashMismatch { seq: 2 })
+        );
     }
 
     /// 头部删一条：序号先露出马脚（剩下的第一条序号是 2，位置却是 1）。
@@ -396,7 +399,10 @@ mod tests {
         let mut wrong_prev = second;
         wrong_prev.prev = link_hash(GENESIS, &event(9));
         assert_ne!(wrong_prev.prev, c.head());
-        assert_eq!(c.commit(wrong_prev), Err(ChainError::PrevMismatch { seq: 2 }));
+        assert_eq!(
+            c.commit(wrong_prev),
+            Err(ChainError::PrevMismatch { seq: 2 })
+        );
 
         assert_eq!(c.len(), 1, "被拒的提交不该改变链");
     }
@@ -406,6 +412,8 @@ mod tests {
         let (_, links) = build(1);
         let s = hex(&links[0].hash);
         assert_eq!(s.len(), HASH_LEN * 2);
-        assert!(s.bytes().all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase()));
+        assert!(s
+            .bytes()
+            .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase()));
     }
 }

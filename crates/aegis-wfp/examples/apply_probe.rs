@@ -43,10 +43,12 @@ fn main() {
 
     println!("Aegis · WFP 下发通路探针");
     println!("⚠ 只装**放行类**规则（装上去等于什么都没变），一条阻断规则都不装。");
-    println!("  计划共 {} 条，其中放行 {} 条、阻断 {} 条。",
+    println!(
+        "  计划共 {} 条，其中放行 {} 条、阻断 {} 条。",
         plan.len(),
         plan.iter().filter(|f| f.action == Action::Permit).count(),
-        plan.iter().filter(|f| f.action == Action::Block).count());
+        plan.iter().filter(|f| f.action == Action::Block).count()
+    );
     println!();
 
     let mut ok = 0usize;
@@ -54,13 +56,19 @@ fn main() {
 
     for spec in &plan {
         if spec.action != Action::Permit {
-            println!("  ── 跳过（阻断）：{} —— 它需要人工在 10 秒窗口内确认", spec.name);
+            println!(
+                "  ── 跳过（阻断）：{} —— 它需要人工在 10 秒窗口内确认",
+                spec.name
+            );
             continue;
         }
         match probe(spec) {
             Ok(r) => {
                 ok += 1;
-                println!("  ✅ {:>16}  filterId={:<8} 删除 {}", spec.name, r.filter_id, r.removed);
+                println!(
+                    "  ✅ {:>16}  filterId={:<8} 删除 {}",
+                    spec.name, r.filter_id, r.removed
+                );
             },
             Err(e) => {
                 failed += 1;

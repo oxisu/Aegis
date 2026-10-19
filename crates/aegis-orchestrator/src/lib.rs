@@ -82,7 +82,11 @@ mod tests {
         let adapter = ReferenceAdapter::new("ref", Scenario::sample());
 
         let m = matrix(&adapter);
-        assert!(m.fail_closed_gaps().is_empty(), "{:?}", m.fail_closed_gaps());
+        assert!(
+            m.fail_closed_gaps().is_empty(),
+            "{:?}",
+            m.fail_closed_gaps()
+        );
         assert!(m.usable());
 
         let report = check(&adapter, &Scenario::sample());
@@ -101,7 +105,10 @@ mod tests {
     #[test]
     fn an_honest_adapter_with_a_fail_closed_gap_is_still_unusable() {
         let mut adapter = ReferenceAdapter::new("ref", Scenario::sample());
-        adapter.declare(&[Capability::TunInterfacePresent, Capability::ConfigFragmentGenerate]);
+        adapter.declare(&[
+            Capability::TunInterfacePresent,
+            Capability::ConfigFragmentGenerate,
+        ]);
 
         // 它的契约全绿（没声明的能力都老老实实回 Unsupported）
         assert!(check(&adapter, &Scenario::sample()).passed());

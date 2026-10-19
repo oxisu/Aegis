@@ -41,12 +41,12 @@ pub mod export;
 pub mod ring;
 pub mod store;
 
-pub use chain::{hex, verify, ChainError, EvidenceChain, Hash, Link, HASH_LEN, GENESIS};
+pub use chain::{hex, verify, ChainError, EvidenceChain, Hash, Link, GENESIS, HASH_LEN};
 pub use decode::{decode, DecodeError};
 pub use encode::{canonical_bytes, CANONICAL_VERSION};
 pub use event::{Action, AuditEvent, Protocol};
-pub use ring::AuditRing;
 pub use export::{iso8601_utc, to_csv, to_json, EvidencePackage, ExportFilter};
+pub use ring::AuditRing;
 pub use store::{
     read_records, read_records_with, scan, AuditLog, OpenAction, ReadCtx, ReadError, Record, Scan,
     TornTail, LOG_MAGIC, LOG_VERSION,

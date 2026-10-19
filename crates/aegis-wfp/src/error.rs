@@ -85,7 +85,10 @@ impl fmt::Display for WfpError {
             Self::Delete(_) => "删除 WFP 对象",
             Self::ProviderAdd(_) => "注册 WFP Provider",
             Self::UnsupportedCondition { name } => {
-                return write!(f, "条件无法精确映射到 WFP 字段：{name}（本次未下发任何规则）")
+                return write!(
+                    f,
+                    "条件无法精确映射到 WFP 字段：{name}（本次未下发任何规则）"
+                )
             },
         };
         write!(f, "{what}失败（错误码 0x{:08X}", self.code())?;

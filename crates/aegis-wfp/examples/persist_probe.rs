@@ -40,8 +40,7 @@ const FILTER_NAME: &str = "持久化探针";
 /// Provider 显示名。
 const PROVIDER_NAME: &str = "Aegis 持久化探针";
 /// 固定 Provider GUID：arm / check / purge 三个进程必须认同一个 key。
-const PROVIDER_KEY: GUID =
-    GUID::from_u128(0x0a15_6754_0c0f_4a1e_9d3b_0001_ae15_0001);
+const PROVIDER_KEY: GUID = GUID::from_u128(0x0a15_6754_0c0f_4a1e_9d3b_0001_ae15_0001);
 
 fn main() {
     let mut args = std::env::args().skip(1);
@@ -129,7 +128,10 @@ fn check() {
             return;
         },
     };
-    println!("  {TARGET_HOST}:{BLOCKED_PORT} = {}   （期望：断 —— 规则还在）", w(reachable(ip)));
+    println!(
+        "  {TARGET_HOST}:{BLOCKED_PORT} = {}   （期望：断 —— 规则还在）",
+        w(reachable(ip))
+    );
 
     // 用**动态会话**来查：说明"看得到"不依赖于之前那个非动态会话还活着
     let session = match Session::open("aegis-persist-check") {
@@ -148,7 +150,11 @@ fn check() {
                     f.id,
                     f.layer,
                     f.action,
-                    if f.flags.survives_reboot() { "是" } else { "否" },
+                    if f.flags.survives_reboot() {
+                        "是"
+                    } else {
+                        "否"
+                    },
                     f.provider
                 );
             }
@@ -183,7 +189,9 @@ fn purge() {
     if !ids.is_empty() {
         match session.delete_provider(PROVIDER_KEY) {
             Ok(()) => println!("  ⚠ filter 还在时删 Provider **成功了** → 说明它会级联"),
-            Err(e) => println!("  ✅ filter 还在时删 Provider 被拒（{e}）→ **不级联**，与微软文档一致"),
+            Err(e) => {
+                println!("  ✅ filter 还在时删 Provider 被拒（{e}）→ **不级联**，与微软文档一致")
+            },
         }
     }
 
@@ -209,8 +217,14 @@ fn purge() {
             if left.is_empty() {
                 println!("  ✅ 清干净了。");
             } else {
-                println!("  ❌ **没清干净** —— 剩下的 id={:?}", left.iter().map(|f| f.id).collect::<Vec<_>>());
-                println!("     这 { } 条已经不受任何进程控制，只能重启或手动删。", left.len());
+                println!(
+                    "  ❌ **没清干净** —— 剩下的 id={:?}",
+                    left.iter().map(|f| f.id).collect::<Vec<_>>()
+                );
+                println!(
+                    "     这 { } 条已经不受任何进程控制，只能重启或手动删。",
+                    left.len()
+                );
             }
         },
         Err(e) => println!("  ❌ 复核枚举失败：{e}"),
@@ -234,5 +248,9 @@ fn reachable(ip: Ipv4Addr) -> bool {
 /// ⚠ 参数是"能不能通"，不是"有没有被拦"。传反整张表就是反的
 /// （第一版 iface_probe 就栽在这里）。
 fn w(ok: bool) -> &'static str {
-    if ok { "通" } else { "断" }
+    if ok {
+        "通"
+    } else {
+        "断"
+    }
 }

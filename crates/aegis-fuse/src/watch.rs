@@ -33,7 +33,7 @@ use std::sync::Arc;
 
 use windows::Win32::Foundation::{BOOLEAN, HANDLE};
 use windows::Win32::NetworkManagement::IpHelper::{
-    CancelMibChangeNotify2, MIB_IPINTERFACE_ROW, MIB_NOTIFICATION_TYPE, NotifyIpInterfaceChange,
+    CancelMibChangeNotify2, NotifyIpInterfaceChange, MIB_IPINTERFACE_ROW, MIB_NOTIFICATION_TYPE,
 };
 use windows::Win32::Networking::WinSock::{ADDRESS_FAMILY, AF_INET, AF_INET6, AF_UNSPEC};
 use windows::Win32::System::SystemInformation::GetTickCount64;
@@ -217,8 +217,7 @@ mod tests {
     /// 这是 FFI 层少数能自动化验证的部分，务必保留。
     #[test]
     fn register_and_cancel_works_without_elevation() {
-        let mut w =
-            InterfaceWatcher::register(WatchFamily::Any).expect("注册不需要管理员权限");
+        let mut w = InterfaceWatcher::register(WatchFamily::Any).expect("注册不需要管理员权限");
         assert_eq!(w.family(), WatchFamily::Any);
         assert_eq!(w.take_change(), 0, "刚注册且未变动时不应有计数");
         w.cancel().expect("取消应成功");
