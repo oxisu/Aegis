@@ -58,6 +58,14 @@ staging/
 mutants.out/
 mutants.out.old/
 
+# ============ 前端（ui/）============
+# ⚠ 只忽略**构建产物与依赖**，源码与配置一律入库。
+#   `ui/src-tauri/target` 也要忽略：Tauri 的 Rust 构建产物可能上百 MB。
+ui/node_modules/
+ui/dist/
+ui/src-tauri/target/
+ui/src-tauri/gen/
+
 # ============ WorkBuddy 本地项目数据（非临时缓存，但无需入库）============
 .workbuddy/
 
