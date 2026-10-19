@@ -24,22 +24,27 @@
 //! 这条倒计时的意义是：人装错了、手滑了、或者根本不在机器旁边的时候，
 //! 不需要做任何事，网络自己会回来。
 //!
-//! # 两条纪律
+//! # 两条纪律（由 `aegis_ipc::client` 的类型状态保证）
 //!
 //! 1. **握手必须在鉴权之前。** 版本谈不拢就别把 token 送过去——
 //!    对面是老版本，它未必会用常量时间比对来验 token。
 //! 2. **鉴权失败不要重试。** 一次失败就退出并说清为什么。
 //!    自动重试会把"token 不对"变成一次慢速的拒绝服务，
 //!    也更容易撞上服务端的防爆破策略。
+//!
+//! ⚠ 这两条现在**不在本文件里守**：它们收进了 `aegis_ipc::client::Session`
+//! 的**类型状态**——没握手拿不到 `Handshook`，没鉴权拿不到 `Ready`，
+//! 而 `request()` 只挂在 `Ready` 上，顺序写反是编译错误。
+//! 本文件只负责把每一步**打印给人看**和把失败映射成退出码。
 
 use std::path::PathBuf;
 use std::process::ExitCode;
 
+use aegis_ipc::client::{ClientError, Session};
 use aegis_ipc::GuardView;
 use aegis_ipc::{
-    check_compat, classify, encode_handshake, msg_type, IpcToken, PipeClient, Status,
-    GUARD_EFFECTIVE, GUARD_INEFFECTIVE, GUARD_OFF, GUARD_UNKNOWN, REQ_APPLY, REQ_CONFIRM, REQ_PING,
-    REQ_ROLLBACK, REQ_STATUS,
+    IpcToken, Status, Verdict, GUARD_EFFECTIVE, GUARD_INEFFECTIVE, GUARD_OFF, GUARD_UNKNOWN,
+    REQ_APPLY, REQ_CONFIRM, REQ_PING, REQ_ROLLBACK, REQ_STATUS,
 };
 use aegis_version as version;
 
@@ -110,64 +115,55 @@ fn main() -> ExitCode {
     println!("1. 已读取 token（{} 字节，不打印）", aegis_ipc::TOKEN_BYTES);
 
     // ── 连管道 ───────────────────────────────────────────────────────
-    let cli = match PipeClient::connect_named(&args.pipe) {
+    //
+    // 从这里往下的整段流程（握手 → 鉴权 → 请求）走的是
+    // `aegis_ipc::client::Session`。它用**类型状态**把顺序钉死：
+    // 没握手拿不到 `Handshook`，没鉴权拿不到 `Ready`，而 `request()`
+    // 只挂在 `Ready` 上。所以下面这段**不可能**写成"跳过握手直接鉴权"。
+    let conn = match Session::connect(&args.pipe) {
         Ok(c) => c,
         Err(e) => {
-            eprintln!("[FATAL] 连不上管道：{e}");
+            eprintln!("[FATAL] {e}");
             eprintln!("  aegisd 可能没启动，或用了不同的 --pipe。");
             return ExitCode::from(3);
         },
     };
-    let end = cli.end();
     println!("2. 已连接");
 
     // ── 握手（在鉴权之前）────────────────────────────────────────────
-    let hs = match encode_handshake(1) {
-        Ok(b) => b,
-        Err(e) => {
-            eprintln!("[FATAL] 编码握手帧失败：{e}");
-            return ExitCode::from(4);
-        },
-    };
-    if let Err(e) = end.send_raw(&hs) {
-        eprintln!("[FATAL] 发握手失败：{e}");
-        return ExitCode::from(4);
-    }
     println!("3. → 版本握手（本端 {}）", aegis_ipc::local_version());
-
-    let mut reader = aegis_ipc::FrameReader::new();
-    let reply = match end.recv(&mut reader) {
-        Ok(f) => f,
+    let hs = match conn.handshake() {
+        Ok(h) => h,
+        Err(ClientError::Incompatible { peer, reason }) => {
+            // 版本行照样打出来：人得先知道对面是谁，才知道该升级谁。
+            println!("4. ← 服务端版本 {peer}：{:?}", Verdict::Reject(reason));
+            eprintln!("[FATAL] 版本不兼容，到此为止：{reason}");
+            eprintln!("  不会把 token 发给一个版本谈不拢的对端。");
+            return ExitCode::from(4);
+        },
         Err(e) => {
-            eprintln!("[FATAL] 收握手应答失败：{e}");
+            eprintln!("[FATAL] {e}");
             return ExitCode::from(4);
         },
     };
-    let peer = match aegis_ipc::HandshakePayload::decode(&reply.payload) {
-        Ok(p) => p.to_triple(),
-        Err(e) => {
-            eprintln!("[FATAL] 握手应答解析失败：{e}");
-            return ExitCode::from(4);
-        },
-    };
-    let verdict = check_compat(peer, aegis_ipc::local_version());
+    let peer = hs.handshake().peer();
+    let verdict = hs.handshake().verdict();
     println!("4. ← 服务端版本 {peer}：{verdict:?}");
-    if let aegis_ipc::Verdict::Reject(reason) = verdict {
-        eprintln!("[FATAL] 版本不兼容，到此为止：{reason}");
-        eprintln!("  不会把 token 发给一个版本谈不拢的对端。");
-        return ExitCode::from(4);
-    }
 
     // ── 鉴权 ─────────────────────────────────────────────────────────
-    if let Err(e) = end.send(msg_type::AUTH, 0, 2, token.to_hex().as_bytes()) {
-        eprintln!("[FATAL] 发鉴权失败：{e}");
-        return ExitCode::from(4);
-    }
     println!("5. → token 鉴权");
-
-    let auth = match end.recv(&mut reader) {
-        Ok(f) => f,
-        Err(e) => {
+    let mut ready = match hs.authenticate(&token) {
+        Ok(r) => {
+            println!("6. ← 鉴权通过");
+            r
+        },
+        Err(ClientError::AuthDenied(msg)) => {
+            println!("6. ← 鉴权失败");
+            eprintln!("[FATAL] 鉴权失败：{msg}");
+            eprintln!("  不重试。自动重试会把「token 不对」变成一次慢速拒绝服务。");
+            return ExitCode::from(5);
+        },
+        Err(ClientError::NoAuthReply(e)) => {
             // 服务端对鉴权失败是**立刻断开、不回任何响应**，
             // 所以收不到应答的第一嫌疑就是 token 不对。
             eprintln!("[FATAL] 没收到鉴权应答：{e}");
@@ -175,41 +171,24 @@ fn main() -> ExitCode {
             eprintln!("  收不到应答，第一嫌疑就是 token 不对。");
             return ExitCode::from(5);
         },
-    };
-    let ok = auth.payload == b"ok";
-    println!("6. ← 鉴权{}", if ok { "通过" } else { "失败" });
-    if !ok {
-        eprintln!(
-            "[FATAL] 鉴权失败：{}",
-            String::from_utf8_lossy(&auth.payload)
-        );
-        eprintln!("  不重试。自动重试会把「token 不对」变成一次慢速拒绝服务。");
-        return ExitCode::from(5);
-    }
-
-    // ── 发请求 ───────────────────────────────────────────────────────
-    let word = args.cmd.word();
-    if let Err(e) = end.send(msg_type::REQUEST, 0, 3, word.as_bytes()) {
-        eprintln!("[FATAL] 发请求失败：{e}");
-        return ExitCode::from(4);
-    }
-    println!("7. → 请求 {word}");
-
-    let resp = match end.recv(&mut reader) {
-        Ok(f) => f,
         Err(e) => {
-            eprintln!("[FATAL] 收应答失败：{e}");
+            eprintln!("[FATAL] {e}");
             return ExitCode::from(4);
         },
     };
-    let text = String::from_utf8_lossy(&resp.payload).to_string();
+
+    // ── 发请求 ───────────────────────────────────────────────────────
+    let word = args.cmd.word();
+    println!("7. → 请求 {word}");
 
     // 成败按**前缀**判，不靠在正文里搜"失败"两个字。
     // 靠搜的下场是：服务端哪天把拒绝原因写成了"未执行"，
     // 这里就当成功，而人拿着绿色的结果以为规则已经装上。
-    let body = match classify(&text) {
+    // 这条判定现在收在 `Session::request` 里：服务端明确拒绝会变成
+    // `ClientError::Rejected`，不会和"链路故障"混在一起。
+    let body = match ready.request(word) {
         Ok(b) => b,
-        Err(reason) => {
+        Err(ClientError::Rejected(reason)) => {
             eprintln!("[拒绝] {reason}");
             if args.cmd.dangerous() {
                 eprintln!(
@@ -219,6 +198,10 @@ fn main() -> ExitCode {
                 eprintln!("  （token 只证明你是本机客户端，证明不了你有权改网络状态）");
             }
             return ExitCode::from(8);
+        },
+        Err(e) => {
+            eprintln!("[FATAL] {e}");
+            return ExitCode::from(4);
         },
     };
 
@@ -241,7 +224,7 @@ fn main() -> ExitCode {
         Cmd::Status => {},
     }
 
-    let status = match Status::from_text(body) {
+    let status = match Status::from_text(&body) {
         Ok(s) => s,
         Err(e) => {
             eprintln!("[FATAL] 状态文档解析失败：{e}");

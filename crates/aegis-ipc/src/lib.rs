@@ -7,13 +7,17 @@
 //! | 帧编解码 / 版本握手（本文件） | 否 | 定长头 + 校验和 + 版本兼容判定 |
 //! | [`endpoint`] | 否 | 管道名与 SDDL 常量 |
 //! | [`token`] | 部分（仅随机数） | 一次性 token 与**常量时间**比对 |
+//! | [`client`] | 是（经 [`pipe`]） | 客户端会话：握手 → 鉴权 → 请求（**类型状态**保证顺序） |
 //! | [`pipe`] | **是** | 建管道 / 连管道 / 收发帧 |
 //!
 //! 帧格式、版本判定、token 比对都不碰 Win32，因此能脱离权限环境完整测试；
 //! `unsafe` 压在 [`pipe`] 一个文件里。
 //!
-//! ⚠ 管道**鉴权流程**（收到 AUTH 帧后校验 token、失败即断开）属于
-//! `aegisd` 的服务端主循环，不在本 crate —— 这里只提供零件。
+//! ⚠ 鉴权是**两端的事**，别搞混：
+//! - **服务端**（收到 AUTH 帧后校验 token、失败即断开不回响应）属于
+//!   `aegisd` 的服务端主循环，**不在**本 crate；
+//! - **客户端**（握手 → 送 token → 失败不许重试）在 [`client`]。
+//!   原先它只写在 `aegisctl` 里，GUI 出现后就会有第二份拷贝，所以收进来了。
 //!
 //! # 为什么刻意不用 serde / bincode
 //! 帧布局是**跨进程二进制契约**：`aegisd`（SYSTEM）与 `aegisctl`（普通权限）
@@ -34,6 +38,7 @@
 //! 16+N 4  载荷校验和（FNV-1a 32）
 //! ```
 
+pub mod client;
 pub mod ctl;
 pub mod endpoint;
 pub mod peer;
@@ -42,6 +47,7 @@ pub mod token;
 pub mod tokenfile;
 pub mod version;
 
+pub use client::{talk, ClientError, Connected, Handshook, Ready, Session};
 pub use ctl::{
     classify, risk_of, GuardView, Status, StatusError, DENY_PREFIX, GUARD_EFFECTIVE,
     GUARD_INEFFECTIVE, GUARD_OFF, GUARD_UNKNOWN, OK_PREFIX, REQ_APPLY, REQ_CONFIRM, REQ_PING,
