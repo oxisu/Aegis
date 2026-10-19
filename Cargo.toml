@@ -24,6 +24,12 @@
 [workspace]
 resolver = "2"
 members = ["crates/*"]
+# ⚠ `ui/src-tauri`（GUI 外壳的 Rust 侧）**刻意不进本 workspace**：
+#   1. Tauri 要 msvc 工具链，本项目是 gnu 宿主，混进来会让 CI 的
+#      「格式与静态检查」（gnu）去编 tauri，第一次就把 CI 搞挂；
+#   2. 它有自己的 Cargo.lock（Tauri 依赖树巨大，不该污染后端的锁文件）。
+#   它自己声明 `[workspace]` 成为独立根，这里再显式排除一次，双保险。
+exclude = ["ui/src-tauri"]
 
 # ── 变异测试专用 profile ──────────────────────────────────────────────────
 # cargo-mutants 要为每个变异体单独编译+链接一次测试二进制（163 个变异体 =

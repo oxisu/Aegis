@@ -1,0 +1,11 @@
+{
+  "identifier": "default",
+  "description": "Aegis 控制台的默认权限：只有三个只读命令，没有任何写/执行能力。",
+  "windows": ["main"],
+  "permissions": [
+    "core:default",
+    "allow-status",
+    "allow-ping",
+    "allow-endpoint-info"
+  ]
+}

@@ -1,0 +1,39 @@
+# Aegis 控制台 —— Tauri 外壳的 Rust 侧
+#
+# ⚠ 这是**独立 workspace**（上面的空 `[workspace]` 表就是声明），刻意不并入
+#   仓库根的那个。理由见根 `Cargo.toml` 的 `exclude` 注释：
+#   Tauri 要 msvc 工具链，而后端是 gnu 宿主，混进同一个 workspace 会让
+#   CI 的「格式与静态检查」去编 Tauri，第一次跑就挂。
+
+[workspace]
+
+[package]
+name        = "aegis-console"
+description = "Aegis 控制台外壳：不提权，只把界面请求翻译成命名管道上的 IPC"
+# ⚠ 版本号是同一个数字的第 4 处拷贝（根 VERSION / ui/package.json /
+#   ui/src/version.ts / 这里）。CI 只查前两处，改版本时四处一起改。
+version      = "0.1.0-alpha.2"
+edition      = "2021"
+rust-version = "1.85"
+license      = "AGPL-3.0-or-later"
+authors      = ["Aegis Contributors"]
+
+[lib]
+name       = "aegis_console"
+crate-type = ["lib"]
+
+[[bin]]
+name = "aegis-console"
+path = "src/main.rs"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri      = { version = "2", features = [] }
+serde      = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# 开 `json` 是为了让 `Status` 的字段**只有一处定义**：外壳这边不手写 JSON
+# 映射，否则 `Status` 加字段时这里不会编译失败，只会静默少一列。
+aegis-ipc = { path = "../../crates/aegis-ipc", features = ["json"] }
