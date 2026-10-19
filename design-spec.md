@@ -483,7 +483,16 @@ sequenceDiagram
 - `notify` —— 监听配置变更、兜底同步。
 - `tokio` —— 异步调度。
 
-**前端：** 推荐 **Tauri**（后端本就是 Rust，GUI 与引擎同语言、体积小、不打包 Chromium）；若团队更熟 React 三件套且要快速富界面，可用 **Electron + 本地 Rust 服务**（代价是体积与"壳里再套 Rust 子进程"的割裂）。GUI 只负责配置/日志/模式/告警。
+**前端：** 外壳用 **Tauri**（后端本就是 Rust，GUI 与引擎同语言、体积小、不打包 Chromium）；界面框架用 **Vue 3 + Element Plus**。
+
+> ⚠ **2026-10-19 修正**：本节原写"Electron + 本地 Rust 服务"作为备选，
+> 而 §14 原写"Tauri + React + Fluent UI v9"。以实测为准改成
+> **Tauri（外壳）+ Vue 3 + Element Plus（框架）**，理由与全部实测证据见
+> [`docs/FRONTEND-STACK.md`](docs/FRONTEND-STACK.md)：
+> ① Tauri 的硬前置（MSVC + SDK + WebView2）**本机全部实测满足**；
+> ② 选它的决定性理由是**能直接 `use aegis_ipc`**，线协议不可能漂移；
+> ③ 实测**浏览器 JS 打不开命名管道**，纯网页方案必须额外常驻桥进程 +
+> localhost 端口，已出局。GUI 只负责配置/日志/模式/告警。
 
 ---
 
@@ -534,8 +543,10 @@ sequenceDiagram
 ## 9. 实施路线图（MVP → 进阶）
 
 **阶段 0 · 权限与骨架**
+- [x] GUI ↔ 服务的 named pipe 通道本身（显式 DACL + 一次性 token 鉴权）→ `aegis-ipc`
 - [ ] Windows Service 宿主 + 管理员自启动/提权逻辑（UAC / 服务安装）
-- [ ] GUI（Tauri）↔ 服务 named pipe 通信骨架
+- [ ] GUI（**Tauri v2 + Vue 3 + Element Plus**，见 §21.5）↔ 服务通信**骨架**
+      ——通道已有，缺的是把 `aegisctl` 里那段会话流程抽成可复用的客户端
 - [ ] 网络设置变更前的快照 + 退出还原机制（防断网残留）
 
 **阶段 1 · 感知 + Clash 接管（核心）**
@@ -704,7 +715,14 @@ Aegis 不碰 NAT、不碰代理链、不做转发。这样职责清晰，
 
 ## 14. UI 设计指引（风格与布局）
 
-**风格结论**：HypoMux 并非 Vue，而是 **Wails v3 + React + Fluent UI**（微软设计语言）。复刻其观感推荐 **Tauri + React + Fluent UI v9**（Rust 后端，技术家族一致）。若坚持 Vue，可用 Vue3 + 类 Fluent 组件库近似还原，但 React+Fluent UI 最忠实。
+**风格结论**：HypoMux 并非 Vue，而是 **Wails v3 + React + Fluent UI**（微软设计语言）。
+
+> ⚠ **2026-10-19 修正**：原推荐"Tauri + React + Fluent UI v9"以**复刻 HypoMux 观感**为目标。
+> 本项目当前阶段的目标是**最快做出一个能看懂状态的界面**，不是复刻观感，
+> 所以界面框架改为 **Vue 3 + Element Plus**（表格/表单/弹窗/Tabs/通知开箱即用）；
+> **外壳仍用 Tauri**，理由见 [`docs/FRONTEND-STACK.md`](docs/FRONTEND-STACK.md)。
+> 若日后要严格复刻 Fluent 观感，再单独立项换组件库——那是纯前端替换，
+> 不动 Rust 侧，也不动 IPC。
 
 **布局草图（参考 HypoMux 风格：左侧导航 + 内容区 + 遥测大屏）：**
 ```text
@@ -723,8 +741,10 @@ Aegis 不碰 NAT、不碰代理链、不做转发。这样职责清晰，
 └──────────┴───────────────────────────────────────────────┘
 ```
 - **主题**：浅色/深色切换（与 HypoMux 一致）。
-- **组件库**：Fluent UI v9（Card、DataGrid、Donut/Bar chart、Toast、Drawer、Tabs）。
-- **实时性**：仪表盘与连接表走 ws 推送 + 节流渲染；图表用轻量 SVG/Canvas。
+- **组件库**：Element Plus（Table / Form / Dialog / Tabs / Notification / Card）。
+  布局草图沿用上面的左侧导航 + 内容区；图表用轻量 SVG/Canvas 或 ECharts。
+- **实时性**：⚠ 现阶段 `REQ_STATUS` 是**请求/响应式**，先做**定时轮询**（1s 级）+ 节流渲染，
+  不要一上来就上 ws 推送——推送要在服务端加事件通道，属于新增攻击面，留到真有性能问题再说。
 
 ---
 
@@ -1035,11 +1055,11 @@ Aegis 的审计规则、告警阈值、日志级别。
 1. **组件依赖图 + 时序图**（开机绝缘笼 → 拓扑指纹 → 角色放行 → 网口变动熔断）。
 2. **Rust 最小骨架**：Clash API + **WFP 动态会话绝缘笼 + 53 端口封锁** + **拓扑指纹(SHA-256)** + **`NotifyIpInterfaceChange` 网口熔断** + **Named Pipe 显式 DACL** + （可选）**Boot-Time 持久过滤器背板**。
 3. **规则集模板**：校园网纯国内白名单（`FINAL,REJECT` 收尾）/ 热点全规则 两套 YAML。
-4. **UI 原型**：Tauri + React + Fluent UI v9 的仪表盘 + 角色分配控制台 + 实时连接表 + 每网卡遥测大屏。
+4. **UI 原型**：**Tauri v2 + Vue 3 + Element Plus** 的仪表盘 + 角色分配控制台 + 实时连接表 + 每网卡遥测大屏（⚠ 2026-10-19 由 React + Fluent UI v9 改定，见 §21.5）。
 5. **角色模型与 Clash/HypoMux 协同矩阵**：明确四角色下两程序的启停、TUN/系统代理、路由归属。
 6. **参考适配器 + fixture 契约测试**（§2A.4 ③）：先做 1 个参考适配器（建议 sing-box），把"适配"从形容词变成"这组 fixture 过没过"。
 
-### 21.1 已落地进度（截至 2026-10-18）
+### 21.1 已落地进度（截至 2026-10-19）
 
 | 项 | 状态 | 落点 |
 |---|---|---|
@@ -1054,9 +1074,25 @@ Aegis 的审计规则、告警阈值、日志级别。
 | 证据导出（CSV/JSON 证据包） | ✅ | `aegis-audit::export`（CSV 防公式注入 + JSON 证据包） |
 | 适配器 SPI（能力接口） | ✅ | `aegis-orchestrator`：`Capability` + 逐能力失败模式 + 能力矩阵 |
 | 参考适配器 + 契约测试夹具 | ✅ | `aegis-orchestrator::reference` / `::contract`（§2A.4 ③） |
+| **下游规则失效兜底：运行时接线** | ✅ 步 1–5（步 5 剩一半） | `aegisd` + `aegis-ipc`；见 `docs/GUARD-WIRING.md` |
 | 规则集模板（校园网 / 热点两套 YAML） | ⬜ 未做 | §21 第 3 项 |
-| UI 原型（Tauri + Fluent UI v9） | ⬜ 未做 | §21 第 4 项 |
+| UI 原型 | ⬜ 未做（**选型已定，见 §21.5**） | §21 第 4 项 |
 | **最小可运行链路** | ✅ | `aegisd` + `aegisctl`：配置 → IPC → 感知 → 裁决 → 干跑 → 审计 |
+
+### 21.5 ⚠ UI 原型的选型修正：不再默认 Tauri（2026-10-19 实测）
+
+§16 与本节第 4 项原本写的是 **Tauri + React + Fluent UI v9**。
+**以实测为准做了修正**，结论与证据在 [`docs/FRONTEND-STACK.md`](docs/FRONTEND-STACK.md)，要点：
+
+- **Tauri 的硬前置在这台机器上是满足的**——MSVC 生成工具装在
+  `D:\vs-buildtools`（VC 14.44），`cl.exe` / `link.exe` 齐全，
+  编译链接运行实测通过。⚠ 这条修正了本机环境笔记里"VS Build Tools 装不上"的旧结论。
+- 但 Tauri 仍要求把**默认 Rust 工具链切成 msvc**，而本项目是 gnu 宿主
+  （`rust-toolchain.toml` 显式固定），切换等于全量重编且动摇现有基线。
+- 另一个实测：**浏览器 JS 打不开命名管道**，Node 可以。所以"纯网页"方案
+  必须额外引入一个常驻桥进程 + localhost 端口，反而比打包一个壳更糟。
+- **改定：Electron + Vue 3 + Element Plus**，非提权独立进程，
+  Node 主进程直连现有命名管道，不新增本地端口。
 
 ### 21.3 最小链路的启动顺序（不可调换）
 

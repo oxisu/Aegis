@@ -54,7 +54,7 @@ Aegis 建立一张**独立于任何上层代理软件的 OS 级安全底座**：
 | `aegisd` | ✅ 最小链路 | 配置（失败即退）→ IPC 命名管道 → 拓扑快照 → 角色裁决 → **WFP 仅干跑** → 审计落盘 → **守卫（默认只观测；`--guard-act` 才真的撤放行）** |
 | `aegisctl` | ✅ 可用 | 控制端：握手 → token 鉴权 → 状态查询 / 心跳 + `apply` / `confirm` / `rollback` |
 
-**工程状态**：508 项单元测试 + `clippy -D warnings` 全工作区干净；
+**工程状态**：545 项单元测试 + `clippy -D warnings` 全工作区干净；
 变异测试（`cargo mutants`）已接入并有分片方案。
 
 ### 四组真机验证实验（都留下了"结论 + 代价"）
@@ -123,6 +123,27 @@ Aegis 建立一张**独立于任何上层代理软件的 OS 级安全底座**：
 复现命令与判读方法见 [`docs/GUARD-WIRING.md` §5.1.1](docs/GUARD-WIRING.md)。
 
 详见 [`docs/DOWNSTREAM-GUARD.md`](docs/DOWNSTREAM-GUARD.md)。
+
+## 前端（下一步）
+
+底座已经能跑，**缺的是一个让人看懂"现在什么状态"的界面**。
+选型结论与全部实测证据见 [`docs/FRONTEND-STACK.md`](docs/FRONTEND-STACK.md)。
+
+- **外壳 Tauri v2 + 界面 Vue 3 + Element Plus**——这两件事正交，不是二选一。
+  ⚠ 这条修正了设计文档原定的 React + Fluent UI v9：框架那层换成 Vue + Ele，
+  外壳不变。
+- 选 Tauri 的决定性理由是**能直接 `use aegis_ipc`**：`PipeClient`、
+  `Status::from_text`、`IpcToken`、帧编解码全是现成的，线协议不可能漂移。
+  换成 Electron 就得在 JS 里把"握手 → 版本校验 → token 鉴权 → 请求 → 应答"
+  重写一遍，而其中"握手必须在鉴权之前""token 不对不许重试"这两条
+  写错了不会报错、只会让鉴权变弱。
+- 关键实测（都写进了上面那份文档）：
+  - **本机 MSVC 完整可用**——装在 `D:\vs-buildtools`（VC 14.44），
+    `cl.exe` 编译链接运行通过；`cargo +stable-x86_64-pc-windows-msvc`
+    编 `aegisd` **55 秒**通过，且**不需要设 `INCLUDE`/`LIB`**。
+    ⚠ 这修正了"VS Build Tools 装不上"的旧结论（它装在 D 盘，之前只查了 C 盘）。
+  - **浏览器 JS 打不开命名管道，Node 可以**（建连 + 回显实测通过）→
+    纯网页方案必须额外常驻一个桥进程 + localhost 端口，反而更差，**已出局**。
 
 ### 依赖方向铁律
 

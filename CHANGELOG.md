@@ -9,6 +9,32 @@
 
 ## [Unreleased]
 
+### Changed
+
+- **前端选型改定：Tauri v2（外壳）+ Vue 3 + Element Plus（框架）**
+  - ⚠ 修正了设计文档原定的 **Tauri + React + Fluent UI v9**，也修正了
+    §5 里"Electron + 本地 Rust 服务"的备选。结论与全部实测证据见
+    **`docs/FRONTEND-STACK.md`**
+  - 关键一条：**这两件事是正交的**。"Element Plus + Vue"回答"界面用什么写"，
+    "Tauri"回答"界面跑在什么壳里"，不是二选一
+  - 选 Tauri 的决定性理由是**能直接 `use aegis_ipc`**：`PipeClient` /
+    `Status::from_text` / `IpcToken` / 帧编解码全是现成的，**线协议不可能漂移**。
+    换 Electron 就得在 JS 里把"握手 → 版本校验 → token 鉴权 → 请求 → 应答"
+    重写一遍，而"握手必须在鉴权之前""token 不对不许重试"这两条
+    **写错了不会报错、只会让鉴权变弱**
+  - ⚠ **修正一条过时结论**：本机笔记一直写"VS Build Tools 装不上"。
+    实测它**装在 `D:\vs-buildtools`**（VC 14.44.35207，`cl.exe`/`link.exe` 齐全，
+    hello world 编译链接运行通过）——之前只查了 C 盘就下了"没装"的结论。
+    据此才敢选 Tauri
+  - 实测：不需要设 `INCLUDE`/`LIB`、也不把 `cl.exe` 放进 PATH，
+    `cargo +stable-x86_64-pc-windows-msvc build -p aegisd` **55 秒通过**
+    （含完整 `windows` 0.58）；rustc 自己探测得到 MSVC
+  - 实测：**浏览器 JS 打不开命名管道，Node 可以**（`\\.\pipe\name` 建连 +
+    回显通过）→ "纯网页"方案必须额外常驻一个桥进程 + localhost 端口，
+    比套个壳更糟，**已出局**
+  - 要付的账：后端 gnu / UI msvc **双工具链**（`cargo +stable-x86_64-pc-windows-msvc`
+    即可，不必切默认；`ui/` 下可另放一份 `rust-toolchain.toml` 隔离）
+
 ### Added
 
 - **`tools/cage-drill.sh`：绝缘笼全流程演练，**自动恢复**，不需要人在场**
