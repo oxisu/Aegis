@@ -208,6 +208,50 @@ aegisd --config <配置> --data-dir .aegis-run --serve-secs 600 --guard-interval
 
 ✅ **无误报**——这是步 2 敢接动作的前提。
 
+#### 5.1.1 A 组的**长跑**（周期 3s，连续约 12 分钟）
+
+上面 5 拍只能说明"刚启动那会儿是对的"。真正要排除的是**跑久了会平白
+报 Ineffective**——比如拓扑采集偶发失败、默认路由瞬时抖动、LUID 复用。
+所以让它在真机上连续跑了 **237 拍**：
+
+```text
+总行数: 237
+=== 全量判定分布 ===
+    237 生效
+=== 非『生效』行 ===
+（空）
+```
+
+- 配置：`config/config.example.toml` 复制一份，`tun_luid = 1689399750295552`
+  （本机真实默认出口，合成度量 35，网关 `10.41.0.1`）。
+- 命令：`aegisd --config .aegis-run/guard-observe.toml --data-dir .aegis-run
+  --pipe \\.\pipe\aegis --serve-secs 780 --guard-interval-secs 3`
+- 覆盖：学校日常用网（挂着网、有流量）。**没有**插拔网线 / 开关 Wi-Fi ——
+  这一段只能证明"稳态不误报"。
+
+✅ **结论：稳态零误报**，`Tighten` 可以接。
+
+⚠ **还没验的**：网络切换瞬间（拔网线 → 默认出口消失 → `Unknown`）。
+这一段按设计是"判不了就**不动手**"（`next_streak` 对 `Unknown` 原样返回），
+但**真机上没跑到过**，属于纸面正确。要验就得人工插拔，
+建议由使用者在自己方便的时候跑：
+
+```bash
+aegisd --config <填好 tun_luid 的配置> --data-dir .aegis-run \
+       --serve-secs 600 --guard-interval-secs 2
+# 跑起来之后：拔网线 → 等 30 秒 → 插回去
+# 期望：全程只有「生效」与「判不了（…）→ 不动手」，不该出现「若已接线，此刻会收紧」
+```
+
+> **复现时踩到的坑（已修）**：`--pipe` 要的是 Win32 完整路径
+> `\\.\pipe\<name>`。传裸名（`--pipe aegis-ob`）时内核回
+> **os error 123「文件名、目录名或卷标语法不正确」**，而启动日志那句提示写的是
+> "多半是已有实例占用"——**完全指错方向**，白查半天。
+> 现在 `aegisd` 会自动补前缀（`normalize_pipe_name`，有单测）。
+> 另外 Git Bash 会把 `\\.\pipe\aegis` 吃掉一个反斜杠（MSYS 路径转换），
+> 起进程建议用 PowerShell 的 `&` 调用运算符，别用 `Start-Process`（本机
+> `Path`/`PATH` 重复键会让它直接抛异常）。
+
 **B. 故意填错 `tun_luid = 1` → 断言 C 必然失败**
 
 ```text
