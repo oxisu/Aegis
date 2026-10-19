@@ -60,7 +60,8 @@ use aegis_core::role::{adjudicate_all, Confidence};
 use aegis_core::state::{insulation, State};
 use aegis_ipc::{
     check_compat, encode_handshake, msg_type, IpcToken, PipeServer, Status, DENY_PREFIX,
-    OK_PREFIX, REQ_APPLY, REQ_CONFIRM, REQ_PING, REQ_ROLLBACK, REQ_STATUS,
+    GuardView, OK_PREFIX, REQ_APPLY, REQ_CONFIRM, REQ_PING, REQ_ROLLBACK, REQ_STATUS,
+    GUARD_EFFECTIVE, GUARD_INEFFECTIVE, GUARD_UNKNOWN,
 };
 use aegis_sense::{default_egress, snapshot};
 use aegis_wfp::{
@@ -83,6 +84,16 @@ mod exit {
 /// 所以可以跨线程共享；真正不能跨线程的是 WFP 会话句柄，它**永远待在
 /// 看门狗线程里**（见 [`watch`]）。
 type TicketSlot = std::sync::Arc<std::sync::Mutex<Option<ApplyTicket>>>;
+
+/// 守卫对外可见的状态（进 IPC `Status`）。
+///
+/// 单独一个槽位，而不是塞进 `Status` 让守卫线程去改整个 `Status`：
+/// 后者会让守卫线程去抢 IPC 线程正在持有的锁。
+type GuardSlot = std::sync::Arc<std::sync::Mutex<GuardView>>;
+
+/// 审计日志。**审计要能回答"谁在什么时候把网断掉的"**，所以守卫的每个
+/// 动作都得落盘，不能只写在守护进程的日志里（那个会随会话一起没）。
+type AuditSlot = std::sync::Arc<std::sync::Mutex<AuditLog>>;
 
 /// 守卫观测的默认周期（秒）。
 ///
@@ -165,11 +176,14 @@ fn main() {
     // 再在后面悄悄失败——那种"说了但没做"的启动日志最坑人。
     let status_slot: Arc<Mutex<Option<Status>>> = Arc::new(Mutex::new(None));
     let ticket_slot: TicketSlot = Arc::new(Mutex::new(None));
+    // 守卫状态单独一个槽位：`aegisctl status` 要能看到"为什么断网"。
+    let guard_slot: GuardSlot = Arc::new(Mutex::new(GuardView::default()));
     let (ready_tx, ready_rx) = std_mpsc::channel::<Result<(), String>>();
     let serve_pipe = args.pipe.clone();
     let serve_token = token.clone();
     let serve_status = Arc::clone(&status_slot);
     let serve_ticket = Arc::clone(&ticket_slot);
+    let serve_guard = Arc::clone(&guard_slot);
     let serve_plan = plan.clone();
     thread::spawn(move || {
         let server = match PipeServer::bind_named(&serve_pipe) {
@@ -180,7 +194,14 @@ fn main() {
             },
         };
         let _ = ready_tx.send(Ok(()));
-        serve_forever(&server, &serve_token, &serve_status, &serve_plan, &serve_ticket);
+        serve_forever(
+            &server,
+            &serve_token,
+            &serve_status,
+            &serve_guard,
+            &serve_plan,
+            &serve_ticket,
+        );
     });
 
     match ready_rx.recv_timeout(Duration::from_secs(10)) {
@@ -312,6 +333,8 @@ fn main() {
     println!("  链节 seq  : {}", link.seq);
     println!("  链头      : {}", aegis_audit::hex(&link.hash));
     println!("  落盘      : {}", audit_path.display());
+    // 交给共享槽位：守卫线程也要往里写（收紧/恢复/转人工都得留证据）。
+    let audit: AuditSlot = Arc::new(Mutex::new(log));
 
     // 回读并校验：证明"写进去的和读出来的是同一条，且没被改过"
     match aegis_audit::read_records(&audit_path) {
@@ -345,6 +368,7 @@ fn main() {
         audit_len: link.seq,
         wfp_rules: plan.len(),
         wfp_invariants_ok: ok,
+        guard: GuardView::default(),
     };
 
     // 状态交给服务线程：在它拿到之前，任何 status 查询都会得到"启动中"
@@ -369,9 +393,11 @@ fn main() {
         Some(gap) => {
             println!("  ⚠ 未启用：{gap}");
             println!("  配置 proxy.mode 与 proxy.tun_luid 之后才会开始观测。");
+            *guard_slot.lock().unwrap() = GuardView::off(gap);
         },
         None if args.guard_interval_secs == 0 => {
             println!("  已关闭（--guard-interval-secs 0）。");
+            *guard_slot.lock().unwrap() = GuardView::off("已关闭（--guard-interval-secs 0）");
         },
         None => {
             let log = args.data_dir.join("guard-observe.log");
@@ -398,6 +424,8 @@ fn main() {
                 Duration::from_secs(args.guard_interval_secs),
                 log,
                 Arc::clone(&ticket_slot),
+                Arc::clone(&guard_slot),
+                Arc::clone(&audit),
                 args.guard_act,
             );
         },
@@ -442,6 +470,8 @@ fn spawn_guard_observer(
     interval: Duration,
     log: PathBuf,
     ticket: TicketSlot,
+    view: GuardSlot,
+    audit: AuditSlot,
     act: bool,
 ) {
     thread::spawn(move || {
@@ -453,14 +483,144 @@ fn spawn_guard_observer(
             thread::sleep(interval);
             ticks += 1;
             let line = if act {
-                observe_and_act(&cfg, &ticket, &mut tracker, &policy, ticks)
+                observe_and_act(&cfg, &ticket, &mut tracker, &policy, ticks, &view, &audit)
             } else {
-                observe_once(&cfg, ticks, &mut streak, policy.failure_threshold)
+                    let l = observe_once(&cfg, ticks, &mut streak, policy.failure_threshold);
+                // 观测模式也要更新状态：`aegisctl status` 里得能看到
+                // "守卫在看着，结论是什么"，否则和没启用分辨不出来。
+                publish(&view, &ticket, &audit, None, &l, None);
+                l
             };
             println!("{line}");
             append_guard_line(&log, &line);
         }
     });
+}
+
+/// 把这一拍的结论写进对外状态，必要时落一条审计。
+///
+/// ⚠ **只在状态翻转时写审计**，不是每拍都写：守卫每 3 秒跑一次，
+/// 一条"生效"写一次的话一天就是近 3 万条噪音，真正值钱的
+/// "什么时候断的网"会被淹掉。
+fn publish(
+    view: &GuardSlot,
+    ticket: &TicketSlot,
+    audit: &AuditSlot,
+    verdict: Option<&GuardVerdict>,
+    line: &str,
+    event: Option<GuardEvent>,
+) {
+    let Ok(mut v) = view.lock() else { return };
+
+    // 收紧与否认**票据上的实际状态**，不看"打算收紧"——
+    // 看门狗执行前那 200 毫秒里两者是不一样的，而那正是最容易被问的时刻。
+    v.tightened = ticket
+        .lock()
+        .ok()
+        .and_then(|g| g.as_ref().map(|t| t.permits_suspended))
+        .unwrap_or(false);
+
+    match verdict {
+        Some(vd) => {
+            v.verdict = match vd {
+                GuardVerdict::Effective => GUARD_EFFECTIVE.to_string(),
+                GuardVerdict::Ineffective { .. } => GUARD_INEFFECTIVE.to_string(),
+                GuardVerdict::Unknown { .. } => GUARD_UNKNOWN.to_string(),
+            };
+            v.reason = vd.reason();
+        },
+        // 拓扑都没采到：那也是"判不了"，不能挂着上一次的结论装作还在看着
+        None => {
+            v.verdict = GUARD_UNKNOWN.to_string();
+            v.reason = strip_tick(line);
+        },
+    }
+
+    // ⚠ 一旦置上就**不再自动清除**：清除等于"又自动开关起来"，
+    // 而把它交给人的前提正是"别再自己动了"。
+    if let Some(GuardEvent::NeedsHuman { reason }) = &event {
+        v.needs_human = true;
+        v.reason = strip_tick(reason);
+    }
+    drop(v);
+
+    if let Some(e) = event {
+        append_guard_audit(audit, e);
+    }
+}
+
+/// 去掉日志行里的 `[守卫 #N] ` 前缀。状态里不需要拍号，
+/// 留着反而让人以为是"第几次断网"。
+fn strip_tick(line: &str) -> String {
+    line.split_once(']')
+        .map_or_else(|| line.to_string(), |(_, rest)| rest.trim().to_string())
+}
+
+/// 守卫的**状态翻转**。落审计的只有这几种，每拍的"生效"不落。
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum GuardEvent {
+    /// 撤掉放行 → 全都拒绝。⚠ 这是会断网的动作，必须有据可查。
+    Tightened { reason: String },
+    /// 放行装回去了（自动恢复）。
+    Relaxed { reason: String },
+    /// 停止自动动作，等人工。
+    NeedsHuman { reason: String },
+}
+
+impl GuardEvent {
+    /// 审计里的规则名。
+    ///
+    /// ⚠ 沿用 `BOOT:` 的前缀约定：**这些是控制面事件，不是真实连接**。
+    /// 导出证据包时必须按 `GUARD:` 前缀过滤掉——核对证据的人不知道
+    /// 一条 `src=127.0.0.1:0` 的"连接"其实是守卫在收紧。
+    fn rule(&self) -> &'static str {
+        match self {
+            Self::Tightened { .. } => "GUARD:TIGHTEN",
+            Self::Relaxed { .. } => "GUARD:RELAX",
+            Self::NeedsHuman { .. } => "GUARD:NEEDS_HUMAN",
+        }
+    }
+
+    fn reason(&self) -> &str {
+        match self {
+            Self::Tightened { reason }
+            | Self::Relaxed { reason }
+            | Self::NeedsHuman { reason } => reason,
+        }
+    }
+}
+
+/// 往审计链里追加一条守卫事件。
+///
+/// 失败**只打印不退出**：审计写不进去确实严重，但此时守卫已经把网收紧了，
+/// 让进程退出会让动态会话清空 → 规则全没 → 从"全都拒绝"变成"全不设防"，
+/// 那比丢一条审计记录糟得多。
+fn append_guard_audit(audit: &AuditSlot, event: GuardEvent) {
+    let Ok(mut log) = audit.lock() else {
+        return;
+    };
+    let e = AuditEvent {
+        ts_ms: now_ms(),
+        pid: std::process::id(),
+        process_path: std::env::current_exe()
+            .map(|p| p.to_string_lossy().to_string())
+            .unwrap_or_else(|_| "<aegisd>".to_string()),
+        src: SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0),
+        dst: SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 0),
+        protocol: Protocol::Other(0),
+        host: None,
+        rule: Some(format!("{}:{}", event.rule(), event.reason())),
+        luid: 0,
+        role: InterfaceRole::Isolated,
+        action: match event {
+            GuardEvent::Tightened { .. } | GuardEvent::NeedsHuman { .. } => Action::FirewallBlock,
+            GuardEvent::Relaxed { .. } => Action::Allow,
+        },
+    };
+    match log.append(&e).and_then(|_| log.flush()).and_then(|()| log.sync()) {
+        Ok(()) => println!("  [审计] 已记录 {}", event.rule()),
+        Err(err) => eprintln!("  [审计] ⚠ 写入失败（守卫动作已执行）：{err}"),
+    }
 }
 
 /// 步 2：判完**真的动手**。
@@ -474,27 +634,81 @@ fn observe_and_act(
     tracker: &mut GuardTracker,
     policy: &GuardPolicy,
     tick: u64,
+    view: &GuardSlot,
+    audit: &AuditSlot,
 ) -> String {
     let verdict = match collect_verdict(cfg, tick) {
         Ok(v) => v,
-        Err(line) => return line,
-    };
-    let action = tracker.observe(&verdict, now_ms(), *policy);
-    let line = match action {
-        GuardAction::Nothing => format!("[守卫 #{tick}] {}", verdict_brief(&verdict)),
-        GuardAction::Tighten(_) => suspend_permits(ticket, tick, &verdict),
-        GuardAction::Relax(_) => restore_permits(ticket, tick, &verdict),
-        GuardAction::NeedsHuman { reason } => {
-            format!("[守卫 #{tick}] ⚠ 交给人工：{reason}")
+        Err(line) => {
+            // 采不到拓扑也是"判不了"，同样要对外可见——
+            // 否则 `status` 里会一直挂着上一次的结论。
+            publish(view, ticket, audit, None, &line, None);
+            return line;
         },
     };
+    let action = tracker.observe(&verdict, now_ms(), *policy);
+
+    // ⚠ 是否真的动了手，看**票据上的标记**，不去解析日志文本——
+    // 解析文本的话，改一个字的文案就会让审计漏记一条断网。
+    let (line, event) = match action {
+        GuardAction::Nothing => (format!("[守卫 #{tick}] {}", verdict_brief(&verdict)), None),
+
+        GuardAction::Tighten(_) => {
+            let l = suspend_permits(ticket, tick, &verdict);
+            let acted = flag_of(ticket, |t| t.suspend_requested);
+            let ev = acted.then(|| GuardEvent::Tightened {
+                reason: verdict.reason(),
+            });
+            (l, ev)
+        },
+
+        GuardAction::Relax(_) => {
+            let l = restore_permits(ticket, tick, &verdict);
+            let acted = flag_of(ticket, |t| t.restore_requested);
+            let ev = acted.then(|| GuardEvent::Relaxed {
+                reason: verdict.reason(),
+            });
+            (l, ev)
+        },
+
+        GuardAction::NeedsHuman { reason } => {
+            let l = format!("[守卫 #{tick}] ⚠ 交给人工：{reason}");
+            (l, Some(GuardEvent::NeedsHuman { reason }))
+        },
+    };
+
     // 已经判"该放宽"、但放行还没真的装回去 → 按**守卫周期**重试（3 秒），
     // 不是看门狗的 200 毫秒。装不回去通常是环境变了，狂试没用，
     // 但要试够几次再转人工。
-    match retry_restore(ticket, tick) {
+    let retried = retry_restore(ticket, tick);
+    // 重试到上限而放弃，和 tracker 主动说 NeedsHuman 是**同一类事**：
+    // 都表示"不再自动动作了"，都得进状态 + 审计，否则用户只看到网断了。
+    let gave_up = retried.as_deref().is_some_and(|r| r.contains("需人工"));
+
+    let event = match event {
+        Some(e) => Some(e),
+        None if gave_up => Some(GuardEvent::NeedsHuman {
+            reason: retried.clone().unwrap_or_default(),
+        }),
+        None => None,
+    };
+
+    let line = match retried {
         Some(retry) => format!("{line}\n{retry}"),
         None => line,
-    }
+    };
+    publish(view, ticket, audit, Some(&verdict), &line, event);
+    line
+}
+
+/// 读票据上的一个标记。**读不到一律当 false**——宁可漏一条审计，
+/// 也不能凭"大概动了手"去记一条没发生的断网。
+fn flag_of(ticket: &TicketSlot, f: impl Fn(&ApplyTicket) -> bool) -> bool {
+    ticket
+        .lock()
+        .ok()
+        .and_then(|g| g.as_ref().map(f))
+        .unwrap_or(false)
 }
 
 /// 收紧：**撤掉放行，留下拒绝底板**。
@@ -704,6 +918,7 @@ fn serve_forever(
     server: &PipeServer,
     token: &IpcToken,
     status: &Arc<Mutex<Option<Status>>>,
+    guard: &GuardSlot,
     plan: &[FilterSpec],
     ticket: &TicketSlot,
 ) {
@@ -712,7 +927,7 @@ fn serve_forever(
             Ok(e) => e,
             Err(_) => return,
         };
-        if let Err(_e) = serve_one(&end, token, status, plan, ticket) {
+        if let Err(_e) = serve_one(&end, token, status, guard, plan, ticket) {
             // 连接层面的错误（断开 / 帧坏）视为这次会话结束，继续等下一个
         }
         // ⚠ 必须显式 disconnect，否则下一次 accept 会失败：
@@ -729,6 +944,7 @@ fn serve_one(
     end: &aegis_ipc::PipeEnd,
     token: &IpcToken,
     status: &Arc<Mutex<Option<Status>>>,
+    guard: &GuardSlot,
     plan: &[FilterSpec],
     ticket: &TicketSlot,
 ) -> Result<(), aegis_ipc::PipeError> {
@@ -798,7 +1014,15 @@ fn serve_one(
                 } else if word == REQ_STATUS {
                     // 启动还没走完时如实说"启动中"，不编一个看起来正常的状态
                     match status.lock().ok().and_then(|s| s.clone()) {
-                        Some(s) => s.to_text(),
+                        // 守卫状态是**活的**，不能直接用启动时那份快照——
+                        // 快照会永远显示"没在干活"，而用户恰恰是在断了网
+                        // 之后才来查的。
+                        Some(mut s) => {
+                            if let Ok(g) = guard.lock() {
+                                s.guard = g.clone();
+                            }
+                            s.to_text()
+                        },
                         None => "启动中：状态尚不可用".to_string(),
                     }
                 } else if word == REQ_APPLY {
@@ -1212,33 +1436,13 @@ impl Args {
 
         Self {
             config,
-            pipe: normalize_pipe_name(&pipe),
+            pipe: aegis_ipc::normalize_pipe_name(&pipe),
             token_file,
             data_dir,
             serve_secs,
             guard_interval_secs,
             guard_act,
         }
-    }
-}
-
-/// `--pipe` 的写法容错：裸名也收，补成 Win32 完整路径。
-///
-/// 真机踩到的坑：`--pipe aegis-ob` 会被原样交给 `CreateNamedPipeW`，
-/// 内核回 **os error 123（文件名、目录名或卷标语法不正确）**，而启动日志
-/// 那句提示写的是「多半是已有实例占用」——完全指错方向，排查方向被带偏。
-/// 命名管道不存在"相对路径"这种语义，裸名只可能是想要 `\\.\pipe\<name>`，
-/// 所以这里直接补前缀，别让人去猜。
-fn normalize_pipe_name(name: &str) -> String {
-    const PREFIX: &str = r"\\.\pipe\";
-    if name.is_empty() {
-        return aegis_ipc::PIPE_NAME.to_string();
-    }
-    // 已经带前缀就不动；`//./pipe/` 是同一种写法的正斜杠变体。
-    if name.starts_with(PREFIX) || name.starts_with("//./pipe/") {
-        name.to_string()
-    } else {
-        format!("{PREFIX}{name}")
     }
 }
 
@@ -1321,23 +1525,26 @@ mod tests {
         assert!(s.contains("读不到默认出口"), "{s}");
         assert!(!s.contains("会收紧"), "{s}");
     }
-
     /// 裸管道名：不补前缀的话内核报 os error 123，而提示语指向"已有实例"，
     /// 排查方向会被彻底带偏。
+    ///
+    /// ⚠ 完整的行为测试在 `aegis-ipc::endpoint` 里（含 Git Bash 吃掉一个
+    /// 反斜杠那种残缺前缀）。这里只钉住"aegisd 确实接上了这个归一化"。
     #[test]
-    fn a_bare_pipe_name_gets_the_win32_prefix() {
-        assert_eq!(normalize_pipe_name("aegis-ob"), r"\\.\pipe\aegis-ob");
+    fn the_daemon_normalizes_whatever_pipe_name_it_is_given() {
+        let a = Args::parse(args_of(&["--config", "c.toml", "--pipe", "aegis-ob"]));
+        assert_eq!(a.pipe, aegis_ipc::normalize_pipe_name("aegis-ob"));
+
+        let b = Args::parse(args_of(&["--config", "c.toml"]));
+        assert_eq!(b.pipe, aegis_ipc::PIPE_NAME);
     }
 
-    #[test]
-    fn an_already_prefixed_pipe_name_is_left_alone() {
-        assert_eq!(normalize_pipe_name(r"\\.\pipe\aegis"), r"\\.\pipe\aegis");
-        assert_eq!(normalize_pipe_name("//./pipe/aegis"), "//./pipe/aegis");
-    }
-
-    #[test]
-    fn an_empty_pipe_name_falls_back_to_the_default() {
-        assert_eq!(normalize_pipe_name(""), aegis_ipc::PIPE_NAME);
+    fn args_of(items: &[&str]) -> std::vec::IntoIter<String> {
+        items
+            .iter()
+            .map(|s| s.to_string())
+            .collect::<Vec<_>>()
+            .into_iter()
     }
 
     // ── 步 2/3：收紧与恢复 ───────────────────────────────────────────
@@ -1487,6 +1694,165 @@ mod tests {
         *slot.lock().unwrap() =
             Some(ApplyTicket::pending(now_ms(), CONFIRM_WINDOW_MS, vec![4], vec![4]));
         assert!(retry_restore(&slot, 1).is_none());
+    }
+
+    // ── 步 4：进 IPC 状态 + 审计 ──────────────────────────────────────
+
+    /// ⚠ 收紧 = 断网。`aegisctl status` 必须能回答"为什么断"，
+    /// 否则用户第一反应就是卸掉 Aegis——那才是真正的防护归零。
+    #[test]
+    fn a_tightened_guard_is_visible_in_the_published_view() {
+        let ticket = empty_slot();
+        *ticket.lock().unwrap() = Some({
+            let mut t =
+                ApplyTicket::pending(now_ms(), CONFIRM_WINDOW_MS, vec![4, 5, 6], vec![4, 5]);
+            t.confirm(now_ms()).unwrap();
+            t
+        });
+        let view: GuardSlot = Arc::new(Mutex::new(GuardView::default()));
+        let audit = temp_audit();
+
+        suspend_permits(&ticket, 1, &ineffective("2 项未通过 [承载体存在]"));
+        publish(&view, &ticket, &audit, None, "（未用）", None);
+
+        let v = view.lock().unwrap().clone();
+        // 收紧态取自票据上的**实际**状态：这里看门狗还没跑，所以仍是 false。
+        // 真正置上要看 `permits_suspended`。
+        assert!(!v.tightened, "还没执行就不该显示已收紧：{v:?}");
+        assert_eq!(v.verdict, GUARD_UNKNOWN, "没给 verdict 就是判不了：{v:?}");
+        assert!(!v.reason.is_empty(), "原因不能是空的：{v:?}");
+    }
+
+    #[test]
+    fn the_published_view_reflects_the_tickets_actual_suspension() {
+        let ticket = empty_slot();
+        *ticket.lock().unwrap() = Some({
+            let mut t = ApplyTicket::pending(now_ms(), CONFIRM_WINDOW_MS, vec![4], vec![4]);
+            t.confirm(now_ms()).unwrap();
+            t.permits_suspended = true; // 看门狗已执行
+            t
+        });
+        let view: GuardSlot = Arc::new(Mutex::new(GuardView::default()));
+        publish(&view, &ticket, &temp_audit(), None, "x", None);
+        assert!(view.lock().unwrap().tightened);
+    }
+
+    /// ⚠ `needs_human` 必须**粘住**：自动清除等于"又自动开关起来"，
+    /// 而把它交给人的前提正是"别再自己动了"。
+    #[test]
+    fn needs_human_is_sticky_even_after_the_next_effective_tick() {
+        let ticket = empty_slot();
+        let view: GuardSlot = Arc::new(Mutex::new(GuardView::default()));
+        let audit = temp_audit();
+
+        publish(
+            &view,
+            &ticket,
+            &audit,
+            None,
+            "x",
+            Some(GuardEvent::NeedsHuman {
+                reason: "一小时内已自动收紧 3 次".to_string(),
+            }),
+        );
+        assert!(view.lock().unwrap().needs_human);
+
+        // 之后再来一拍"生效"，不该把标记洗掉
+        publish(
+            &view,
+            &ticket,
+            &audit,
+            Some(&GuardVerdict::Effective),
+            "[守卫 #2] 生效",
+            None,
+        );
+        let v = view.lock().unwrap().clone();
+        assert!(v.needs_human, "⚠ 被自动清除了：{v:?}");
+        assert_eq!(v.verdict, GUARD_EFFECTIVE);
+    }
+
+    /// 审计**只在翻转时写**，不是每拍都写：守卫每 3 秒一拍，
+    /// 一条"生效"写一次的话，真正值钱的"什么时候断的网"会被淹掉。
+    #[test]
+    fn only_transitions_are_audited() {
+        let ticket = empty_slot();
+        let view: GuardSlot = Arc::new(Mutex::new(GuardView::default()));
+        let (audit, path) = temp_audit_with_path();
+
+        let before = audit.lock().unwrap().len();
+        publish(&view, &ticket, &audit, Some(&GuardVerdict::Effective), "生效", None);
+        assert_eq!(audit.lock().unwrap().len(), before, "常态不该写审计");
+
+        publish(
+            &view,
+            &ticket,
+            &audit,
+            Some(&ineffective("r")),
+            "x",
+            Some(GuardEvent::Tightened {
+                reason: "下游规则未生效".to_string(),
+            }),
+        );
+        assert_eq!(audit.lock().unwrap().len(), before + 1, "收紧必须留下证据");
+
+        // 证据要真的读得回来，且链是完整的
+        let records = aegis_audit::read_records(&path).unwrap();
+        let events: Vec<_> = records.iter().map(|r| r.event.clone()).collect();
+        let links: Vec<_> = records.iter().map(|r| r.link).collect();
+        aegis_audit::verify(&events, &links).expect("链必须完整");
+        let last = events.last().unwrap();
+        assert!(
+            last.rule.as_deref().is_some_and(|r| r.starts_with("GUARD:TIGHTEN")),
+            "守卫事件要带 GUARD: 前缀，导出证据包时才过滤得掉：{last:?}"
+        );
+    }
+
+    /// 守卫事件**不是真实连接**，必须带 `GUARD:` 前缀以便过滤。
+    /// 核对证据的人看到一条 `src=127.0.0.1:0` 的"连接"，不可能知道
+    /// 那其实是守卫在收紧。
+    #[test]
+    fn every_guard_event_carries_a_filterable_prefix() {
+        for e in [
+            GuardEvent::Tightened { reason: "r".into() },
+            GuardEvent::Relaxed { reason: "r".into() },
+            GuardEvent::NeedsHuman { reason: "r".into() },
+        ] {
+            assert!(e.rule().starts_with("GUARD:"), "{e:?}");
+            assert!(!e.rule().contains(char::is_whitespace), "{e:?}");
+        }
+        assert_ne!(
+            GuardEvent::Tightened { reason: "r".into() }.rule(),
+            GuardEvent::Relaxed { reason: "r".into() }.rule()
+        );
+    }
+
+    /// 日志行带 `[守卫 #N] ` 前缀，进状态时要去掉——
+    /// 状态里留着拍号会让人以为是"第几次断网"。
+    #[test]
+    fn strip_tick_removes_only_the_prefix() {
+        assert_eq!(strip_tick("[守卫 #7] 生效"), "生效");
+        assert_eq!(strip_tick("没有前缀"), "没有前缀");
+    }
+
+    fn temp_audit() -> AuditSlot {
+        temp_audit_with_path().0
+    }
+
+    /// ⚠ 路径必须**每次都不同**：测试并行跑，同一毫秒里生成同一个文件名的话，
+    /// 几个测试会拿到同一个审计文件的多个句柄，互相覆盖记录——
+    /// 表现是"单跑全过、一起跑偶发失败"，最难排查的那一种。
+    fn temp_audit_with_path() -> (AuditSlot, std::path::PathBuf) {
+        static N: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let n = N.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!(
+            "aegis-guard-test-{}-{}-{n}",
+            std::process::id(),
+            now_ms()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = dir.join("audit.binlog");
+        let (log, _) = AuditLog::open_or_create(&p).unwrap();
+        (Arc::new(Mutex::new(log)), p)
     }
 
     // ── 步 5：断言 A ──────────────────────────────────────────────────

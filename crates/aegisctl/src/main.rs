@@ -37,8 +37,10 @@ use std::process::ExitCode;
 
 use aegis_ipc::{
     check_compat, classify, encode_handshake, msg_type, IpcToken, PipeClient, Status, REQ_APPLY,
-    REQ_CONFIRM, REQ_PING, REQ_ROLLBACK, REQ_STATUS,
+    REQ_CONFIRM, REQ_PING, REQ_ROLLBACK, REQ_STATUS, GUARD_EFFECTIVE, GUARD_INEFFECTIVE,
+    GUARD_OFF, GUARD_UNKNOWN,
 };
+use aegis_ipc::GuardView;
 use aegis_version as version;
 
 /// 子命令。
@@ -253,6 +255,7 @@ fn main() -> ExitCode {
         "  不变量自检      : {}",
         if status.wfp_invariants_ok { "通过" } else { "**违反**" }
     );
+    print_guard(&status.guard);
 
     // 可信指纹对不上 = 拓扑变了，按设计该重新打断用户确认。
     if let Some(trusted) = args.expect_fingerprint {
@@ -287,7 +290,11 @@ impl Args {
 
         while let Some(a) = args.next() {
             match a.as_str() {
-                "--pipe" => pipe = args.next().unwrap_or(pipe),
+                // 与 aegisd 一样收裸名：Git Bash 会吃掉 `\.\pipeegis`
+                // 里的一个反斜杠，靠"让用户写对"这条路根本走不通。
+                "--pipe" => pipe = aegis_ipc::normalize_pipe_name(
+                    &args.next().unwrap_or(pipe),
+                ),
                 "--token-file" => token_file = args.next().map(PathBuf::from),
                 // `--ping` 是历史写法，等价于 `ping` 子命令
                 "--ping" => cmd = Cmd::Ping,
@@ -324,6 +331,50 @@ impl Cmd {
             REQ_ROLLBACK => Some(Self::Rollback),
             _ => None,
         }
+    }
+}
+
+/// 打印守卫状态。
+///
+/// # ⚠ 这块是**断网时给人看的第一屏**
+///
+/// 收紧 = 放行被撤 = 全都拒绝。用户这时候第一反应是"是不是 Aegis 坏了"，
+/// 再往后就是卸载。所以这里必须回答三件事：断没断、为什么、要不要人管。
+/// 只报一个"已收紧"是不够的——那是把人推向卸载。
+fn print_guard(g: &GuardView) {
+    println!();
+    println!("── 守卫（下游规则生效性）──────────────────────────────────────");
+    println!(
+        "  放行            : {}",
+        if g.tightened { "**已撤掉**（只剩拒绝底板 → 全都拒绝）" } else { "正常" }
+    );
+    println!("  最近结论        : {}", verdict_text(&g.verdict));
+    if !g.reason.is_empty() {
+        println!("  原因            : {}", g.reason);
+    }
+    if g.needs_human {
+        println!();
+        println!("  ⚠ **需要人工介入**：守卫已停止自动动作，等处理。");
+        println!("    处理方式：修好下游代理 / 改对 proxy 配置，然后重启 aegisd");
+        println!("    （『需要人工』一旦置上不会自动清除——自动清除等于又自动开关起来）");
+    }
+    if g.tightened && g.reason.is_empty() {
+        println!("  ⚠ 已收紧但**没有给出原因**——这是 bug：断网不给理由会逼人卸载。");
+    }
+}
+
+/// 结论取值翻译成人话。
+///
+/// ⚠ 认不出的取值**不能**显示成"正常"：那是把未知说成已知，
+/// 而守卫的取值一旦新增（比如以后加 `degraded`），这里就该显式暴露出来。
+fn verdict_text(v: &str) -> String {
+    match v {
+        GUARD_EFFECTIVE => "生效".to_string(),
+        GUARD_INEFFECTIVE => "未生效".to_string(),
+        GUARD_UNKNOWN => "判不了（不会收紧）".to_string(),
+        GUARD_OFF => "未启用".to_string(),
+        "" => "（守护进程未上报）".to_string(),
+        other => format!("**未知取值** {other}"),
     }
 }
 

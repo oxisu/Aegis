@@ -150,7 +150,7 @@ tracker 而不是散在调用方的好处**。
 | 1 | Supervisor 线程只判 + 只记日志，**不动手** | ✅ 已落地 |
 | 2 | 接 `Tighten` | ✅ 已落地（撤放行，**不是** `force_teardown`），默认不开（`--guard-act`） |
 | 3 | 接 `Relax` → 把放行装回原会话 | ✅ 已落地（带重试上限，超限转人工） |
-| 4 | `NeedsHuman` → 置状态 + 审计，等人工 | ⬜（`Relax` 失败超限时已会说"需人工"，但未进 IPC 状态） |
+| 4 | `NeedsHuman` → 置状态 + 审计，等人工 | ✅ 已落地（`aegisctl status` 可见，审计带 `GUARD:` 前缀） |
 | 5 | 断言 A 接 `Op::Health`，再接 `Op::RulesEffective` | 🟡 一半：`proxy.control_addr` 的 TCP 探测已落地；`Op::RulesEffective` 三态映射待真适配器 |
 | — | `Status` 增加 `guard_reason` | 推迟到步 2（真正会收紧时才需要 GUI 显示原因，不必为纯观测动 IPC schema） |
 
@@ -289,6 +289,66 @@ force_teardown → 五个全删 → 机器上一条 WFP 规则都不剩
 （`RulesEffective → Some(true)` / `RulesIneffective → Some(false)` /
 `RulesUnknown → None`），`control_addr` 退化为无适配器时的兜底。
 `aegisd::assertion_a` 里已留好这个接缝。
+
+### 5.0.5 步 4：状态进 IPC，动作进审计
+
+## 为什么非做不可
+
+收紧 = **整机断网**。用户这时候第一反应是"是不是 Aegis 坏了"，
+再往后就是卸载（`DOWNSTREAM-GUARD.md` §5.2）。所以 `aegisctl status`
+必须回答三件事：**断没断、为什么、要不要人管**。只报一句"已收紧"是
+把人推向卸载。
+
+## `Status` 新增 `guard`（`GuardView`）
+
+文本协议用 `guard_` 前缀铺平，四个字段：
+
+| 字段 | 含义 |
+|---|---|
+| `guard_tightened` | 放行是否**真的**被撤了（取自票据的 `permits_suspended`，不是"打算收紧"） |
+| `guard_needs_human` | 已停止自动动作，等人工 |
+| `guard_verdict` | `effective` / `ineffective` / `unknown` / `off` |
+| `guard_reason` | 人话原因 |
+
+两个刻意的设计：
+
+- **老守护进程没有这组字段时不报错**，读到默认的"没在干活"——它确实没在干活。
+- `needs_human` 一旦置上就**不再自动清除**。自动清除等于"又自动开关起来"，
+  而把它交给人的前提正是"别再自己动了"。
+
+真机（控制端口故意填成没人听的 `127.0.0.1:1`）：
+
+```text
+── 守卫（下游规则生效性）──────────────────────────────────────
+  放行            : 正常
+  最近结论        : 未生效
+  原因            : 下游规则未生效：1 项未通过 [代理可达]
+```
+
+## 审计：只在**状态翻转**时写
+
+守卫每 3 秒一拍，若每拍都写一条，一天近 3 万条噪音，
+真正值钱的"什么时候断的网"会被淹掉。所以只写三种：
+
+| 事件 | 规则名 |
+|---|---|
+| 撤掉放行 | `GUARD:TIGHTEN` |
+| 装回放行 | `GUARD:RELAX` |
+| 停止自动动作 | `GUARD:NEEDS_HUMAN` |
+
+⚠ 沿用 `BOOT:STARTUP_COMPLETE` 的前缀约定：**这些是控制面事件，不是真实
+连接**。证据链里它们的 `src` 是 `127.0.0.1:0`——核对证据的人不可能知道
+那其实是守卫在收紧。导出证据包时必须按 `GUARD:` 前缀过滤掉。
+
+⚠ 审计**写失败只打印不退出**：此时守卫已经把网收紧了，让进程退出会让
+动态会话清空 → 规则全没 → 从"全都拒绝"变成"全不设防"，比丢一条记录糟得多。
+
+### 顺带修的：`--pipe` 的归一化提到了 `aegis-ipc`
+
+`aegisctl` 之前不收裸名，于是 Git Bash 吃掉 `\\.\pipe\aegis` 一个反斜杠
+之后就再也连不上。现在两端共用 `aegis_ipc::normalize_pipe_name`，
+它还能修 **残缺前缀** `\.\pipe\aegis`（先剥前导分隔符再逐段比对，
+不是拿完整前缀去比——那样会补出双重前缀）。
 
 ### 5.1 验收：一个**不需要改代码**就能复现的实验（步 1 已实测两组）
 
