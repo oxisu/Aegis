@@ -896,7 +896,7 @@ impl Args {
 
         Self {
             config,
-            pipe,
+            pipe: normalize_pipe_name(&pipe),
             token_file,
             data_dir,
             serve_secs,
@@ -905,11 +905,31 @@ impl Args {
     }
 }
 
+/// `--pipe` 的写法容错：裸名也收，补成 Win32 完整路径。
+///
+/// 真机踩到的坑：`--pipe aegis-ob` 会被原样交给 `CreateNamedPipeW`，
+/// 内核回 **os error 123（文件名、目录名或卷标语法不正确）**，而启动日志
+/// 那句提示写的是「多半是已有实例占用」——完全指错方向，排查方向被带偏。
+/// 命名管道不存在"相对路径"这种语义，裸名只可能是想要 `\\.\pipe\<name>`，
+/// 所以这里直接补前缀，别让人去猜。
+fn normalize_pipe_name(name: &str) -> String {
+    const PREFIX: &str = r"\\.\pipe\";
+    if name.is_empty() {
+        return aegis_ipc::PIPE_NAME.to_string();
+    }
+    // 已经带前缀就不动；`//./pipe/` 是同一种写法的正斜杠变体。
+    if name.starts_with(PREFIX) || name.starts_with("//./pipe/") {
+        name.to_string()
+    } else {
+        format!("{PREFIX}{name}")
+    }
+}
+
 fn print_usage() {
     println!("用法：aegisd --config <配置文件> [选项]");
     println!();
     println!("  --config <path>      配置文件（**必填**，读不到就退出）");
-    println!("  --pipe <name>        IPC 管道名（默认 {}）", aegis_ipc::PIPE_NAME);
+    println!("  --pipe <name>        IPC 管道名（默认 {}，裸名会补成 \\\\.\\pipe\\<name>）", aegis_ipc::PIPE_NAME);
     println!("  --token-file <path>  IPC token 落盘路径（默认 <data-dir>/ipc.token）");
     println!("  --data-dir <dir>     运行数据目录（默认 .aegis-run）");
     println!("  --serve-secs <n>     IPC 服务时长（默认 30，0 = 启动完就退出）");
@@ -978,6 +998,24 @@ mod tests {
         assert!(s.contains("判不了"), "{s}");
         assert!(s.contains("读不到默认出口"), "{s}");
         assert!(!s.contains("会收紧"), "{s}");
+    }
+
+    /// 裸管道名：不补前缀的话内核报 os error 123，而提示语指向"已有实例"，
+    /// 排查方向会被彻底带偏。
+    #[test]
+    fn a_bare_pipe_name_gets_the_win32_prefix() {
+        assert_eq!(normalize_pipe_name("aegis-ob"), r"\\.\pipe\aegis-ob");
+    }
+
+    #[test]
+    fn an_already_prefixed_pipe_name_is_left_alone() {
+        assert_eq!(normalize_pipe_name(r"\\.\pipe\aegis"), r"\\.\pipe\aegis");
+        assert_eq!(normalize_pipe_name("//./pipe/aegis"), "//./pipe/aegis");
+    }
+
+    #[test]
+    fn an_empty_pipe_name_falls_back_to_the_default() {
+        assert_eq!(normalize_pipe_name(""), aegis_ipc::PIPE_NAME);
     }
 
     #[test]
