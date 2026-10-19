@@ -1104,7 +1104,7 @@ Aegis 的审计规则、告警阈值、日志级别。
 | 规则集模板（校园网 / 热点两套 YAML） | ✅ 已做 | `rulesets/{campus,hotspot}.yaml`；语义说明 `rulesets/README.md`；静态校验 `tools/check-rulesets.py` |
 | UI 界面骨架 | ✅ 已做（5 页 + 5 套主题，**扁平实底设计系统**） | `ui/`；设计决策见 §21.6 |
 | UI 接 Tauri 外壳 + 轮询真数据 | ✅ 已做（1.5s 轮询 `REQ_STATUS`） | `ui/src-tauri` |
-| UI 打包与签名 | ⬜ 未做（图标已生成，未配安装包与签名） | §21 第 4 项 |
+| UI 打包与签名 | 🟨 **配置就位，签名未做** | `ui/src-tauri/tauri.conf.json` 补了 `bundle` 段；exe 已实测可出（`npm run tauri:build -- --no-bundle` 5m08s），**安装包需外部工具链**（本机无 NSIS / WiX），签名无证书**刻意留空** |
 | **最小可运行链路** | ✅ | `aegisd` + `aegisctl`：配置 → IPC → 感知 → 裁决 → 干跑 → 审计 |
 
 ### 21.5 ⚠ UI 选型修正（2026-10-19 实测，同日二次改定）

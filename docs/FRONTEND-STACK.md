@@ -389,3 +389,40 @@ Aegis 界面最初沿用的是一条**玻璃态**设计线（`backdrop-filter` �
   ③ vite 只听 `[::1]`，URL 要写 `http://[::1]:1420/`。
 - 轮换主题验证：临时改 `useTheme.ts` 的默认主题 → 截图 → 还原
   （headless 每次都是新 profile，localStorage 不残留）。
+
+## 11. 打包：能出 exe，出不了安装包（2026-10-19 实测）
+
+`ui/src-tauri/tauri.conf.json` 补上了 `bundle` 段（此前缺一整节，
+`tauri build` 会直接按默认行为走，产物不可预期）。实测结果：
+
+```
+npm run tauri:build -- --no-bundle
+  → Finished `release` profile in 5m08s
+  → Built application at: <CARGO_TARGET_DIR>/release/aegis-console.exe
+```
+
+**Rust 侧 + 前端资源整条链路是通的**，产物是一个可执行的 exe。
+但**安装包（nsis / msi）这一步在本机跑不了**：
+
+| 工具 | 本机 | 说明 |
+|---|---|---|
+| `makensis`（NSIS） | ❌ 无 | `targets` 里虽然写了 `nsis`，本机构建会失败 |
+| `candle` / `light`（WiX） | ❌ 无 | 同上，`msi` 也构建不出来 |
+| WebView2 运行时 | ✅ 有（155.0.4283.62） | 打包时引导程序仍需构建期联网下载 |
+
+⚠ 这不是配置写错，是**外部工具链缺失**。要走通安装包，得先装
+NSIS 或 WiX（Tauri 会调用它们），并且构建时需要联网抓取 WebView2
+引导程序——校园网下这一步是否可达未验证（本机 GitHub 几乎不可达，
+但 `download.visualstudio.microsoft.com` 快）。
+
+**签名状态：未签名。** `certificateThumbprint: null` 是刻意的——
+没有证书，不伪造。后果写在文档里：未签名的 exe 在 Windows 上会触发
+SmartScreen「未知发布者」拦截。要正式分发需要代码签名证书
+（OV 或 EV；EV 能立刻建立 SmartScreen 信誉）。
+
+### 打包相关命令
+```bash
+cd ui && npm run tauri:build            # 完整打包（含安装包，本机缺工具链会失败）
+cd ui/src-tauri && cargo +stable-x86_64-pc-windows-msvc build --release   # 只出 exe
+python tools/check-rulesets.py --strict  # 规则集校验（CI 用 strict）
+```

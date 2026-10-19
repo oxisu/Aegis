@@ -69,6 +69,20 @@
 
 ### Added
 
+- **UI 打包配置（`ui/src-tauri/tauri.conf.json` 的 `bundle` 段）**
+  - 此前整个 `bundle` 段**缺失**，`tauri build` 会按默认行为走，产物不可预期。
+    现补齐 `icon` / `targets` / `publisher` / `category` 与 `windows` 段
+  - 实测：`npm run tauri:build -- --no-bundle` → **5m08s 出 `aegis-console.exe`**，
+    说明 Rust 侧 + 前端资源整条链路是通的
+  - ⚠ **出不了安装包**：本机没有 `makensis`（NSIS）也没有 `candle`（WiX），
+    且构建期还要联网抓 WebView2 引导程序（校园网可达性未验证）。
+    这是**外部工具链缺失**，不是配置写错
+  - ⚠ **签名未做，且是刻意的**：`certificateThumbprint: null` —— 没有证书就不伪造。
+    后果：未签名 exe 会触发 SmartScreen「未知发布者」拦截；
+    正式分发需代码签名证书（EV 可立刻建立信誉）
+  - NSIS 装 `currentUser` 而非 `perMachine`：与「GUI 不提权」保持一致，
+    GUI 不提权，安装包就不该要求管理员
+
 - **规则集模板：两套 YAML（`rulesets/`）**
   - `campus.yaml` = 校园网**纯洁通道**：白名单放行，收尾是 `FINAL,REJECT`；
     `hotspot.yaml` = 热点**自由出海通道**：清单只挑直连，其余交给主链 `FINAL`
