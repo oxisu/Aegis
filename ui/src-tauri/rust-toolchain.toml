@@ -1,0 +1,17 @@
+# UI 外壳的 Rust 工具链：**必须钉 msvc**。
+#
+# ⚠ 为什么不能省这个文件：`ui/src-tauri` 是独立 workspace，但 rustup 解析
+#   工具链时会**向上找** rust-toolchain.toml，找到仓库根那份（gnu 宿主）。
+#   gnu 工具链下 tauri-winres 用 mingw 的 windres 编资源文件，而 windres
+#   处理不了本仓库路径里的中文（"草稿箱"），报：
+#
+#     windres: can't open icon file `D:\Project\草稿箱\...\icon.ico`: Invalid argument
+#
+#   且这个报错指向 icon 文件本身，很像图标坏了——其实是路径编码问题。
+#   msvc 下不经过 windres，没有这个问题。后端不受影响（它有根目录这份钉 gnu）。
+#
+# ⚠ 不要在这里声明 components：gnu 与 msvc 同时装 clippy 会因
+#   cargo-clippy.exe 同名冲突被 rustup 回滚（见 FRONTEND-STACK.md §5）。
+
+[toolchain]
+channel = "stable-x86_64-pc-windows-msvc"
