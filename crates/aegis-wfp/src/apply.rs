@@ -30,7 +30,7 @@ use windows::Win32::NetworkManagement::WindowsFilteringPlatform as wfp;
 use windows::Win32::System::SystemInformation::GetSystemDirectoryW;
 
 use crate::error::WfpError;
-use crate::plan::{Condition, FilterSpec, Tier};
+use crate::plan::{Action, Condition, FilterSpec, Tier};
 use crate::session::Session;
 
 /// 两阶段确认的默认窗口（毫秒）。
@@ -46,6 +46,12 @@ pub struct ApplyReceipt {
     pub session_name: String,
     /// 内核返回的过滤器 id，顺序与计划一致。
     pub filter_ids: Vec<u64>,
+    /// ⚠ [`filter_ids`] 里**动作是放行**的那批 id。
+    ///
+    /// 收紧（下游规则失效时的兜底）要撤的是**这批**，而不是全部：
+    /// 默认拒绝底板也在 `filter_ids` 里，一起删掉的话机器就**完全不设防**了，
+    /// 那不是"全都拒绝"，是"全都放行"。这个区分搞错，兜底就反了个向。
+    pub permit_ids: Vec<u64>,
     /// 安装时刻（毫秒）。
     pub installed_at_ms: u64,
 }
@@ -73,6 +79,12 @@ pub enum Phase {
     RolledBack,
 }
 
+/// 恢复放行的重试上限。超过就停止自动重试，转人工。
+///
+/// 不能无限重试：装不回去说明环境已经变了（会话没了 / 权限变了 / 规则冲突），
+/// 再试一百次也一样。也不能一声不吭——`note` 里必须写明"需人工"。
+pub const MAX_RESTORE_ATTEMPTS: u32 = 3;
+
 /// 确认失败。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum ConfirmError {
@@ -89,6 +101,20 @@ pub struct ApplyTicket {
     /// 截止时刻（毫秒）。
     pub deadline_ms: u64,
     pub filter_ids: Vec<u64>,
+    /// ⚠ `filter_ids` 里**动作是放行**的那批。
+    ///
+    /// 收紧时只撤这批，默认拒绝底板必须留着（理由见 [`ApplyReceipt::permit_ids`]）。
+    /// 撤掉之后这里会被清空——id 已不存在，留着会在下次恢复/回滚时误删。
+    pub permit_ids: Vec<u64>,
+    /// 放行当前是否处于**被撤掉**的状态（收紧态）。
+    pub permits_suspended: bool,
+    /// 请求：撤掉放行（守卫 `Tighten`）。由看门狗执行并清标记。
+    pub suspend_requested: bool,
+    /// 请求：把放行装回去（守卫 `Relax`，步 3）。由看门狗执行并清标记。
+    pub restore_requested: bool,
+    /// 恢复放行连续失败的次数。超过 [`MAX_RESTORE_ATTEMPTS`] 就**停止重试**
+    /// 并转人工——不能无限重试刷屏，也不能一直卡在断网态不吭声。
+    pub restore_failures: u32,
     /// 有人主动要求拆除（不是超时，是 `rollback` 命令）。
     pub abort_requested: bool,
     /// **紧急强拆**：不管当前处于哪个阶段，下一次巡检立即拆除。
@@ -104,11 +130,25 @@ pub struct ApplyTicket {
 
 impl ApplyTicket {
     /// 开一个待确认的票据。
-    pub fn pending(now_ms: u64, window_ms: u64, filter_ids: Vec<u64>) -> Self {
+    ///
+    /// `permit_ids` 必须**单独传**，不能让调用方事后补：忘了填的话
+    /// `Tighten` 就只能"全删"（把拒绝底板一起删掉 = 反向兜底），
+    /// 而这种错误在代码上是静默的——删完看起来"成功了"。
+    pub fn pending(
+        now_ms: u64,
+        window_ms: u64,
+        filter_ids: Vec<u64>,
+        permit_ids: Vec<u64>,
+    ) -> Self {
         Self {
             phase: Phase::Pending,
             deadline_ms: now_ms.saturating_add(window_ms),
             filter_ids,
+            permit_ids,
+            permits_suspended: false,
+            suspend_requested: false,
+            restore_requested: false,
+            restore_failures: 0,
             abort_requested: false,
             force_teardown: false,
             note: String::new(),
@@ -156,13 +196,30 @@ impl ApplyTicket {
         self.abort_requested = true;
     }
 
-    /// 紧急强拆：不管处于哪个阶段，下一次巡检立即拆除。
+    /// 紧急强拆：**整批拆除**，包括默认拒绝底板。
     ///
-    /// ⚠ 它能把**已确认**的规则撤掉，这是刻意的——绝缘笼装错了的时候，
-    /// 是一条命令能把网络救回来，还是必须重启机器，决定了事故等级。
+    /// 这是**人在现场**发现笼子装错了的救命通道，语义就是"全都不要了"。
+    /// ⚠ 它**不是**守卫收紧该用的东西：守卫要的是 [`Self::request_suspend_permits`]
+    /// （只撤放行、留着拒绝底板）。用错方向的后果是"兜底"变成了"解除防护"。
+    ///
     /// 调用方必须已通过对端提权检查（见 `aegis-ipc::peer`）。
     pub fn force_teardown(&mut self) {
         self.force_teardown = true;
+    }
+
+    /// 请求撤掉**放行**（守卫 `Tighten`）。
+    ///
+    /// 默认拒绝底板留在原处，于是剩下的就是"全都拒绝"——
+    /// 这正是下游规则失效时该到的状态（状态机 `Degraded` / 绝缘等级 `Full`）。
+    pub fn request_suspend_permits(&mut self) {
+        self.restore_requested = false;
+        self.suspend_requested = true;
+    }
+
+    /// 请求把放行**装回去**（守卫 `Relax`，步 3）。
+    pub fn request_restore_permits(&mut self) {
+        self.suspend_requested = false;
+        self.restore_requested = true;
     }
 
     /// 该回滚了吗：**强拆** > **超时** > **有人主动要求**。
@@ -312,11 +369,17 @@ pub fn apply(plan: &[FilterSpec], now_ms: u64) -> Result<(Session, ApplyReceipt)
     let session = Session::open(&session_name)?;
 
     let mut ids = Vec::with_capacity(plan.len());
+    let mut permit_ids = Vec::new();
     let mut result: Result<(), WfpError> = Ok(());
 
     for spec in plan {
         match add_one(&session, spec) {
-            Ok(id) => ids.push(id),
+            Ok(id) => {
+                if spec.action == Action::Permit {
+                    permit_ids.push(id);
+                }
+                ids.push(id);
+            },
             Err(e) => {
                 result = Err(e);
                 break;
@@ -337,9 +400,38 @@ pub fn apply(plan: &[FilterSpec], now_ms: u64) -> Result<(Session, ApplyReceipt)
         ApplyReceipt {
             session_name,
             filter_ids: ids,
+            permit_ids,
             installed_at_ms: now_ms,
         },
     ))
+}
+
+/// 往**已存在的会话**里追加一批规则，返回新 id。
+///
+/// 守卫自动恢复（步 3）用它把放行装回去：它不需要新会话，于是**没有
+/// "旧的拆了、新的没装上"这个空窗**。失败时什么都没装，收紧态保持不变——
+/// 失败即维持断网，方向是 fail-closed 的。
+#[cfg_attr(test, mutants::skip)]
+pub fn install(session: &Session, specs: &[FilterSpec]) -> Result<Vec<u64>, WfpError> {
+    let mut ids = Vec::with_capacity(specs.len());
+    let mut result: Result<(), WfpError> = Ok(());
+    for spec in specs {
+        match add_one(session, spec) {
+            Ok(id) => ids.push(id),
+            Err(e) => {
+                result = Err(e);
+                break;
+            },
+        }
+    }
+    match result {
+        Ok(()) => Ok(ids),
+        Err(e) => {
+            // 装到一半失败：把这次已经装上的撤掉，回到"放行全无"的原状。
+            let _ = rollback(session, &ids);
+            Err(e)
+        },
+    }
 }
 
 /// 按回撤单条条删除。**只认 id**——按名字删会误伤别人的规则。
@@ -669,8 +761,39 @@ mod tests {
         1_700_000_000_000
     }
 
+    /// id 1、2 是放行，3 是阻断（`permit_ids` 是子集）。
     fn ticket(window: u64) -> ApplyTicket {
-        ApplyTicket::pending(now(), window, vec![1, 2, 3])
+        ApplyTicket::pending(now(), window, vec![1, 2, 3], vec![1, 2])
+    }
+
+    /// 收紧要撤的是**放行**，不是整批。撤掉整批会把默认拒绝底板一起删了：
+    /// 那不是"全都拒绝"，是"全都放行"——兜底反了个向。
+    #[test]
+    fn suspending_asks_for_the_permits_only_and_cancels_a_pending_restore() {
+        let mut t = ticket(CONFIRM_WINDOW_MS);
+        t.request_restore_permits();
+        t.request_suspend_permits();
+        assert!(t.suspend_requested, "{t:?}");
+        assert!(!t.restore_requested, "两个请求不能同时挂着：{t:?}");
+    }
+
+    #[test]
+    fn restoring_asks_for_the_permits_back_and_cancels_a_pending_suspend() {
+        let mut t = ticket(CONFIRM_WINDOW_MS);
+        t.request_suspend_permits();
+        t.request_restore_permits();
+        assert!(t.restore_requested, "{t:?}");
+        assert!(!t.suspend_requested, "{t:?}");
+    }
+
+    /// 一份票据默认既没挂起也没恢复请求，且放行在。
+    #[test]
+    fn a_fresh_ticket_has_its_permits_installed() {
+        let t = ticket(CONFIRM_WINDOW_MS);
+        assert!(!t.permits_suspended);
+        assert_eq!(t.permit_ids, vec![1, 2]);
+        assert!(t.permit_ids.iter().all(|id| t.filter_ids.contains(id)));
+        assert_eq!(t.restore_failures, 0);
     }
 
     #[test]
