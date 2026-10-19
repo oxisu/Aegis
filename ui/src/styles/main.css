@@ -1,0 +1,578 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* ============================================================================
+   Aegis 设计系统 —— 令牌层（扁平实底 · 冷色双站渐变）
+   ============================================================================
+
+   # 这套为什么长这样
+   本项目此前沿用一条"玻璃态"设计线（backdrop-filter 毛玻璃 + 霓虹光斑 +
+   内高光 + 发光描边）。**那条线是闭源产品线的招牌风格，Aegis 是开源项目，
+   不沿用**——开源项目顶着别人的招牌视觉，两边都会尴尬。
+
+   结构上参考两个开源项目（均允许参考）：
+   - `D:\Project\WebSua`：令牌分层（间距 / 圆角 / 动效三套刻度）、
+     状态 pill、实底分层、`--fg-*` 文字层级；
+   - `D:\Project\Fate-Wheel`：等宽字体打数据的"终端味"——Aegis 满屏都是
+     LUID / 指纹 / 十六进制 / 计数，数据一律等宽加 tabular-nums。
+
+   # Aegis 自己的身份（与两个参考都不同）
+   1. **全扁平，零玻璃**：没有任何 backdrop-filter / 发光 / 内高光。
+      分层全靠"实底 + 1px 细线"，暗色下用逐级变浅的灰蓝底。
+   2. **双站冷色渐变**：azure → ice（#4f8ff7 → #2fb8c4），**没有紫色中点**。
+      渐变只出现在四个地方：品牌标、主按钮、导航当前项左侧指示条、
+      进度条。别处一律纯色。
+   3. **锐角**：圆角 6 / 10 / 14（参考项目是 8/12/18/26）。安全工具要的是
+     精密感，不是软萌。
+   4. **颜色 = 信号**：界面 chrome 全部中性灰蓝，彩色只出现在状态、
+      风险、绝缘等级上。所以品牌色刻意避开全部语义色的取值。
+
+   # 不能动的东西
+   `--lv-*`（绝缘等级）与 `--guard-*`（守卫状态）是**功能语义色**，
+   对应 design-spec.md §26 与 docs/DOWNSTREAM-GUARD.md，改色等于改语义。
+
+   # 主题
+   5 套主题只换色相值，结构令牌全库共用。**没有独立浅色模式**——
+   每套主题自带明暗（与参考项目 WebSua 的明暗双主题不同，那是它的结构，
+   这里不借；Aegis 是常驻桌角的网络工具，深色是主线）。
+   ============================================================================ */
+
+@layer base {
+  :root {
+    /* ---- 结构令牌（与主题无关，全库共用）---- */
+
+    /* 间距刻度（参考 WebSua 的 4px 基数）*/
+    --sp-1: 4px;
+    --sp-2: 8px;
+    --sp-3: 12px;
+    --sp-4: 16px;
+    --sp-5: 24px;
+    --sp-6: 32px;
+    --sp-7: 48px;
+    --sp-8: 64px;
+
+    /* 圆角：比参考项目小一档，要精密感 */
+    --r-sm: 6px;
+    --r-md: 10px;
+    --r-lg: 14px;
+    --r-pill: 999px;
+
+    /* 字体：Windows 打头（Tauri 桌面程序），数据等宽 */
+    --font-mono: 'Cascadia Mono', ui-monospace, SFMono-Regular, Consolas, Menlo,
+      monospace;
+
+    /* 动效：比参考项目快一档，工具不该有拖沓感 */
+    --ease: cubic-bezier(0.22, 0.61, 0.36, 1);
+    --ease-out: cubic-bezier(0.16, 1, 0.3, 1);
+    --dur-fast: 120ms;
+    --dur: 200ms;
+    --dur-slow: 320ms;
+
+    /* ---- 状态色（语义，全主题共用）---- */
+    --success: 46 212 122;
+    --warning: 255 176 32;
+    --danger: 255 92 108;
+
+    /* 压在品牌色上的文字色。默认白；强调色本身很浅的主题（如 Nothing）
+       必须反深，否则白字浅底读不出来。 */
+    --on-accent: 255 255 255;
+
+    /* ====================================================================
+       Aegis 语义色 —— 绝缘等级（design-spec.md §26 状态机）
+       ⚠ 这是**危险程度**的语义，不是随便四个颜色。
+       "彻底绝缘"是最严的一档，必须一眼看出它是红的；
+       "自由出海"是放开的一档，用青。改动前先想清楚顺序。
+       ==================================================================== */
+    --lv-isolated: 255 92 108; /* 彻底绝缘：全拒 */
+    --lv-campus: 255 176 32; /* 校园网严格：白名单 */
+    --lv-free: 34 211 238; /* 自由出海：放开 */
+    --lv-aggregated: 108 140 255; /* 聚合：双轨叠加 */
+    --lv-unknown: 143 152 168; /* 未知 / 未裁决 */
+
+    /* ====================================================================
+       Aegis 语义色 —— 守卫状态（docs/DOWNSTREAM-GUARD.md）
+       ⚠ 「未生效」与「判不了」**不能同色**。
+       判不了（Unknown）按设计**永不收紧**，它和"已经出问题了"是对人的
+       两种完全不同的处境：前者只是能力缺口，后者是正在断网。
+       ==================================================================== */
+    --guard-effective: 46 212 122; /* 生效 */
+    --guard-ineffective: 255 92 108; /* 未生效（已收紧，正在断网）*/
+    --guard-unknown: 255 176 32; /* 判不了（不动手）*/
+    --guard-off: 143 152 168; /* 未启用 */
+  }
+
+  /* ===== 主题：Aegis（默认）—— 靛蓝底 + azure/ice 双站渐变 ===== */
+  :root,
+  [data-theme='aegis'] {
+    /* 四级实底：画布 → chrome（侧栏/顶栏）→ 卡片 → 抬起（输入/按钮/当前项）*/
+    --bg: 11 13 17; /* #0b0d11 应用画布 */
+    --bg-1: 16 19 24; /* #101318 侧栏 / 顶栏 */
+    --surface: 20 24 33; /* #141821 卡片 */
+    --surface-hover: 27 32 43; /* #1b202b 输入框 / 次级按钮 */
+    --bg-4: 35 40 54; /* #232836 最强抬起：导航当前项 / 次级按钮悬停 */
+
+    /* 细线：实色不用半透明——扁平体系里半透明边会脏 */
+    --border: 34 40 55; /* #222837 常规边 */
+    --line-2: 45 53 71; /* #2d3547 强边（悬停 / 弹窗）*/
+
+    /* 文字三级 */
+    --text: 232 236 243; /* #e8ecf3 */
+    --text-muted: 115 126 146; /* #737e92 */
+
+    /* 品牌：azure 主 + ice 副。⚠ 刻意避开语义色：
+       lv-aggregated 是 #6c8cff（偏紫的靛蓝），lv-free 是 #22d3ee（亮青）——
+       品牌色取两者之间的 azure，不撞任何一个。 */
+    --accent: 79 143 247; /* #4f8ff7 */
+    --accent-rgb: 79, 143, 247;
+    --accent-secondary: 47 184 196; /* #2fb8c4 */
+    --accent-secondary-rgb: 47, 184, 196;
+    --accent-text: 176 208 255; /* #b0d0ff 链接 / 强调文字 */
+    --accent-bg: rgba(79, 143, 247, 0.12);
+    --accent-border: rgba(79, 143, 247, 0.32);
+
+    --primary: 79 143 247;
+    --primary-hover: 61 126 232;
+    --primary-light: 23 34 56;
+    --info: 79 143 247;
+  }
+
+  /* ===== Aurora — 极光（青绿）===== */
+  [data-theme='aurora'] {
+    --bg: 6 13 11;
+    --bg-1: 11 19 16;
+    --surface: 15 24 20;
+    --surface-hover: 21 32 27;
+    --bg-4: 29 42 36;
+    --border: 29 43 37;
+    --line-2: 40 57 49;
+    --text: 232 243 238;
+    --text-muted: 112 131 122;
+    --accent: 45 212 160;
+    --accent-rgb: 45, 212, 160;
+    --accent-secondary: 34 211 238;
+    --accent-secondary-rgb: 34, 211, 238;
+    --accent-text: 150 235 205;
+    --accent-bg: rgba(45, 212, 160, 0.12);
+    --accent-border: rgba(45, 212, 160, 0.32);
+    --primary: 45 212 160;
+    --primary-hover: 32 190 142;
+    --primary-light: 18 44 36;
+    --info: 45 212 160;
+  }
+
+  /* ===== Midnight — 子夜（靛蓝）===== */
+  [data-theme='midnight'] {
+    --bg: 10 14 26;
+    --bg-1: 15 20 36;
+    --surface: 20 26 44;
+    --surface-hover: 28 35 56;
+    --bg-4: 37 45 70;
+    --border: 35 43 68;
+    --line-2: 48 58 88;
+    --text: 232 236 246;
+    --text-muted: 118 128 152;
+    --accent: 129 140 248;
+    --accent-rgb: 129, 140, 248;
+    --accent-secondary: 99 102 241;
+    --accent-secondary-rgb: 99, 102, 241;
+    --accent-text: 199 210 254;
+    --accent-bg: rgba(129, 140, 248, 0.12);
+    --accent-border: rgba(129, 140, 248, 0.32);
+    --primary: 129 140 248;
+    --primary-hover: 111 123 238;
+    --primary-light: 30 34 68;
+    --info: 129 140 248;
+  }
+
+  /* ===== Cyber — 赛博（青）===== */
+  [data-theme='cyber'] {
+    --bg: 5 10 14;
+    --bg-1: 9 16 21;
+    --surface: 13 22 29;
+    --surface-hover: 19 30 38;
+    --bg-4: 26 40 49;
+    --border: 27 40 48;
+    --line-2: 38 54 64;
+    --text: 228 241 245;
+    --text-muted: 108 129 138;
+    --accent: 34 211 238;
+    --accent-rgb: 34, 211, 238;
+    --accent-secondary: 6 182 212;
+    --accent-secondary-rgb: 6, 182, 212;
+    --accent-text: 165 243 252;
+    --accent-bg: rgba(34, 211, 238, 0.12);
+    --accent-border: rgba(34, 211, 238, 0.32);
+    --primary: 34 211 238;
+    --primary-hover: 21 186 214;
+    --primary-light: 16 44 52;
+    --info: 34 211 238;
+  }
+
+  /* ===== Nothing — 极简（深色单色）=====
+     组件按"深底浅字"写，换成浅底会变成"白底 + 看不见的边 + 读不清的字"。 */
+  [data-theme='nothing'] {
+    --bg: 10 10 10;
+    --bg-1: 15 15 15;
+    --surface: 20 20 20;
+    --surface-hover: 28 28 28;
+    --bg-4: 36 36 36;
+    --border: 38 38 38;
+    --line-2: 52 52 52;
+    --text: 237 237 237;
+    --text-muted: 140 140 140;
+    --accent: 200 200 200;
+    --accent-rgb: 200, 200, 200;
+    --accent-secondary: 150 150 150;
+    --accent-secondary-rgb: 150, 150, 150;
+    --accent-text: 235 235 235;
+    --accent-bg: rgba(255, 255, 255, 0.08);
+    --accent-border: rgba(255, 255, 255, 0.22);
+    --primary: 200 200 200;
+    --primary-hover: 230 230 230;
+    --primary-light: 44 44 44;
+    --info: 200 200 200;
+    /* 强调色是浅灰 → 压在上面的字必须反深 */
+    --on-accent: 10 10 10;
+  }
+
+  /* ============================================================================
+     基础元素
+     ============================================================================ */
+
+  html {
+    -webkit-text-size-adjust: 100%;
+    text-size-adjust: 100%;
+  }
+
+  body {
+    margin: 0;
+    font-size: 14px;
+    line-height: 1.55;
+    color: rgb(var(--text));
+    background: rgb(var(--bg));
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+    overscroll-behavior: none;
+    /* 桌面程序里不该出现"拖一下选中整页" */
+    user-select: none;
+  }
+
+  /* 需要能复制的区域单独放开：人经常要拷 LUID / 指纹 / 审计行 */
+  input,
+  textarea,
+  .selectable,
+  code,
+  pre {
+    user-select: text;
+  }
+
+  h1,
+  h2,
+  h3,
+  h4,
+  h5,
+  h6,
+  p,
+  figure {
+    margin: 0;
+  }
+
+  /* 细滚动条：与细线体系一致 */
+  ::-webkit-scrollbar {
+    width: 10px;
+    height: 10px;
+  }
+  ::-webkit-scrollbar-track {
+    background: transparent;
+  }
+  ::-webkit-scrollbar-thumb {
+    background: rgb(var(--border));
+    border: 3px solid rgb(var(--bg));
+    border-radius: var(--r-pill);
+  }
+  ::-webkit-scrollbar-thumb:hover {
+    background: rgb(var(--line-2));
+  }
+
+  input[type='radio'],
+  input[type='checkbox'] {
+    accent-color: rgb(var(--primary));
+  }
+
+  /* 数字等宽：表格里的 LUID、计数、时间对齐（终端味的来源）*/
+  .font-mono-num {
+    font-family: var(--font-mono);
+    font-variant-numeric: tabular-nums;
+    letter-spacing: -0.02em;
+  }
+
+  :focus-visible {
+    outline: 2px solid rgb(var(--primary));
+    outline-offset: 2px;
+  }
+
+  ::selection {
+    background: rgb(var(--accent) / 0.35);
+    color: rgb(var(--text));
+  }
+
+  .sr-only {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    padding: 0;
+    margin: -1px;
+    overflow: hidden;
+    clip: rect(0 0 0 0);
+    white-space: nowrap;
+    border: 0;
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    *,
+    *::before,
+    *::after {
+      animation-duration: 0.01ms !important;
+      animation-iteration-count: 1 !important;
+      transition-duration: 0.01ms !important;
+      scroll-behavior: auto !important;
+    }
+  }
+}
+
+/* ============================================================================
+   组件类
+   ============================================================================
+   "每个页面都要用、但 Tailwind 原子类写出来太长"的收成类；
+   其余一律用原子类。与参考项目一致的分工。
+   ============================================================================ */
+
+@layer components {
+  /* ===== chrome 面板（侧栏 / 顶栏）：实底 + 细线，没有玻璃 ===== */
+  .panel {
+    background: rgb(var(--bg-1));
+  }
+
+  /* ===== 卡片：实底 + 1px 细线。悬停只变边色，不抬升、不发光 ===== */
+  .surface-card {
+    position: relative;
+    background: rgb(var(--surface));
+    border: 1px solid rgb(var(--border));
+    border-radius: var(--r-lg);
+    padding: var(--sp-5);
+    transition: border-color var(--dur-fast) var(--ease);
+  }
+  .surface-card:hover {
+    border-color: rgb(var(--line-2));
+  }
+
+  /* ===== 导航当前项：左侧渐变指示条 + 抬起底（借 WebSua 的结构）===== */
+  .nav-active {
+    position: relative;
+    background: rgb(var(--bg-4));
+    color: rgb(var(--text));
+  }
+  .nav-active::before {
+    content: '';
+    position: absolute;
+    left: 0;
+    top: 50%;
+    transform: translateY(-50%);
+    width: 3px;
+    height: 18px;
+    border-radius: var(--r-pill);
+    background: linear-gradient(180deg, rgb(var(--accent)), rgb(var(--accent-secondary)));
+  }
+
+  /* ===== 主按钮：双站渐变（品牌签名只出现在该出现的地方）===== */
+  .btn-primary {
+    @apply px-4 py-2 font-medium focus:outline-none focus:ring-2 disabled:opacity-50 disabled:cursor-not-allowed;
+    min-height: 36px;
+    border-radius: var(--r-md);
+    background: linear-gradient(
+      135deg,
+      rgb(var(--accent)) 0%,
+      rgb(var(--accent-secondary)) 100%
+    );
+    color: rgb(var(--on-accent));
+    box-shadow: 0 1px 2px rgb(0 0 0 / 0.24);
+    transition:
+      filter var(--dur-fast) var(--ease),
+      transform 0.1s var(--ease);
+    --tw-ring-color: rgb(var(--primary) / 50%);
+  }
+  .btn-primary:hover {
+    filter: brightness(1.1);
+  }
+  .btn-primary:active {
+    transform: scale(0.98);
+  }
+
+  /* ===== 次级按钮：抬起实底 ===== */
+  .btn-secondary {
+    @apply px-4 py-2 font-medium focus:outline-none focus:ring-2 disabled:opacity-50;
+    min-height: 36px;
+    border-radius: var(--r-md);
+    border: 1px solid rgb(var(--border));
+    background: rgb(var(--surface-hover));
+    color: rgb(var(--text));
+    transition:
+      background var(--dur-fast) var(--ease),
+      border-color var(--dur-fast) var(--ease),
+      transform 0.1s var(--ease);
+    --tw-ring-color: rgb(var(--primary) / 50%);
+  }
+  .btn-secondary:hover {
+    background: rgb(var(--bg-4));
+    border-color: rgb(var(--line-2));
+  }
+  .btn-secondary:active {
+    transform: scale(0.98);
+  }
+
+  /* ⚠ 危险按钮：Aegis 里它会真的断网，不能只靠颜色区分，
+     文案必须同时说清后果（见 views/GuardView.vue）。 */
+  .btn-danger {
+    @apply px-4 py-2 font-medium focus:outline-none focus:ring-2;
+    min-height: 36px;
+    border-radius: var(--r-md);
+    border: 1px solid rgb(var(--danger) / 0.32);
+    background: rgb(var(--danger) / 0.12);
+    color: rgb(var(--danger));
+    transition:
+      background var(--dur-fast) var(--ease),
+      transform 0.1s var(--ease);
+    --tw-ring-color: rgb(var(--danger) / 60%);
+  }
+  .btn-danger:hover {
+    background: rgb(var(--danger) / 0.2);
+  }
+  .btn-danger:active {
+    transform: scale(0.98);
+  }
+
+  /* ===== 输入框：实底细线，聚焦才出颜色 ===== */
+  .input-field {
+    @apply w-full px-3 py-2 focus:outline-none;
+    min-height: 36px;
+    border-radius: var(--r-md);
+    border: 1px solid rgb(var(--border));
+    background: rgb(var(--surface));
+    color: rgb(var(--text));
+    transition:
+      border-color var(--dur-fast) var(--ease),
+      box-shadow var(--dur-fast) var(--ease);
+  }
+  .input-field::placeholder {
+    color: rgb(var(--text-muted) / 0.7);
+  }
+  .input-field:focus {
+    border-color: rgb(var(--accent));
+    box-shadow: 0 0 0 3px var(--accent-bg);
+  }
+
+  /* ===== 悬浮面板（下拉菜单）：实底 + 投影分层，不靠模糊 ===== */
+  .popover-panel {
+    position: relative;
+    background: rgb(var(--bg-4));
+    border: 1px solid rgb(var(--line-2));
+    border-radius: var(--r-lg);
+    box-shadow:
+      0 4px 12px rgb(0 0 0 / 0.32),
+      0 16px 48px rgb(0 0 0 / 0.28);
+  }
+
+  /* ===== 状态 pill（借 WebSua 的组件词汇）=====
+     ⚠ 颜色永远配文字，不单靠色点——见 Topbar 的连接状态。 */
+  .pill {
+    @apply inline-flex items-center gap-1.5;
+    padding: 2px 10px;
+    font-size: 11px;
+    font-weight: 600;
+    line-height: 1.5;
+    border-radius: var(--r-pill);
+    border: 1px solid transparent;
+    white-space: nowrap;
+  }
+  .pill-ok {
+    background: rgb(var(--success) / 0.12);
+    color: rgb(var(--success));
+    border-color: rgb(var(--success) / 0.28);
+  }
+  .pill-off {
+    background: rgb(var(--surface-hover));
+    color: rgb(var(--text-muted));
+    border-color: rgb(var(--border));
+  }
+  .pill-err {
+    background: rgb(var(--danger) / 0.12);
+    color: rgb(var(--danger));
+    border-color: rgb(var(--danger) / 0.28);
+  }
+  .pill-warn {
+    background: rgb(var(--warning) / 0.12);
+    color: rgb(var(--warning));
+    border-color: rgb(var(--warning) / 0.28);
+  }
+
+  /* ===== 代码片：给人复制去终端跑的命令 ===== */
+  .code-chip {
+    @apply inline-block selectable;
+    padding: 3px 8px;
+    border-radius: var(--r-sm);
+    background: rgb(var(--surface-hover));
+    border: 1px solid rgb(var(--border));
+    font-family: var(--font-mono);
+    font-size: 12px;
+    color: rgb(var(--text));
+  }
+
+  /* ===== 可选项（主题选择器等）：选中态只换边和底 ===== */
+  .opt-btn {
+    @apply flex items-center gap-2.5 px-4 py-3 text-sm text-left;
+    border-radius: var(--r-md);
+    border: 1px solid rgb(var(--border));
+    background: rgb(var(--surface-hover));
+    color: rgb(var(--text));
+    transition:
+      border-color var(--dur-fast) var(--ease),
+      background var(--dur-fast) var(--ease);
+  }
+  .opt-btn:hover {
+    border-color: rgb(var(--line-2));
+  }
+  .opt-btn-on {
+    border-color: rgb(var(--accent-border));
+    background: var(--accent-bg);
+  }
+
+  /* ===== 表格 ===== */
+  .data-table {
+    width: 100%;
+    font-size: 13px;
+    border-collapse: separate;
+    border-spacing: 0;
+  }
+  .data-table tbody tr {
+    transition: background var(--dur-fast) var(--ease);
+  }
+  .data-table tbody tr:hover {
+    background: rgb(var(--surface-hover));
+  }
+
+  /* ===== 入场动画 ===== */
+  @keyframes rise-in {
+    from {
+      opacity: 0;
+      transform: translateY(6px);
+    }
+    to {
+      opacity: 1;
+      transform: none;
+    }
+  }
+  .rise-in {
+    animation: rise-in var(--dur) var(--ease-out) backwards;
+  }
+}
