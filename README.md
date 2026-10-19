@@ -131,10 +131,16 @@ Aegis 建立一张**独立于任何上层代理软件的 OS 级安全底座**：
 
 - **外壳 Tauri v2 + 界面 Vue 3 + Tailwind**——这两件事正交，不是二选一。
   ⚠ 这条修正了设计文档原定的 React + Fluent UI v9：界面那层换成
-  Vue 3 + Tailwind（沿用既有项目 git-sync-hub → qzone-sync 的栈），外壳不变。
+  Vue 3 + Tailwind（技术栈与既有项目同源），外壳不变。
 - **已接上真数据**：`ui/`（5 个页面 + 5 套主题）→ `ui/src-tauri`（Tauri 外壳）
   → 命名管道 → `aegisd`。1.5 秒轮询一次 `REQ_STATUS`。
   `vue-tsc --noEmit` / `vite build` / `cargo check --all-targets` 均通过。
+- **设计系统是扁平实底，不是玻璃态**：玻璃态那套是闭源产品线的招牌风格，
+  Aegis 是开源项目不能沿用。结构参考两个开源项目（WebSua 的令牌刻度与
+  状态 pill、Fate-Wheel 的等宽数据终端味），身份是 azure → ice 双站渐变
+  （无紫色中点）+ 锐角圆角 + 1px 细线。颜色只表含义：`lv-*`（绝缘等级）与
+  `guard-*`（守卫状态）是功能语义色，不随主题改。详见
+  [`docs/FRONTEND-STACK.md`](docs/FRONTEND-STACK.md) §10。
 - ⚠ **界面里没有危险操作按钮，这是权限模型决定的**：
   `apply` / `confirm` / `rollback` 属 `Risk::Dangerous`，守护进程要求
   对端进程**已提权**，而 GUI 按设计不提权。发得出去才不正常。

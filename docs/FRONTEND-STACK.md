@@ -324,3 +324,68 @@ cd ui && npm run tauri:dev
 > 实际是 windres 对路径里的中文（"草稿箱"）编码处理不了——查错方向要白折腾一圈。
 > msvc 不经 windres，没有这个问题。所以 `ui/src-tauri/rust-toolchain.toml`
 > 不是可选的仪式，是**必需**的：它必须在仓库中文路径下也能构建。
+
+---
+
+## 10. 设计系统：扁平实底（2026-10-19 整体更换）
+
+### 10.1 为什么换：玻璃态是闭源招牌
+
+Aegis 界面最初沿用的是一条**玻璃态**设计线（`backdrop-filter` 毛玻璃 +
+霓虹光斑背景 + 卡片内高光 + 发光描边 + 0.5px 发丝边），
+词汇来自 git-sync-hub → qzone-sync 一脉。
+
+**那条线是闭源产品线的招牌风格**。Aegis 是开源项目，
+不能顶着别人的招牌视觉上线——所以整套换掉，不是微调。
+
+### 10.2 新系统的结构从哪来（两个开源参考）
+
+| 参考 | 借了什么 |
+|---|---|
+| `D:\Project\WebSua`（开源） | 令牌分层：间距 / 圆角 / 动效三套刻度；状态 pill 组件词汇；实底分层（`bg-0..4`）；`--fg-*` 文字三级 |
+| `D:\Project\Fate-Wheel`（开源） | 等宽字体打数据的"终端味"——Aegis 满屏 LUID / 指纹 / 十六进制 / 计数，数据一律等宽 + `tabular-nums` |
+
+### 10.3 Aegis 自己的身份（与两个参考都不同）
+
+1. **全扁平，零玻璃**：没有任何 `backdrop-filter` / 发光 / 内高光。
+   分层全靠"实底 + 1px 细线"，暗色下用逐级变浅的灰蓝底
+   （画布 `#0b0d11` → chrome `#101318` → 卡片 `#141821` → 抬起 `#232836`）。
+2. **双站冷色渐变**：azure → ice（`#4f8ff7` → `#2fb8c4`），**没有紫色中点**。
+   渐变只出现在四个地方：品牌标、主按钮、导航当前项左侧指示条、进度条。
+   品牌色刻意避开全部语义色的取值（`lv-aggregated` 是偏紫的靛蓝，
+   `lv-free` 是亮青，都不撞）。
+3. **锐角**：圆角 6 / 10 / 14（WebSua 是 8/12/18/26）。安全工具要精密感。
+4. **颜色 = 信号**：界面 chrome 全部中性灰蓝，彩色只出现在状态、风险、
+   绝缘等级上。
+
+### 10.4 不能动的东西
+
+`--lv-*`（绝缘等级，design-spec §26）与 `--guard-*`（守卫状态，
+`docs/DOWNSTREAM-GUARD.md`）是**功能语义色**，改色等于改语义。
+`--on-accent` 是新增的对比度令牌：压在品牌渐变上的文字色，
+强调色本身很浅的主题（Nothing）必须反深，否则白字浅底读不出来。
+
+### 10.5 主题
+
+5 套主题（aegis / aurora / midnight / cyber / nothing）只换色相值，
+结构令牌全库共用。**没有独立浅色模式**——每套主题自带明暗。
+（WebSua 有明暗双主题，那是它的结构，这里不借：Aegis 是常驻桌角的
+网络工具，深色是主线。将来要加浅色只需补一套色值，组件全是令牌驱动的。）
+
+### 10.6 怎么验证渲染（本机没有交互会话，截屏拿不到桌面）
+
+- 进程跑在非交互会话里，`PIL.ImageGrab` / .NET 截屏均失败
+  （`OSError: screen grab failed`），**不要往"权限不够"方向排查**。
+- 可用姿势：Chrome headless 直接拍 vite dev server，
+  引擎与 WebView2 同为 Chromium，渲染一致：
+  ```bash
+  "/c/Program Files/Google/Chrome/Application/chrome.exe" --headless \
+    --disable-gpu --no-sandbox --user-data-dir=/tmp/shot \
+    --virtual-time-budget=6000 --window-size=1440,900 \
+    --screenshot="D:/abs/path.png" "http://[::1]:1420/settings"
+  ```
+  ⚠ 三个坑：① `--screenshot` 给**绝对路径**（相对路径会写丢）；
+  ② 路径用正斜杠（bash 里 `\$var` 会把变量名吞掉）；
+  ③ vite 只听 `[::1]`，URL 要写 `http://[::1]:1420/`。
+- 轮换主题验证：临时改 `useTheme.ts` 的默认主题 → 截图 → 还原
+  （headless 每次都是新 profile，localStorage 不残留）。

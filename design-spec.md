@@ -554,8 +554,8 @@ sequenceDiagram
 - [x] GUI ↔ 服务的 named pipe 通道本身（显式 DACL + 一次性 token 鉴权）→ `aegis-ipc`
 - [ ] Windows Service 宿主 + 管理员自启动/提权逻辑（UAC / 服务安装）
 - [x] GUI ↔ 服务通信的**客户端**（`aegisctl` 那段会话流程已抽成 `aegis_ipc::client`）
-- [ ] GUI（**Tauri v2 + Vue 3 + Tailwind**，见 §21.5）**外壳**——界面骨架已成型（5 页），
-      缺的是 Tauri 壳与真数据
+- [x] GUI（**Tauri v2 + Vue 3 + Tailwind**，见 §21.5）**外壳**——5 页界面 +
+      1.5s 轮询真数据已接通，端到端验证通过（2026-10-19）
 - [ ] 网络设置变更前的快照 + 退出还原机制（防断网残留）
 
 **阶段 1 · 感知 + Clash 接管（核心）**
@@ -1093,7 +1093,7 @@ Aegis 的审计规则、告警阈值、日志级别。
 | 参考适配器 + 契约测试夹具 | ✅ | `aegis-orchestrator::reference` / `::contract`（§2A.4 ③） |
 | **下游规则失效兜底：运行时接线** | ✅ 步 1–5（步 5 剩一半） | `aegisd` + `aegis-ipc`；见 `docs/GUARD-WIRING.md` |
 | 规则集模板（校园网 / 热点两套 YAML） | ⬜ 未做 | §21 第 3 项 |
-| UI 界面骨架 | ✅ 已做（5 页 + 5 套主题） | `ui/` |
+| UI 界面骨架 | ✅ 已做（5 页 + 5 套主题，**扁平实底设计系统**） | `ui/`；设计决策见 §21.6 |
 | UI 接 Tauri 外壳 + 轮询真数据 | ✅ 已做（1.5s 轮询 `REQ_STATUS`） | `ui/src-tauri` |
 | UI 打包与签名 | ⬜ 未做（图标已生成，未配安装包与签名） | §21 第 4 项 |
 | **最小可运行链路** | ✅ | `aegisd` + `aegisctl`：配置 → IPC → 感知 → 裁决 → 干跑 → 审计 |
@@ -1122,6 +1122,22 @@ Aegis 的审计规则、告警阈值、日志级别。
 > ⚠ 本节曾在两个版本里分别留过"Electron + Element Plus"和"不再默认 Tauri"
 > 的结论，与本文件 §5 / §14 及 `FRONTEND-STACK.md` 冲突。**以本节为准**：
 > Tauri v2 外壳 + Vue 3 + Tailwind 界面。
+
+### 21.6 UI 设计系统：扁平实底（2026-10-19 整体更换）
+
+界面最初沿用的**玻璃态**设计线（`backdrop-filter` 毛玻璃 + 霓虹光斑 +
+卡片内高光 + 发光描边）是**闭源产品线的招牌风格**。Aegis 是开源项目，
+不能顶着别人的招牌视觉上线——整套更换，不是微调：
+
+- **新系统**：全扁平（零 `backdrop-filter` / 发光 / 内高光），
+  实底四级分层 + 1px 细线；azure → ice 双站渐变（**无紫色中点**），
+  只出现在品牌标 / 主按钮 / 导航指示条；圆角 6/10/14 的锐角体系；
+  数据一律等宽 + `tabular-nums`（终端味）。
+- **结构参考两个开源项目**：WebSua（令牌刻度、状态 pill）与
+  Fate-Wheel（等宽数据）。功能语义色（`lv-*` / `guard-*`）不动。
+- 令牌层在 `ui/src/styles/main.css`，组件类同文件； Tailwind 色板在
+  `ui/tailwind.config.js`。完整决策与验证方法见
+  `docs/FRONTEND-STACK.md` §10。
 
 ### 21.3 最小链路的启动顺序（不可调换）
 
