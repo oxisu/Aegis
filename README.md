@@ -48,7 +48,7 @@ Aegis 建立一张**独立于任何上层代理软件的 OS 级安全底座**：
 | `aegis-wfp` | ✅ 勘察 + 计划 + **真机下发/回滚** | 只读勘察（枚举 / Provider / 持久背板审计）+ 绝缘笼计划与静态自检 + **两阶段确认下发**（10s 倒计时自动撤销）+ `force_teardown` + 持久化实验探针 |
 | `aegis-fuse` | ✅ 感知侧已通 | 拓扑震荡熔断器：去抖 + **先熔断后分析**；`NotifyIpInterfaceChange` 已接（回调只做一次 `fetch_add`），**拉绝缘动作本身尚未接 WFP** |
 | `aegis-audit` | ✅ 证据链 + 落盘 + 导出 + **崩溃安全** | 规范化编码 + SHA-256 哈希链（篡改可检测）+ 只追加落盘 + CSV/JSON 证据包 + **`scan()` 区分"掉电截断"与"被篡改"** + `open_or_create`（掉电后能续跑） |
-| `aegis-ipc` | ✅ 可用 | 本地 IPC：帧编解码 + 版本握手 + **命名管道（显式 DACL）+ 一次性 token 鉴权** |
+| `aegis-ipc` | ✅ 可用 | 本地 IPC：帧编解码 + 版本握手 + **命名管道（显式 DACL）+ 一次性 token 鉴权** + **客户端会话**（`client::talk` / `Session`，类型状态保证"握手→鉴权→请求"的顺序） |
 | `aegis-config` | ✅ 可用 | 配置加载与 schema 版本校验（Fail-Closed）+ `[proxy]` / `[[always_allow]]` + `guard_facts` |
 | `aegis-orchestrator` | ✅ 可用 | 适配器 SPI：**能力接口** `Capability` + 逐能力失败模式（写死）+ 能力矩阵 + 声明自检 + **契约测试夹具** + 参考适配器；能力含 **`RuleEffectiveness`（规则是否真的生效）** |
 | `aegisd` | ✅ 最小链路 | 配置（失败即退）→ IPC 命名管道 → 拓扑快照 → 角色裁决 → **WFP 仅干跑** → 审计落盘 → **守卫（默认只观测；`--guard-act` 才真的撤放行）** |

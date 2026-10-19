@@ -37,6 +37,27 @@
 
 ### Added
 
+- **`aegis-ipc::client`：把客户端会话流程从 `aegisctl` 收进库**
+  - 动机：这段流程马上要有**第二个**调用方（GUI）。抄第二遍问题不大，
+    问题在于里面两条纪律**违反时不报错、只会变弱**：
+    ① 握手必须在鉴权之前（版本谈不拢就不能把 token 送过去——对面是
+    老版本时未必会用常量时间比对）；② 鉴权失败不许重试（重试会把
+    "token 不对"变成慢速拒绝服务）。抄的时候注释丢一半照样能跑。
+  - 所以用**类型状态**把顺序钉死：`request()` 只挂在 `Session<Ready>` 上，
+    而 `Ready` 只能由 `authenticate()` 产出、`Handshook` 只能由
+    `handshake()` 产出。**顺序写反是编译错误**，并有 `compile_fail`
+    文档测试守着。
+  - 两个入口：分步的 `Session::connect()?.handshake()?.authenticate()?.request()`
+    （`aegisctl` 要打印过程用这个）；一步到位的 `talk(pipe, &token, word)`
+    （GUI 用这个）
+  - `ClientError` 刻意**不合并**成笼统的 protocol error：连不上管道与
+    token 不对对人的处置动作完全不同，退出码也不同
+  - `Session` 同时持有 `PipeClient` 与 `PipeEnd`：`PipeEnd` **不拥有句柄**，
+    分开持有会出现"句柄被提前关掉"，收进同一个结构体让它在类型上不可能
+  - 验收：`aegisctl` 改为调用它之后，与旧版输出**逐字节 diff 为空**
+    （含 ping、鉴权失败、连不上管道三条路径）
+  - 新增 6 项单测，走的是进程内真实命名管道（服务端线程）
+
 - **`tools/cage-drill.sh`：绝缘笼全流程演练，**自动恢复**，不需要人在场**
   - 装上去的那一刻网络就没了，人在这时候能做的事非常有限；
     AI 也没法在对面断网的时候跟人配合。所以整套动作事先写死在脚本里，

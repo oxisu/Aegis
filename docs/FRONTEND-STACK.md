@@ -160,11 +160,20 @@ platform=win32  node=v22.22.2
 
 ## 6. 落地步骤（每步都能单独回滚）
 
-1. **先抽公共客户端**（纯重构，行为不变）
-   把 `aegisctl/src/main.rs` 里那段"握手 → 版本校验 → token 鉴权 →
-   发请求 → 收应答"搬进 `aegis-ipc`（如 `aegis_ipc::client::talk(word)`），
-   `aegisctl` 改为调用它。**测试数不变、输出不变**即可认为没走样。
-   → 这一步做完，UI 才有东西可复用，否则就是抄第二遍。
+1. ✅ **抽公共客户端**（已完成，纯重构、输出逐字节一致）
+   `aegis-ipc` 新增 `client` 模块，对外给两个入口：
+
+   | 入口 | 给谁用 |
+   |---|---|
+   | `Session::connect()?.handshake()?.authenticate(&token)?.request(word)` | 需要**分步打印过程**的（如 `aegisctl`） |
+   | `talk(pipe, &token, word)` | 只想要结果、不想管过程的（**GUI 用这个**） |
+
+   两条纪律用**类型状态**钉死：`request()` 只挂在 `Session<Ready>` 上，
+   而 `Ready` 只能由 `authenticate()` 产出、`Handshook` 只能由 `handshake()`
+   产出。**顺序写反是编译错误**，不是"记得别写反"——有个 `compile_fail`
+   文档测试专门守着这一点。
+
+   验收方式：把旧版 `aegisctl` 从 git 取回来编一遍，两边输出**逐字节 diff 为空**。
 
 2. **前端脚手架**（还不碰 Tauri）
    `ui/`：Vite + Vue 3 + TypeScript + Element Plus，先用**假数据**把
