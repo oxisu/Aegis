@@ -1,0 +1,105 @@
+name: 变异回归测试
+
+# ⚠ 独立 workflow，**不挂在 push 上**。
+#
+# 原先它和 CI 在同一个 workflow 里，靠 `if: event_name == ...` 跳过；
+# 但 GitHub 仍会把它列成一条检查项，显示成「已跳过」——
+# 那是设计如此，看着却像故障。挪出来之后，push 的检查列表里根本不会出现它。
+#
+# 触发方式：每周一 03:17（UTC）+ 手动 `workflow_dispatch`。
+
+on:
+  schedule:
+    - cron: "17 3 * * 1"
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # 单测全绿只能证明"代码通过了我们想到的用例"，不能证明"用例真的能
+  # 抓住 bug"。变异测试反过来问：往源码里注入一个 bug，测试会不会红？
+  # 不会红的那个 bug 就是漏检（missed），对应一块没有真正被守护的逻辑。
+  #
+  # 对安全底座而言这尤其重要：一条"看起来覆盖了"的状态迁移，如果删掉
+  # match arm 测试仍然全绿，那用户真的走到那条边时系统就不会迁移，
+  # 而我们会一直以为它是好的。
+  # ---------------------------------------------------------------------------
+  # 变异测试的总成本 = 变异体总数 × (一次编译 + 一次跑测试)，
+  # 单个 runner 上跑完要十几到三十分钟。既然**单机并行是负优化**
+  # （cargo 对 target 目录是独占锁，加 -j 只会互相等锁，实测 -j 4 比
+  # -j 1 还慢），那就换**机器并行**：把变异体切成 8 份，8 个 runner
+  # 同时各跑一份，墙钟时间从"三十分钟"降到"几分钟"。
+  #
+  # 每个分片独立判定自己那一份的漏检数——任一分片出现漏检就整体失败，
+  # 这样阈值语义和单任务时完全一致，不需要跨 job 聚合产物。
+  mutation:
+    name: 变异回归测试 (${{ matrix.shard }}/${{ matrix.total }})
+    runs-on: windows-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4, 5, 6, 7, 8]
+        total: [8]
+    env:
+      # 允许漏检的变异体数量。基线为 0 —— 新代码必须自带能杀死它的测试。
+      MUTATION_MAX_MISSED: 0
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: 安装 Rust 工具链
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: 缓存 cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: 安装 cargo-mutants
+        run: cargo install cargo-mutants --locked
+
+      - name: 运行变异测试（分片 ${{ matrix.shard }}/${{ matrix.total }}）
+        # -v 是必需的：不带时输出走块缓冲，日志会长时间停在基线那一行，
+        # 看起来像挂起（本机实测踩过）。
+        # --profile mutants 关掉调试信息，单次编译 7s → 3s，是最大的单项收益。
+        # 不开 -j：见 mutants.toml 里的实测数据，单机并行是负优化。
+        # 另外不依赖 cargo mutants 自身的退出码语义，改为解析产物目录
+        # 自行判定，这样"阈值是多少"这件事只由本文件说了算。
+        run: >
+          cargo mutants --no-shuffle -v --profile mutants
+          --shard ${{ matrix.shard }}/${{ matrix.total }}
+          --output mutants.out
+
+      - name: 判定漏检数量
+        shell: pwsh
+        run: |
+          $missed = 0
+          if (Test-Path mutants.out/missed.txt) {
+            $missed += (Get-Content mutants.out/missed.txt | Where-Object { $_.Trim() }).Count
+          }
+          $timeout = 0
+          if (Test-Path mutants.out/timeout.txt) {
+            $timeout += (Get-Content mutants.out/timeout.txt | Where-Object { $_.Trim() }).Count
+          }
+          Write-Host "漏检变异体 missed = $missed（上限 $env:MUTATION_MAX_MISSED）"
+          Write-Host "超时变异体 timeout = $timeout"
+          if ($missed -gt [int]$env:MUTATION_MAX_MISSED) {
+            Write-Error "漏检 $missed 个变异体，超过上限 $env:MUTATION_MAX_MISSED。请为这些逻辑补充能杀死它们的测试。"
+            Get-Content mutants.out/missed.txt
+            exit 1
+          }
+          if ($timeout -gt 0) {
+            Write-Error "有 $timeout 个变异体导致测试超时，需提高 mutants.toml 的 test_timeout 或优化测试。"
+            exit 1
+          }
+          Write-Host "::notice::变异测试通过：漏检 $missed / 超时 $timeout"
+
+      - name: 上传变异测试报告
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: mutants-report-${{ matrix.shard }}
+          path: mutants.out/
