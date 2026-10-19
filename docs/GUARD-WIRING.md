@@ -152,7 +152,10 @@ tracker 而不是散在调用方的好处**。
 | 3 | 接 `Relax` → 把放行装回原会话 | ✅ 已落地（带重试上限，超限转人工） |
 | 4 | `NeedsHuman` → 置状态 + 审计，等人工 | ✅ 已落地（`aegisctl status` 可见，审计带 `GUARD:` 前缀） |
 | 5 | 断言 A 接 `Op::Health`，再接 `Op::RulesEffective` | 🟡 一半：`proxy.control_addr` 的 TCP 探测已落地；`Op::RulesEffective` 三态映射待真适配器 |
-| — | `Status` 增加 `guard_reason` | 推迟到步 2（真正会收紧时才需要 GUI 显示原因，不必为纯观测动 IPC schema） |
+| — | `Status` 增加 `guard_reason` | ✅ 已在**步 4** 落地（`guard_tightened` / `guard_needs_human` / `guard_verdict` / `guard_reason` 四个字段一起进的，见 §5.0.5） |
+
+> 步 1–4 全部落地，步 5 剩的一半**只差一个真适配器**（接缝已留在
+> `aegisd::assertion_a`）。整套仍然 `--guard-act` 默认不开。
 
 ### 5.0 步 1 已落地的样子
 
@@ -187,7 +190,10 @@ aegisd --config <配置> --data-dir .aegis-run --serve-secs 600 \
 ```
 
 ⚠ `--guard-act` **默认关闭**。收紧的代价是整机断网，不能让一次手滑的
-命令行把它打开；而且步 3（`Relax`）还没接线，**收紧之后不会自动恢复**。
+命令行把它打开。
+
+> 步 2 刚落地时步 3 还没接线（收紧后不会自动恢复）。现在步 3 已接上：
+> 恢复走 `Relax`，把放行装回原会话，带重试上限（§5.0.3）。
 
 动作分三种，落到票据上的效果各不相同：
 
