@@ -110,13 +110,7 @@ const DANGEROUS_HINT = [
         <div v-for="f in facts" :key="f.label" class="surface-card rise-in">
           <div class="flex items-center justify-between">
             <span class="text-sm font-medium">{{ f.label }}</span>
-            <span
-              class="px-2 py-0.5 rounded-pill text-xs font-medium"
-              :style="{
-                background: `rgb(var(--${f.on ? 'danger' : 'success'}) / 0.14)`,
-                color: `rgb(var(--${f.on ? 'danger' : 'success'}))`,
-              }"
-            >
+            <span class="pill" :class="f.on ? 'pill-err' : 'pill-ok'">
               {{ f.on ? f.yes : f.no }}
             </span>
           </div>
@@ -176,10 +170,7 @@ const DANGEROUS_HINT = [
       </p>
       <ul class="mt-3 space-y-2">
         <li v-for="d in DANGEROUS_HINT" :key="d.word" class="text-xs">
-          <code
-            class="code-chip"
-            >aegisctl {{ d.word }} --token-file &lt;路径&gt;</code
-          >
+          <code class="code-chip">aegisctl {{ d.word }} --token-file &lt;路径&gt;</code>
           <span class="ml-2 text-text-muted">{{ d.what }}</span>
         </li>
       </ul>

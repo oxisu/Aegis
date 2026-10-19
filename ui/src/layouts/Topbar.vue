@@ -38,8 +38,6 @@ const connLabel = computed(() => {
   return status.stale ? '已断开（显示旧值）' : '未连接';
 });
 
-const connVar = computed(() => (status.connected ? 'success' : 'danger'));
-
 function timeText(d: Date) {
   return d.toLocaleTimeString('zh-CN', { hour12: false });
 }
@@ -76,20 +74,16 @@ onUnmounted(() => document.removeEventListener('click', handleClickOutside));
     </div>
 
     <div class="flex items-center gap-2">
-      <!-- 连接状态。⚠ 连不上时所有数字都是过期的，这是最该先看到的东西。 -->
+      <!-- 连接状态。⚠ 连不上时所有数字都是过期的，这是最该先看到的东西。
+           颜色配文字，不单靠色点。 -->
       <span
-        class="flex items-center gap-1.5 px-2.5 py-1 rounded-pill text-xs font-medium"
-        :style="{
-          border: `1px solid rgb(var(--${connVar}) / 0.35)`,
-          background: `rgb(var(--${connVar}) / 0.12)`,
-          color: `rgb(var(--${connVar}))`,
-        }"
+        class="pill"
+        :class="status.connected ? 'pill-ok' : 'pill-err'"
         :title="status.connected ? '已连上守护进程' : (status.error || '连不上守护进程')"
       >
         <span
-          class="w-2 h-2 rounded-full"
+          class="w-1.5 h-1.5 rounded-full bg-current"
           :class="{ 'animate-pulse': !status.connected }"
-          :style="{ background: `rgb(var(--${connVar}))` }"
         />
         <span class="hidden sm:inline">{{ connLabel }}</span>
       </span>
@@ -128,8 +122,8 @@ onUnmounted(() => document.removeEventListener('click', handleClickOutside));
                 class="w-full flex items-center gap-2.5 px-2.5 py-2 rounded-element text-sm transition-all"
                 :class="theme === t.key ? 'text-text' : 'text-text-muted hover:text-text'"
                 :style="{
-                  background: theme === t.key ? 'rgb(var(--accent) / 0.14)' : 'transparent',
-                  border: `1px solid ${theme === t.key ? 'rgb(var(--accent) / 0.35)' : 'transparent'}`,
+                  background: theme === t.key ? 'var(--accent-bg)' : 'transparent',
+                  border: `1px solid ${theme === t.key ? 'var(--accent-border)' : 'transparent'}`,
                 }"
                 @click="apply(t.key)"
               >

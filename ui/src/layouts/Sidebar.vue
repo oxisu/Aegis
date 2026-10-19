@@ -102,10 +102,10 @@ function isActive(path: string) {
     <div class="p-2 border-t border-border/40 space-y-1">
       <div
         v-if="!collapsed"
-        class="px-3 py-2 rounded-element text-[11px] leading-snug"
+        class="mx-1 px-3 py-2 rounded-element text-[11px] leading-snug"
         :style="{
-          background: `rgb(var(--${status.connected ? 'success' : 'danger'}) / 0.12)`,
-          border: `1px solid rgb(var(--${status.connected ? 'success' : 'danger'}) / 0.28)`,
+          background: `rgb(var(--${status.connected ? 'success' : 'danger'}) / 0.1)`,
+          border: `1px solid rgb(var(--${status.connected ? 'success' : 'danger'}) / 0.25)`,
           color: `rgb(var(--${status.connected ? 'success' : 'danger'}))`,
         }"
       >

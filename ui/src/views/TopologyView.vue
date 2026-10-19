@@ -38,7 +38,7 @@ const rows: NicInfo[] = [];
       </div>
 
       <div class="overflow-x-auto -mx-2">
-        <table class="w-full text-sm">
+        <table class="data-table">
           <thead>
             <tr class="text-left text-[11px] uppercase tracking-wider text-text-muted">
               <th class="px-2 py-2 font-medium">名称</th>
@@ -52,7 +52,7 @@ const rows: NicInfo[] = [];
             </tr>
           </thead>
           <tbody>
-            <tr v-for="n in rows" :key="n.luid" class="border-t border-border/40">
+            <tr v-for="n in rows" :key="n.luid" class="border-t border-border">
               <td class="px-2 py-2.5">{{ n.name }}</td>
               <td class="px-2 py-2.5 font-mono-num text-xs text-text-muted">{{ n.luid }}</td>
               <td class="px-2 py-2.5 text-xs">{{ n.physical ? '物理' : '伪接口' }}</td>

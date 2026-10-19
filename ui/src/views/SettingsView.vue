@@ -80,11 +80,8 @@ const TODO = [
         <button
           v-for="t in themes"
           :key="t.key"
-          class="flex items-center gap-2.5 px-4 py-3 rounded-element text-sm text-left transition-all"
-          :style="{
-            background: theme === t.key ? 'rgb(var(--accent) / 0.14)' : 'rgb(var(--surface-hover))',
-            border: `1px solid ${theme === t.key ? 'rgb(var(--accent) / 0.4)' : 'rgb(var(--border))'}`,
-          }"
+          class="opt-btn"
+          :class="theme === t.key ? 'opt-btn-on' : ''"
           @click="apply(t.key)"
         >
           <span class="flex-1">{{ t.label }}</span>
@@ -106,10 +103,7 @@ const TODO = [
       </div>
       <div class="space-y-2">
         <Disclosure v-for="item in TODO" :key="item.title" v-slot="{ open }">
-          <div
-            class="rounded-element overflow-hidden"
-            style="border: 1px solid rgb(var(--border))"
-          >
+          <div class="rounded-element overflow-hidden" style="border: 1px solid rgb(var(--border))">
             <DisclosureButton
               class="w-full flex items-center gap-2 px-4 py-3 text-sm text-left hover:bg-surface-hover/40 transition-colors"
             >

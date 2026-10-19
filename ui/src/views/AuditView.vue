@@ -35,7 +35,7 @@ const rows: AuditRow[] = [];
       </div>
 
       <div class="overflow-x-auto -mx-2">
-        <table class="w-full text-sm">
+        <table class="data-table">
           <thead>
             <tr class="text-left text-[11px] uppercase tracking-wider text-text-muted">
               <th class="px-2 py-2 font-medium">#</th>
@@ -48,7 +48,7 @@ const rows: AuditRow[] = [];
             </tr>
           </thead>
           <tbody>
-            <tr v-for="r in rows" :key="r.seq" class="border-t border-border/40">
+            <tr v-for="r in rows" :key="r.seq" class="border-t border-border">
               <td class="px-2 py-2.5 font-mono-num text-xs text-text-muted">{{ r.seq }}</td>
               <td class="px-2 py-2.5 font-mono-num text-xs text-text-muted">{{ r.time }}</td>
               <td class="px-2 py-2.5 text-xs">{{ r.action }}</td>

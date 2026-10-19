@@ -52,7 +52,7 @@ const nextStep = computed(() => {
       class="mt-4 px-3 py-2.5 rounded-element text-xs leading-relaxed whitespace-pre-line selectable"
       style="
         background: rgb(var(--danger) / 0.1);
-        border: 1px solid rgb(var(--danger) / 0.28);
+        border: 1px solid rgb(var(--danger) / 0.25);
         color: rgb(var(--text));
       "
     >
