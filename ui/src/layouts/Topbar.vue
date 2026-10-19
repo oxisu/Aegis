@@ -2,10 +2,12 @@
 /**
  * 顶栏。
  *
- * 右侧三件事按"人为什么要看它"排：
+ * 右侧按"人为什么要看它"排：
  *   1. 连接状态 —— 连不上守护进程时，界面上所有数字都是过期的，必须先知道；
- *   2. 假数据场景切换 —— 骨架阶段用来看每种状态长什么样（接真数据后整块删掉）；
- *   3. 主题 —— 纯外观，放最后。
+ *   2. 主题 —— 纯外观，放最后。
+ *
+ * ⚠ 这里**没有**手动刷新按钮：状态是轮询来的（1.5s），
+ * 放一个刷新按钮会让人以为"不点就不更新"，也会让人以为点一下就能连上。
  */
 
 import { computed, onMounted, onUnmounted, ref } from 'vue';
@@ -14,8 +16,6 @@ import { Bars3Icon, SwatchIcon } from '@heroicons/vue/24/outline';
 import { NAV } from '../router';
 import { useTheme } from '../composables/useTheme';
 import { useStatusStore } from '../stores/status';
-import type { Scenario } from '../stores/status';
-import { MOCK } from '../data/mock';
 
 const emit = defineEmits<{ toggleSidebar: [] }>();
 
@@ -24,9 +24,7 @@ const { theme, themes, apply } = useTheme();
 const status = useStatusStore();
 
 const showThemeMenu = ref(false);
-const showScenarioMenu = ref(false);
 const themeMenuRef = ref<HTMLElement | null>(null);
-const scenarioMenuRef = ref<HTMLElement | null>(null);
 
 const pageTitle = computed(() => NAV.find((n) => n.path === route.path)?.title ?? 'Aegis');
 
@@ -34,15 +32,13 @@ const currentThemeLabel = computed(
   () => themes.find((t) => t.key === theme.value)?.label ?? 'Aegis',
 );
 
-const SCENARIOS: { key: Scenario; label: string; hint: string }[] = [
-  { key: 'steady', label: '稳态', hint: '守卫判不了，未收紧' },
-  { key: 'tightened', label: '已收紧', hint: '放行已撤销 —— 正在断网' },
-  { key: 'needsHuman', label: '等人工', hint: '已停止自动动作' },
-];
+/** 连接状态的标签。⚠ "过期"和"未连接"是两回事，不能合成一个红点。 */
+const connLabel = computed(() => {
+  if (status.connected) return '已连接';
+  return status.stale ? '已断开（显示旧值）' : '未连接';
+});
 
-const currentScenarioLabel = computed(
-  () => SCENARIOS.find((s) => s.key === status.scenario)?.label ?? '稳态',
-);
+const connVar = computed(() => (status.connected ? 'success' : 'danger'));
 
 function timeText(d: Date) {
   return d.toLocaleTimeString('zh-CN', { hour12: false });
@@ -51,7 +47,6 @@ function timeText(d: Date) {
 function handleClickOutside(e: MouseEvent) {
   const t = e.target as Node;
   if (themeMenuRef.value && !themeMenuRef.value.contains(t)) showThemeMenu.value = false;
-  if (scenarioMenuRef.value && !scenarioMenuRef.value.contains(t)) showScenarioMenu.value = false;
 }
 
 onMounted(() => document.addEventListener('click', handleClickOutside));
@@ -85,68 +80,27 @@ onUnmounted(() => document.removeEventListener('click', handleClickOutside));
       <span
         class="flex items-center gap-1.5 px-2.5 py-1 rounded-pill text-xs font-medium"
         :style="{
-          border: `1px solid rgb(var(--${status.connected ? 'success' : 'danger'}) / 0.28)`,
-          background: `rgb(var(--${status.connected ? 'success' : 'danger'}) / 0.12)`,
-          color: `rgb(var(--${status.connected ? 'success' : 'danger'}))`,
+          border: `1px solid rgb(var(--${connVar}) / 0.35)`,
+          background: `rgb(var(--${connVar}) / 0.12)`,
+          color: `rgb(var(--${connVar}))`,
         }"
-        :title="status.connected ? '已连上守护进程' : '连不上守护进程 —— 下面的数字可能是过期的'"
+        :title="status.connected ? '已连上守护进程' : (status.error || '连不上守护进程')"
       >
         <span
           class="w-2 h-2 rounded-full"
           :class="{ 'animate-pulse': !status.connected }"
-          :style="{
-            background: `rgb(var(--${status.connected ? 'success' : 'danger'}))`,
-          }"
+          :style="{ background: `rgb(var(--${connVar}))` }"
         />
-        <span class="hidden sm:inline">{{ status.connected ? '已连接' : '未连接' }}</span>
+        <span class="hidden sm:inline">{{ connLabel }}</span>
       </span>
 
-      <span class="hidden md:inline text-xs text-text-muted font-mono-num">
+      <span
+        v-if="status.lastUpdated"
+        class="hidden md:inline text-xs text-text-muted font-mono-num"
+        :title="status.stale ? '这是最后一次成功取到状态的时间' : '最近一次刷新'"
+      >
         {{ timeText(status.lastUpdated) }}
       </span>
-
-      <!-- 假数据场景切换（MOCK 为 false 后整块消失） -->
-      <div v-if="MOCK" class="relative" ref="scenarioMenuRef">
-        <button
-          class="flex items-center gap-1.5 px-2.5 py-1.5 rounded-pill text-xs font-medium transition-all"
-          style="
-            border: 1px solid rgb(var(--warning) / 0.28);
-            background: rgb(var(--warning) / 0.1);
-            color: rgb(var(--warning));
-          "
-          title="骨架阶段切换场景 —— 接真数据后这里换成刷新"
-          @click.stop="showScenarioMenu = !showScenarioMenu"
-        >
-          <span class="w-2 h-2 rounded-full" style="background: rgb(var(--warning))" />
-          假数据 · {{ currentScenarioLabel }}
-        </button>
-
-        <Transition name="dropdown">
-          <div
-            v-if="showScenarioMenu"
-            class="absolute right-0 top-full mt-2 w-64 popover-panel p-2 z-50"
-            @click.stop
-          >
-            <div class="px-2 py-1 text-[11px] font-medium text-text-muted uppercase tracking-wider">
-              场景
-            </div>
-            <button
-              v-for="s in SCENARIOS"
-              :key="s.key"
-              class="w-full flex flex-col items-start gap-0.5 px-2.5 py-2 rounded-element text-sm transition-all"
-              :class="status.scenario === s.key ? 'text-text' : 'text-text-muted hover:text-text'"
-              :style="{
-                background:
-                  status.scenario === s.key ? 'rgb(var(--accent) / 0.14)' : 'transparent',
-              }"
-              @click="status.setScenario(s.key); showScenarioMenu = false"
-            >
-              <span>{{ s.label }}</span>
-              <span class="text-[11px] text-text-muted">{{ s.hint }}</span>
-            </button>
-          </div>
-        </Transition>
-      </div>
 
       <!-- 主题 -->
       <div class="relative" ref="themeMenuRef">
@@ -175,7 +129,7 @@ onUnmounted(() => document.removeEventListener('click', handleClickOutside));
                 :class="theme === t.key ? 'text-text' : 'text-text-muted hover:text-text'"
                 :style="{
                   background: theme === t.key ? 'rgb(var(--accent) / 0.14)' : 'transparent',
-                  border: `1px solid ${theme === t.key ? 'var(--accent-border)' : 'transparent'}`,
+                  border: `1px solid ${theme === t.key ? 'rgb(var(--accent) / 0.35)' : 'transparent'}`,
                 }"
                 @click="apply(t.key)"
               >

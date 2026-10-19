@@ -22,7 +22,8 @@ const status = useStatusStore();
 
 /** 横幅文案。⚠ 必须说清"是谁干的"，不能只写"网络异常"——那是逼人卸载。 */
 const bannerText = computed(() => {
-  const g = status.snapshot.guard;
+  const g = status.snapshot?.guard;
+  if (!g) return '';
   if (g.needs_human) return '守卫已停止自动动作，等人工处理';
   if (g.tightened) return `守卫已收紧放行（${guardVerdictText(g.verdict)}）`;
   return '';
@@ -49,7 +50,7 @@ const bannerText = computed(() => {
         >
           <ExclamationTriangleIcon class="w-5 h-5 flex-shrink-0" />
           <span class="font-medium">{{ bannerText }}</span>
-          <span class="text-xs text-text-muted truncate">{{ status.snapshot.guard.reason }}</span>
+          <span class="text-xs text-text-muted truncate">{{ status.snapshot?.guard.reason }}</span>
           <span class="ml-auto text-xs underline flex-shrink-0">查看详情</span>
         </div>
 

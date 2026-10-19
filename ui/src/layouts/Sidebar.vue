@@ -19,7 +19,6 @@ import {
   Squares2X2Icon,
 } from '@heroicons/vue/24/outline';
 import { NAV } from '../router';
-import { MOCK } from '../data/mock';
 import { useStatusStore } from '../stores/status';
 
 defineProps<{ collapsed: boolean }>();
@@ -58,9 +57,11 @@ function isActive(path: string) {
           class="w-9 h-9 rounded-element flex items-center justify-center flex-shrink-0"
           style="
             background: linear-gradient(135deg, rgb(var(--accent)), rgb(var(--accent-secondary)));
+            box-shadow: 0 2px 8px rgb(var(--accent) / 0.32);
+            color: rgb(var(--on-accent));
           "
         >
-          <ShieldCheckIcon class="w-5 h-5 text-white" />
+          <ShieldCheckIcon class="w-5 h-5" />
         </div>
         <div v-if="!collapsed" class="whitespace-nowrap">
           <div class="font-semibold text-sm leading-tight">Aegis</div>
@@ -97,19 +98,21 @@ function isActive(path: string) {
       </button>
     </nav>
 
-    <!-- 底部：假数据标记 + 折叠 -->
+    <!-- 底部：连接状态 + 折叠 -->
     <div class="p-2 border-t border-border/40 space-y-1">
       <div
-        v-if="MOCK && !collapsed"
+        v-if="!collapsed"
         class="px-3 py-2 rounded-element text-[11px] leading-snug"
         :style="{
-          background: 'rgb(var(--warning) / 0.12)',
-          border: '1px solid rgb(var(--warning) / 0.28)',
-          color: 'rgb(var(--warning))',
+          background: `rgb(var(--${status.connected ? 'success' : 'danger'}) / 0.12)`,
+          border: `1px solid rgb(var(--${status.connected ? 'success' : 'danger'}) / 0.28)`,
+          color: `rgb(var(--${status.connected ? 'success' : 'danger'}))`,
         }"
       >
-        <div class="font-semibold">假数据</div>
-        <div class="text-text-muted">未接守护进程</div>
+        <div class="font-semibold">{{ status.connected ? '守护进程已连接' : '守护进程未连接' }}</div>
+        <div class="text-text-muted">
+          {{ status.connected ? '每 1.5 秒轮询一次' : '正在重试 · 详见总览' }}
+        </div>
       </div>
       <button
         class="w-full flex items-center justify-center gap-2 px-3 py-2 rounded-element text-text-muted hover:bg-surface-hover/60 hover:text-text transition-all duration-150"
