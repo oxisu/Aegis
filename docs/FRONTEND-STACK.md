@@ -169,7 +169,7 @@ platform=win32  node=v22.22.2
 | 代价 | 处理 |
 |---|---|
 | 磁盘多一份 msvc 的 target 目录 | 可接受；或给 UI 单独设 `CARGO_TARGET_DIR` |
-| 每次要敲 `cargo +stable-x86_64-pc-windows-msvc` | 在 `ui/` 下放一份 `rust-toolchain.toml` 钉 msvc，后端仍走根目录的 gnu |
+| 每次要敲 `cargo +stable-x86_64-pc-windows-msvc` | ✅ 已落地：`ui/src-tauri/rust-toolchain.toml` 钉 msvc，后端仍走根目录的 gnu。**不能省**——gnu 的 windres 打不开中文路径下的 `icon.ico`（见 §9） |
 | ⚠ gnu 与 msvc 同时装 **clippy** 会因 `cargo-clippy.exe` 同名冲突而回滚 | `rust-toolchain.toml` 注释里已记录；不要在该文件里声明 `components`，按需单独 `rustup component add` |
 | CI 要装 MSVC | 用 `windows-latest` 镜像（自带） |
 
@@ -310,3 +310,17 @@ cd ui && npm run tauri:dev
 > 后端之所以不受影响，是因为它的依赖早就在缓存里、不需要解析新依赖树。
 > 外壳是**新 workspace**，第一次必须联网。
 > 绕法：`export CARGO_HTTP_PROXY=""`（显式置空 = 强制直连）。
+
+> ⚠ **第二个坑：gnu 的 windres 打不开中文路径下的 `icon.ico`**。
+> `ui/src-tauri` 虽然已钉 msvc（见 §5），但如果哪天那份
+> `rust-toolchain.toml` 丢了或被改名，rustup 会**向上找**到仓库根那份
+> （gnu 宿主），于是 tauri-build 改用 mingw 的 windres 编 Windows 资源文件：
+>
+> ```text
+> windres: can't open icon file `D:\Project\草稿箱\...\icon.ico': Invalid argument
+> ```
+>
+> 这个报错**指向图标文件本身**，第一反应会去查图标是不是坏了、路径是不是写错，
+> 实际是 windres 对路径里的中文（"草稿箱"）编码处理不了——查错方向要白折腾一圈。
+> msvc 不经 windres，没有这个问题。所以 `ui/src-tauri/rust-toolchain.toml`
+> 不是可选的仪式，是**必需**的：它必须在仓库中文路径下也能构建。
