@@ -124,17 +124,23 @@ Aegis 建立一张**独立于任何上层代理软件的 OS 级安全底座**：
 
 详见 [`docs/DOWNSTREAM-GUARD.md`](docs/DOWNSTREAM-GUARD.md)。
 
-## 前端（下一步）
+## 前端
 
-底座已经能跑，**缺的是一个让人看懂"现在什么状态"的界面**。
+底座已经能跑，界面要让人**看懂"现在什么状态"**。
 选型结论与全部实测证据见 [`docs/FRONTEND-STACK.md`](docs/FRONTEND-STACK.md)。
 
 - **外壳 Tauri v2 + 界面 Vue 3 + Tailwind**——这两件事正交，不是二选一。
   ⚠ 这条修正了设计文档原定的 React + Fluent UI v9：界面那层换成
   Vue 3 + Tailwind（沿用既有项目 git-sync-hub → qzone-sync 的栈），外壳不变。
-- 界面骨架**已完成**：`ui/` 下 5 个页面（总览 / 守卫 / 网卡与角色 / 审计 / 设置）
-  + 5 套主题，目前跑在假数据上，`vue-tsc --noEmit` 与 `vite build` 均通过。
-  下一步是接 Tauri 外壳与真数据。
+- **已接上真数据**：`ui/`（5 个页面 + 5 套主题）→ `ui/src-tauri`（Tauri 外壳）
+  → 命名管道 → `aegisd`。1.5 秒轮询一次 `REQ_STATUS`。
+  `vue-tsc --noEmit` / `vite build` / `cargo check --all-targets` 均通过。
+- ⚠ **界面里没有危险操作按钮，这是权限模型决定的**：
+  `apply` / `confirm` / `rollback` 属 `Risk::Dangerous`，守护进程要求
+  对端进程**已提权**，而 GUI 按设计不提权。发得出去才不正常。
+  守卫页给的是能在管理员终端跑的 `aegisctl` 命令。
+- ⚠ **断连后不清空界面**：断网时人要看的正是"为什么断"，把界面清空等于
+  把线索一起清了。快照保留，只用"数据已过期（时间）"标出来。
 - 选 Tauri 的决定性理由是**能直接 `use aegis_ipc`**：`PipeClient`、
   `Status::from_text`、`IpcToken`、帧编解码全是现成的，线协议不可能漂移。
   换成 Electron 就得在 JS 里把"握手 → 版本校验 → token 鉴权 → 请求 → 应答"
@@ -147,6 +153,30 @@ Aegis 建立一张**独立于任何上层代理软件的 OS 级安全底座**：
     ⚠ 这修正了"VS Build Tools 装不上"的旧结论（它装在 D 盘，之前只查了 C 盘）。
   - **浏览器 JS 打不开命名管道，Node 可以**（建连 + 回显实测通过）→
     纯网页方案必须额外常驻一个桥进程 + localhost 端口，反而更差，**已出局**。
+
+### 前端怎么跑
+
+```bash
+cd ui
+npm install
+npm run tauri:dev     # 先起 vite（1420），再拉起桌面窗口
+```
+
+外壳要连上守护进程才拿得到数据，所以另一边得先把 IPC 开起来
+（token 文件是守护进程启动时写的，它没跑就没有那个文件）：
+
+```bash
+aegisd --config <配置文件> --serve-secs 600 --data-dir <目录>
+```
+
+- 外壳默认连管道 `\\.\pipe\aegis`，默认读 `%PROGRAMDATA%\Aegis\ipc.token`；
+  两者都能用 `AEGIS_PIPE` / `AEGIS_TOKEN_FILE` 覆盖（守护进程那边对应
+  `--pipe` / `--data-dir`）。
+- `aegisd` 这条命令只做"读配置 → 感知拓扑 → 裁决 → **干跑** → 开 IPC"，
+  **不会下发任何 WFP 规则、也不会启动上游代理**。
+  下发要显式发 `apply`（且要求对端已提权），守卫动手要显式加 `--guard-act`。
+- 连不上时界面给的是"连不上 + 管道名 + token 路径 + 文件在不在 + 原始错误"，
+  不是一句笼统的"连接失败"。
 
 ### 依赖方向铁律
 

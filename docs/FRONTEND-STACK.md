@@ -198,27 +198,53 @@ platform=win32  node=v22.22.2
    | 文件 | 作用 |
    |---|---|
    | `src/types.ts` | 与 `aegis-ipc` 的 `Status` **逐字段对应**；没有 IPC 字段的类型单独隔开并注明"不许自己造协议" |
-   | `src/data/mock.ts` | 假数据（三种场景）。⚠ 接真数据后**整个删掉**，不留开关 |
+   | `src/ipc.ts` | 桥接层。**没有任何协议实现**——解析在 Rust 侧，界面只消费 JSON |
    | `src/utils/format.ts` | 显示格式化。铁律与 `aegisctl` 同源：认不出的取值显示成 `**未知取值** x`，**不**回退成"正常" |
-   | `src/stores/status.ts` | 状态存储 |
+   | `src/stores/status.ts` | 状态存储 + 轮询 |
+   | `src/components/DaemonUnreachable.vue` | 连不上守护进程时的大空态（把线索全摆出来） |
    | `src/layouts/` | 侧栏 + 顶栏 + **守卫横幅**（不可关闭） |
    | `src/views/` | 总览 / 守卫 / 网卡与角色 / 审计 / 设置 |
 
    五页骨架已成型，`vue-tsc --noEmit` 与 `vite build` 均通过。
    主题沿用既有项目的 5 套（`aegis` 为默认），令牌与组件类同名同义。
 
-3. **接 Tauri**
-   加 `@tauri-apps/cli` + Rust 侧 `tauri` + `aegis-ipc`，
-   暴露一个 `status` 命令返回 `Status`，前端调它替换假数据。
+3. ✅ **接 Tauri**（已完成）
+   `ui/src-tauri/`，**独立 workspace**（不并进根 workspace，理由见根
+   `Cargo.toml` 的 `exclude` 注释：Tauri 要 msvc，后端是 gnu 宿主，
+   混进来会让 CI 的「格式与静态检查」第一次就挂）。
 
-4. **轮询接真数据**
-   `REQ_STATUS` 是请求/响应式，先做定时轮询（不要一上来就上推送）。
-   **第一屏核心是守卫区**：断没断 / 为什么 / 要不要人管
-   （`guard_tightened` / `guard_reason` / `guard_needs_human`）——
-   这正是 `DOWNSTREAM-GUARD.md` §5.2 说的"不知道为什么断就会卸载"。
+   - Rust 侧只做三件事：解析端点 → 读 token → `aegis_ipc::talk`。
+     **token 从头到尾不进渲染进程**。
+   - 三个命令全是只读：`status` / `ping` / `endpoint_info`。
+   - `Status` 的 JSON 由**派生**序列化（`aegis-ipc` 新增可选 `json` feature），
+     不给外壳这边手写一个字段映射——手写就意味着字段有两处定义，
+     `Status` 加字段时这里不会编译失败，只会静默少一列。
+   - 端点不写死，走 `AEGIS_PIPE` / `AEGIS_TOKEN_FILE`；
+     默认 token 路径 `%PROGRAMDATA%\Aegis\ipc.token`。
 
-5. **危险操作最后接**，且必须二次确认：`apply` / `confirm` / `rollback`
-   每一个都会真的动网络状态，按钮上要写明后果。
+4. ✅ **轮询接真数据**（已完成）
+   `REQ_STATUS` 是请求/响应式，做定时轮询（1.5s；断连时放慢到 4s）。
+   **没有上推送**——推送要在服务端加事件通道，属于新增攻击面。
+
+   ⚠ 一条必须守住的行为：**断连后不清空快照**。
+   断网时人要看的正是"为什么断"，把界面清空等于把线索一起清了。
+   所以 `snapshot` 一旦拿到就不再置回 `null`，改用 `stale` 标出来，
+   界面显示"以下是最后一次成功的快照（时间）"。
+
+5. ✅ **危险操作：改定成"不给按钮，给命令"**
+   原计划是"接上 + 二次确认"。**实测权限模型后改了**：
+
+   `aegis_ipc::peer::Risk::Dangerous`（`apply` / `confirm` / `rollback`）
+   要求**对端进程已提权**（`peer::allows` + `token_is_elevated`），
+   而 GUI 按设计**不提权**（§7）。所以危险命令从界面里**根本发不出去**——
+   不是"还没接线"，是这个模型下不应该接。
+
+   于是守卫页不画"解除收紧"按钮，改为给出能在管理员终端跑的命令。
+   画按钮只会得到"点了没反应"，而人会以为什么都没做就已经恢复了——
+   这比没有按钮更危险。
+
+   > 若将来真要在界面里做危险操作，前提是先回答"GUI 凭什么提权"，
+   > 而不是先画按钮。那是另一个立项。
 
 ---
 
@@ -228,8 +254,10 @@ platform=win32  node=v22.22.2
 - **不新增 localhost 端口**。通道仍然只有命名管道那一条。
 - **token 不进前端**。由 Tauri 的 Rust 侧读 token 文件、完成鉴权，
   渲染进程从头到尾拿不到 token。
-- **危险命令二次确认**，且确认文案要说清"这一步会不会断网"。
 - **UI 只读优先**。规则编辑、自更新这类写操作先不做。
+- ⚠ **界面里不出现危险命令**（`apply` / `confirm` / `rollback`）。
+  它们是 `Risk::Dangerous`，要求对端进程已提权，而 GUI 不提权。
+  这不是"还没接线"，是这个模型下发不出去——详见 §6 第 5 步。
 
 ---
 
@@ -261,4 +289,24 @@ s.listen(p,()=>{const c=n.connect(p,()=>c.write('HI'));c.on('data',d=>{console.l
 
 # 4. WebView2 在不在
 ls "/c/Program Files (x86)/Microsoft/EdgeWebView/Application"
+
+# 5. 编外壳（msvc 工具链，独立于后端的 gnu）
+cd ui/src-tauri
+cargo +stable-x86_64-pc-windows-msvc check --all-targets
+
+# 6. 跑起来（会先起 vite，再拉起窗口）
+cd ui && npm run tauri:dev
 ```
+
+> ⚠ **本机专有的坑**：系统残留了一个失效的 HTTP 代理（`127.0.0.1:7897`，
+> 没有进程在监听），而 cargo 在 Windows 上会读**系统**代理设置
+> （不是环境变量），于是所有 registry 访问都会超时失败，报错长这样：
+>
+> ```text
+> warning: spurious network error: Failed to connect to rsproxy.cn:443 over proxy 127.0.0.1
+> error: failed to get `serde` as a dependency ... download of config.json failed
+> ```
+>
+> 后端之所以不受影响，是因为它的依赖早就在缓存里、不需要解析新依赖树。
+> 外壳是**新 workspace**，第一次必须联网。
+> 绕法：`export CARGO_HTTP_PROXY=""`（显式置空 = 强制直连）。
