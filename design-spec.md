@@ -559,7 +559,15 @@ sequenceDiagram
 - [ ] 网络设置变更前的快照 + 退出还原机制（防断网残留）
 
 **阶段 1 · 感知 + Clash 接管（核心）**
-- [ ] SSID / 默认出口 / 路由表检测（WMI）
+- [x] SSID / 默认出口 / 路由表检测 → `aegis-sense`
+  ⚠ **实现走的不是 WMI，是 Win32 API**（原路线图写的 WMI 已实测后改掉）：
+  `GetIfTable2` / `GetAdaptersAddresses` / `GetIpForwardTable2` /
+  `GetIpInterfaceTable` / WLAN API。理由：① 这几个调用**不需要管理员权限**，
+  而通读↔策略分离要求感知层能**只读干跑**；② 不依赖 WMI 服务可用性，
+  WMI 服务停摆时感知层不该跟着瞎。
+  ⚠ **默认出口必须用合成度量**：`MIB_IPFORWARD_ROW2.Metric` 只是"路由度量偏移"，
+  自动度量下恒为 0；真正选路度量 = 接口度量 + 偏移。本机实测以太网 25 vs WLAN 55，
+  只看偏移会**误判成 WLAN**
 - [ ] Clash API 接入：读 `/connections` 审计、PATCH `/configs`、`PUT /providers/rules` 两套规则集
 - [ ] 校园网/热点规则热切换
 
@@ -1086,6 +1094,7 @@ Aegis 的审计规则、告警阈值、日志级别。
 | 绝缘笼规则计划 + 静态自检 | ✅ | `aegis-wfp::plan`（含 `verify` / `verify_policy`） |
 | 拓扑震荡熔断（已接 FFI） | ✅ | `aegis-fuse` |
 | Named Pipe + 显式 DACL + token 鉴权 | ✅ | `aegis-ipc` |
+| `Status` 的 JSON 契约（**字段只有一处定义**） | ✅ | `aegis-ipc` 可选 `json` feature：序列化由 Rust 派生生成，UI 侧不手写字段；文本协议仍是主干，JSON 只是给 UI 消费的旁路（09f9f84） |
 | 审计事件 + 证据链 + 只追加落盘 | ✅ | `aegis-audit`（**尚未接数据源**） |
 | **真正下发 WFP 规则** | 🟨 通路已验证，**整副笼子待授权** | `aegis-wfp::apply`；放行类规则已用无害探针逐条验证（见 §21.4），阻断类需人工 10 秒窗口 |
 | 证据导出（CSV/JSON 证据包） | ✅ | `aegis-audit::export`（CSV 防公式注入 + JSON 证据包） |

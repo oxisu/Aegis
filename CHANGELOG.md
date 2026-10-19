@@ -43,6 +43,30 @@
   - 要付的账：后端 gnu / UI msvc **双工具链**（`cargo +stable-x86_64-pc-windows-msvc`
     即可，不必切默认；`ui/` 下可另放一份 `rust-toolchain.toml` 隔离）
 
+### Removed
+
+- **git 历史重写：清除玻璃态样式源码**（闭源风格不进开源历史，2026-10-19）
+  - 玻璃态（`backdrop-filter` 毛玻璃 + 霓虹光斑 + 卡片内高光 + 发光描边 +
+    0.5px 发丝边）是**闭源产品线的招牌风格**。Aegis 是开源项目，这套源码
+    不能留在公开仓库的历史里
+  - 重写范围：`7b06c12` 之后的 **14 个提交**（UI 从脚手架到设计系统文档全线）。
+    `7b06c12` 及更早的历史、tag `v0.1.0-alpha.1` **未受影响**
+  - 被重写提交里的玻璃类名（`.glass-panel` / `.nav-glow`）、`--glass-*` 令牌、
+    `backdrop-filter` 代码、0.5px 内联样式，全部替换成现行扁平设计系统的等价写法。
+    每个被改动的提交都带「（2026-10-19 历史重写）」注记，写明原内容已不在任何提交中
+  - ⚠ **对软件行为零影响**：重写前后的终态树**逐字节一致**，仅差 3 行文档措辞
+    （`design-spec.md` 的 `.glass-panel`→`.panel`；`docs/FRONTEND-STACK.md`
+    两处"玻璃质感/玻璃卡片"描述改成等效表述）
+  - 保留了 `CHANGELOG`/`main.css` 中对**这次设计决策**的描述性记载：那是"为什么换"
+    的记录，用户此前已在公开 tip 中接受，且不含任何源码
+  - ⚠ **这是仓库操作，不是代码变更**：旧 SHA（如 `cb95c38`）已失效。
+    已强推；**其他 clone 需要重新同步**
+    （`git fetch && git reset --hard origin/master`）。
+    GitHub 服务端的 unreferenced objects 在被 GC 前仍可能经旧 SHA 直接访问，
+    要彻底抹除需联系 GitHub Support
+  - 重写前的完整仓库已备份为 `git bundle` 放在本地
+    （`.aegis-run/backup-pre-glass-purge.bundle`，该目录已在 `.gitignore` 中，未进版本库）
+
 ### Added
 
 - **`aegis-ipc::client`：把客户端会话流程从 `aegisctl` 收进库**
