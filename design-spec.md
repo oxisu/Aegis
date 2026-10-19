@@ -1101,7 +1101,7 @@ Aegis 的审计规则、告警阈值、日志级别。
 | 适配器 SPI（能力接口） | ✅ | `aegis-orchestrator`：`Capability` + 逐能力失败模式 + 能力矩阵 |
 | 参考适配器 + 契约测试夹具 | ✅ | `aegis-orchestrator::reference` / `::contract`（§2A.4 ③） |
 | **下游规则失效兜底：运行时接线** | ✅ 步 1–5（步 5 剩一半） | `aegisd` + `aegis-ipc`；见 `docs/GUARD-WIRING.md` |
-| 规则集模板（校园网 / 热点两套 YAML） | ⬜ 未做 | §21 第 3 项 |
+| 规则集模板（校园网 / 热点两套 YAML） | ✅ 已做 | `rulesets/{campus,hotspot}.yaml`；语义说明 `rulesets/README.md`；静态校验 `tools/check-rulesets.py` |
 | UI 界面骨架 | ✅ 已做（5 页 + 5 套主题，**扁平实底设计系统**） | `ui/`；设计决策见 §21.6 |
 | UI 接 Tauri 外壳 + 轮询真数据 | ✅ 已做（1.5s 轮询 `REQ_STATUS`） | `ui/src-tauri` |
 | UI 打包与签名 | ⬜ 未做（图标已生成，未配安装包与签名） | §21 第 4 项 |
@@ -1147,6 +1147,35 @@ Aegis 的审计规则、告警阈值、日志级别。
 - 令牌层在 `ui/src/styles/main.css`，组件类同文件； Tailwind 色板在
   `ui/tailwind.config.js`。完整决策与验证方法见
   `docs/FRONTEND-STACK.md` §10。
+
+### 21.7 规则集：两套，且**刻意不对称**
+
+对应 §21 第 3 项的"校园网纯国内白名单 / 热点全规则"两套 YAML，
+产物在 `rulesets/`，语义说明在 `rulesets/README.md`。三条设计取舍：
+
+1. **校园网 = 白名单（Fail-Closed），热点 = 排除表（Fail-Open）**。
+   不是偷懒，是两边的漏包代价本来就是反的：校园网漏包会被出口 DPI
+   审计到，代价高；热点本来就是自由出海通道，漏包代价≈0，
+   而"连不上"的代价是自己没法用网。
+   ⚠ 看到两套结构不一致**别去对齐** —— 对齐了才真出错。
+
+2. **`FINAL` 不写进 provider payload**。
+   provider 只提供"命中清单"，收尾动作写在主配置 rules 链末尾：
+   `- RULE-SET,campus,DIRECT` + `- FINAL,REJECT`。
+   把 FINAL 写进 provider 等于这一个来源独占裁决权，
+   其他来源再也改不动——那正是 §20.10 明确否掉的"全局优先级链"。
+   同理，payload 里出现 `FINAL` / `MATCH` 应当被校验器拦下。
+
+3. **这份配置属于第二层（可覆盖策略），不是安全边界**。
+   它决定的是"走代理还是直连"。第一层不变量（默认拒绝底板、回环/DHCP
+   放行、物理网口 53 / LLMNR / mDNS 封锁、震荡先熔断）由 `aegis-wfp`
+   在内核层执行，**不随场景切换**——所以"热点模式 Fail-Open"
+   绝不等于"热点模式裸奔"。
+
+⚠ **未决**：`GEOIP,CN` / `GEOSITE,cn` 只是务实起点，收录标准不是"合规"。
+ 想要真正的"纯洁通道"，用户应把它换成自己审过的教育/科研域名清单
+ （属于第二层，随便改）。这件事**没有自动化校验能兜住**，
+ 只能靠文档说明——这也是本节存在的原因。
 
 ### 21.3 最小链路的启动顺序（不可调换）
 
