@@ -89,7 +89,14 @@ impl std::error::Error for StatusError {}
 ///
 /// ⚠ 刻意**只有这些字段**：状态查询是给人做判断用的，不是 dump 内部状态。
 /// 每加一个字段，就多一处"控制端显示的和守护进程真实情况不一致"的机会。
+///
+/// ⚠ JSON 序列化用**派生**而不是在 GUI 外壳那边手写一份映射：手写就意味着
+/// 字段名有两处定义，`Status` 改字段时那边不会编译失败，只会**静默少一个
+/// 字段**——表现为"界面上少了一列但没人报错"。派生的代价是给 `aegis-ipc`
+/// 加一个可选依赖（见 Cargo.toml 的 `json` feature），收益是字段只有一处
+/// 定义。默认不开，所以这条注释之外的一切都不受影响。
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "json", derive(serde::Serialize))]
 pub struct Status {
     /// 状态机当前状态。
     pub state: String,
@@ -122,6 +129,7 @@ pub struct Status {
 /// 所以"为什么断"必须能在 `aegisctl status` 里一眼看到，而不是只有守护
 /// 进程的日志里有。
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[cfg_attr(feature = "json", derive(serde::Serialize))]
 pub struct GuardView {
     /// 放行是否**真的**已被撤掉（收紧态 → 只剩拒绝底板 → 全都拒绝）。
     ///

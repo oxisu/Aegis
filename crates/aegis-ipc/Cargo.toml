@@ -7,6 +7,19 @@ rust-version.workspace = true
 license.workspace      = true
 authors.workspace      = true
 
+[features]
+# ── 可选：把 `Status` 序列化成 JSON（给 GUI 外壳用）──────────────────────
+#
+# ⚠ 为什么是**可选**的：
+#   1. IPC 的文本协议（`key=value`）是刻意选的——人要能直接把状态贴出来看，
+#      且不值得为一次状态查询让所有下游都背一个序列化依赖。默认不开。
+#   2. GUI 外壳需要把状态交给 JS。若在那边手写一份 JSON 映射，字段就变成
+#      两处定义，改一处漏一处不会报错——正是本项目最忌讳的漂移。
+#      开这个 feature 让字段**只有一份定义**，序列化由派生保证。
+#
+# 开它的只有 `ui/src-tauri`（GUI 外壳的 Rust 侧），其余 crate 一律不开。
+json = ["serde/derive"]
+
 [dependencies]
 # 版本标识：握手时要带上 Aegis 自身版本号
 aegis-version = { workspace = true }
