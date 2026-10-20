@@ -107,6 +107,36 @@ pub struct Proxy {
     /// 后续接上适配器 SPI 之后，断言 A 会改用 `Op::RulesEffective`
     /// 的三态结果（`RulesUnknown` 同样落到 `None`），本字段退化为无 SPI 时的兜底。
     pub control_addr: Option<SocketAddr>,
+    /// mihomo / Clash 适配器配置。**填了它，守卫断言 A 就问适配器**
+    /// （`Op::RulesEffective` 三态），不再只是 TCP 探端口。
+    pub clash: Option<Clash>,
+}
+
+/// `[proxy.clash]` —— mihomo / Clash 适配器的配置。
+///
+/// ⚠ **没填这一段时，断言 A 退回 `control_addr` 的 TCP 探测**，
+///   而 TCP 探测只能回答"端口通不通"，回答不了"规则生效没有"。
+#[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct Clash {
+    /// 控制口地址（`host:port`）。**必填**。
+    ///
+    /// ⚠ Clash Verge 默认 `9097`、vanilla mihomo 默认 `9090`，
+    ///   两者都被实测过。所以这一项不猜——猜错的表现是"连不上"。
+    pub control_addr: String,
+    /// 控制口密钥。**可以留空**（mihomo 未开启鉴权时就是空的）。
+    ///
+    /// ⚠ 别把 secret 直接写进可能被外发的配置文件。留空并设
+    ///   `secret_env`，让守护进程从环境变量读——那不会跟着文件一起走。
+    pub secret: String,
+    /// 从哪个环境变量读 secret（优先于 `secret` 字段）。
+    pub secret_env: Option<String>,
+    /// Aegis **期望**下游加载的规则集 provider 名。
+    ///
+    /// ⚠ 这是"期望"，不是"实际"。mihomo 侧真实加载了什么由
+    ///   `GET /providers/rules` 回答——**声明与产出脱节**正是这里要抓的。
+    ///   留空表示"不检查规则集是否加载"（只要求规则链非空）。
+    pub expected_providers: Vec<String>,
 }
 
 /// `[[always_allow]]` 一条**永久放行**条目。

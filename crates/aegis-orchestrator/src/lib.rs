@@ -34,6 +34,7 @@
 //! （[`reference`]）：契约测试要验的是适配器的**语义**，不是"这个软件装没装"。
 
 pub mod capability;
+pub mod clash;
 pub mod contract;
 pub mod error;
 pub mod op;

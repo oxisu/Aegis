@@ -10,6 +10,12 @@ authors.workspace      = true
 [dependencies]
 aegis-version = { workspace = true }
 thiserror     = { workspace = true }
+# mihomo 控制 API 的线协议是 JSON，解析它需要 serde_json。
+# ⚠ 只加 serde_json、**不加 reqwest**：控制口在 127.0.0.1 明文，
+#   引入 tokio + hyper + TLS 栈换来的能力一个都用不上，却会把
+#   同步的 SPI 拖进异步。理由详见 `src/clash/http.rs` 模块文档。
+serde       = { workspace = true }
+serde_json  = { workspace = true }
 
 [dev-dependencies]
 mutants = { workspace = true }

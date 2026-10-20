@@ -1005,8 +1005,59 @@ fn collect_verdict(cfg: &Config, tick: u64) -> Result<GuardVerdict, String> {
 /// `RulesEffective → Some(true)`、`RulesIneffective → Some(false)`、
 /// `RulesUnknown → None`。本函数退化为"没有适配器时的兜底判据"。
 fn assertion_a(cfg: &Config) -> Option<bool> {
+    // 优先问适配器：它能回答"规则**生效**没有"，而不只是"端口通不通"。
+    // 接线前这里是纯 TCP 探测——那只能证明进程活着，而这恰恰是
+    // 「进程好好的、规则集是空的」这类静默失效抓不到的情形。
+    if let Some(clash) = &cfg.proxy.clash {
+        return clash_assertion_a(clash);
+    }
+    // 没配适配器 → 退回 TCP 探测（老行为，且它只能回答这么多）
     let addr = cfg.proxy.control_addr?;
     Some(TcpStream::connect_timeout(&addr, CONTROL_PROBE_TIMEOUT).is_ok())
+}
+
+/// 用 mihomo 适配器回答断言 A（`Op::RulesEffective` 的三态）。
+///
+/// ⚠ 三态必须映射成三态，**不能压成两态**：
+/// · `RulesEffective`   → `Some(true)`
+/// · `RulesIneffective` → `Some(false)` —— 守卫据此收紧
+/// · `RulesUnknown` / 调用失败 → `None` —— 守卫**永不收紧**
+///
+/// 把最后两格合并的后果是"控制口连不上"被当成"规则没生效"→ 收网，
+/// 而实际原因只是 Aegis 自己问不到；收紧的代价是整机断网。
+/// 这条在 `aegis-orchestrator::clash::tests` 里有专门的用例钉住。
+fn clash_assertion_a(clash: &aegis_config::Clash) -> Option<bool> {
+    use aegis_orchestrator::clash::{ClashAdapter, ClashConfig};
+    use aegis_orchestrator::{invoke_checked, Op, Outcome};
+
+    // secret 优先从环境变量读：配置文件可能被外发，环境变量不会跟着走
+    let secret = clash
+        .secret_env
+        .as_ref()
+        .and_then(|k| std::env::var(k).ok())
+        .unwrap_or_else(|| clash.secret.clone());
+
+    let adapter = ClashAdapter::new(ClashConfig {
+        addr: clash.control_addr.clone(),
+        secret,
+        tun_candidates: Vec::new(),
+        expected_providers: clash.expected_providers.clone(),
+    });
+
+    match invoke_checked(&adapter, Op::RulesEffective) {
+        Ok(Outcome::RulesEffective) => Some(true),
+        Ok(Outcome::RulesIneffective { .. }) => Some(false),
+        Ok(Outcome::RulesUnknown { .. }) => None,
+        // 其余 Outcome 与"规则是否生效"无关。`invoke_checked` 已经保证
+        // 能力对得上，走到这里说明契约被绕过——**判不了**，不是"生效"。
+        // ⚠ 这个分支必须留在：以后给 Capability 加新能力时，
+        //   编译器会在这里提醒，而不是让新能力悄悄落到"生效"上。
+        Ok(other) => {
+            eprintln!("[WARN] 断言 A 收到了非规则类结果：{other:?}（按判不了处理）");
+            None
+        },
+        Err(_) => None,
+    }
 }
 
 /// 观测一次，返回一行日志。

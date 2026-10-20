@@ -94,6 +94,37 @@
   - ⚠ 已知缺口（写在 `docs/SERVICE.md` §6）：服务恢复策略没配、
     stdout 在服务上下文里没人接（排障只能靠事件查看器）、未声明服务依赖
 
+- **Clash / mihomo 适配器接入（§9 阶段 0 · B5 · 适配器形态）**
+  - 新增 `crates/aegis-orchestrator/src/clash/` 模块，把"会读 mihomo 控制 API 的
+    东西"做成一个**标准适配器**，而不是在守护链路里写死的 HTTP 调用：
+    - `http.rs`：**零依赖手写 HTTP/1.1 客户端**（刻意不用 reqwest）。只够跟本机
+      `127.0.0.1` 明文控制口说话；1s 总超时（< 守卫 3s 观测周期，防泄漏窗口变长）、
+      8MB 响应体硬上限（防 `/connections` 几十 MB 把守护进程吃光）、支持
+      chunked 解码、Bearer 鉴权、不做重试。85 项测试里含"超限即 `TooLarge`"真测。
+    - `wire.rs`：控制 API 返回结构的 serde 类型，全部**用实测 JSON 钉死字段名/类型**：
+      `Port` 是 untagged `Num(u16)/Str(String)`（实测 `sourcePort` 是字符串）、
+      `Configs` 用 kebab-case（`mixed-port` 不是 `mixed_port`）、`Metadata` /
+      `Connection(s)` / `Rules` / `Providers`。未知字段一律忽略（上游加字段不炸）。
+    - `mod.rs`：`ClashAdapter` + `ClashConfig`，实现 `Adapter` SPI；声明能力
+      `TunInterfacePresent / HealthProbe / Reload / DnsOwnership / RuleEffectiveness`
+      （**不含** `DefaultEgress` / `ConfigFragmentGenerate`——上游没有对应 API，
+      不声明就不会被当成撒谎）。`rules_effective` 是**三态**：控制口连不上 →
+      `RulesUnknown`（永不收紧，这是整段最易错的一格），规则链空 / provider 缺失 →
+      `RulesIneffective`，健康 → `RulesEffective`。
+    - `tests.rs`：本地假 mihomo（`TcpListener` 夹具，不碰真控制口），30 项覆盖
+      三态映射的每一条边界（含 `unreachable_controller_is_unknown_never_ineffective`
+      钉死"连不上 = Unknown 而非 Ineffective"）。
+  - `aegis-config` 新增 `[proxy.clash]` 配置段（`Clash` 结构体）：`control_addr`
+    **必填**、`secret`、优先于 `secret` 的 `secret_env`（secret 不进可能被外发的
+    文件）、`expected_providers`（期望下游加载的规则集名，留空则不查 provider）。
+  - **守卫断言 A 接适配器**：`aegisd` 的 `assertion_a` 改为优先问 mihomo 适配器
+    的 `Op::RulesEffective`（三态 → `Option<bool>`，`Unknown`/`Err` → `None` 永不
+    收紧），TCP 端口探测退回为"没配适配器时"的兜底。这是 B6（审计接连接级数据源）
+    的前置依赖——适配器能拿到连接级元数据了。
+  - 设计取舍：**没用 reqwest**。控制口只在 `127.0.0.1` 且明文，引入 tokio + TLS
+    只会拖异步 SPI；SPI 本身没有异步必要。代价是只支持明文 HTTP/1.1——哪天控制口
+    要上网络，正确做法是换库，不是给这里加 TLS。
+
 - **UI 打包配置（`ui/src-tauri/tauri.conf.json` 的 `bundle` 段）**
   - 此前整个 `bundle` 段**缺失**，`tauri build` 会按默认行为走，产物不可预期。
     现补齐 `icon` / `targets` / `publisher` / `category` 与 `windows` 段

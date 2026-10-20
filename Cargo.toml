@@ -69,6 +69,11 @@ thiserror = { version = "2" }
 tracing  = { version = "0.1" }
 # 序列化：IPC 帧、配置落盘、审计导出均依赖
 serde    = { version = "1", features = ["derive"] }
+# JSON 解析：目前只有 mihomo 适配器用（它的控制 API 线协议是 JSON）。
+# ⚠ 刻意**不**加 reqwest/tokio：那会把几十个 crate 和一个异步运行时拖进来，
+#   而控制口在 127.0.0.1 明文，TLS 与 HTTP/2 一个都用不上。
+#   详见 crates/aegis-orchestrator/src/clash/http.rs 模块文档。
+serde_json = { version = "1" }
 # 配置解析：仅 aegis-config 使用
 toml     = { version = "1" }
 # 变异测试标注：提供 `#[mutants::skip]` 属性（cargo-mutants 官方配套）。

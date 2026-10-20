@@ -12,6 +12,7 @@ aegis-version = { workspace = true }
 aegis-model   = { workspace = true }
 aegis-config  = { workspace = true }
 aegis-core    = { workspace = true }
+aegis-orchestrator = { workspace = true }
 aegis-sense   = { workspace = true }
 aegis-wfp     = { workspace = true }
 aegis-audit   = { workspace = true }

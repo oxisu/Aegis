@@ -572,8 +572,16 @@ sequenceDiagram
   ⚠ **默认出口必须用合成度量**：`MIB_IPFORWARD_ROW2.Metric` 只是"路由度量偏移"，
   自动度量下恒为 0；真正选路度量 = 接口度量 + 偏移。本机实测以太网 25 vs WLAN 55，
   只看偏移会**误判成 WLAN**
-- [ ] Clash API 接入：读 `/connections` 审计、PATCH `/configs`、`PUT /providers/rules` 两套规则集
-- [ ] 校园网/热点规则热切换
+- [x] Clash / mihomo **适配器形态接入**（B5）：零依赖 HTTP/1.1 客户端 + `Adapter` SPI 能力接口
+  + `[proxy.clash]` 配置段 + 守卫断言 A 接三态 `RulesEffective` → `aegis-orchestrator/src/clash`
+  ⚠ 这一步只把"会读 mihomo 控制 API 的能力"做成了标准适配器（`connections()` /
+  `configs()` / `reload()` / `put_rule_provider()` / `set_mode()` 等方法都已实现），
+  **还没接下游消费**——读出来给谁用是下面两条
+- [ ] 审计接连接级数据源（B6）：把 `/connections` 的连接级元数据（源/目的 IP、端口、
+  host、进程路径、命中规则）喂给 `aegis-audit` 作为**第二审计源（可选富化）**，
+  拉不到不影响 WFP 原生审计
+- [ ] 校园网/热点规则热切换：SSID 变化 → `PUT /providers/rules` + `set_mode` 联动
+  （适配器方法已就位，缺编排接线）
 
 **阶段 2 · 防漏兜底**
 - [ ] 校园网模式下程序化下发 WFP/防火墙规则（kill-switch）
@@ -1088,7 +1096,7 @@ Aegis 的审计规则、告警阈值、日志级别。
 5. **角色模型与 Clash/HypoMux 协同矩阵**：明确四角色下两程序的启停、TUN/系统代理、路由归属。
 6. **参考适配器 + fixture 契约测试**（§2A.4 ③）：先做 1 个参考适配器（建议 sing-box），把"适配"从形容词变成"这组 fixture 过没过"。
 
-### 21.1 已落地进度（截至 2026-10-19）
+### 21.1 已落地进度（截至 2026-10-20）
 
 | 项 | 状态 | 落点 |
 |---|---|---|
@@ -1104,6 +1112,7 @@ Aegis 的审计规则、告警阈值、日志级别。
 | 证据导出（CSV/JSON 证据包） | ✅ | `aegis-audit::export`（CSV 防公式注入 + JSON 证据包） |
 | 适配器 SPI（能力接口） | ✅ | `aegis-orchestrator`：`Capability` + 逐能力失败模式 + 能力矩阵 |
 | 参考适配器 + 契约测试夹具 | ✅ | `aegis-orchestrator::reference` / `::contract`（§2A.4 ③） |
+| **Clash / mihomo 适配器（具体实现，B5）** | ✅ | `aegis-orchestrator::clash`：零依赖 HTTP/1.1 客户端 + `Adapter` SPI 能力接口（`TunInterfacePresent`/`HealthProbe`/`Reload`/`DnsOwnership`/`RuleEffectiveness`）+ `[proxy.clash]` 配置段；守卫断言 A 已接三态 `RulesEffective`（连不上→`None` 永不收紧）。**下游消费未接**：`/connections` 审计富化是 B6 |
 | **下游规则失效兜底：运行时接线** | ✅ 步 1–5（步 5 剩一半） | `aegisd` + `aegis-ipc`；见 `docs/GUARD-WIRING.md` |
 | 规则集模板（校园网 / 热点两套 YAML） | ✅ 已做 | `rulesets/{campus,hotspot}.yaml`；语义说明 `rulesets/README.md`；静态校验 `tools/check-rulesets.py` |
 | UI 界面骨架 | ✅ 已做（5 页 + 5 套主题，**扁平实底设计系统**） | `ui/`；设计决策见 §21.6 |
