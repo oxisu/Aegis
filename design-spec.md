@@ -577,9 +577,11 @@ sequenceDiagram
   ⚠ 这一步只把"会读 mihomo 控制 API 的能力"做成了标准适配器（`connections()` /
   `configs()` / `reload()` / `put_rule_provider()` / `set_mode()` 等方法都已实现），
   **还没接下游消费**——读出来给谁用是下面两条
-- [ ] 审计接连接级数据源（B6）：把 `/connections` 的连接级元数据（源/目的 IP、端口、
+- [x] 审计接连接级数据源（B6）：把 `/connections` 的连接级元数据（源/目的 IP、端口、
   host、进程路径、命中规则）喂给 `aegis-audit` 作为**第二审计源（可选富化）**，
-  拉不到不影响 WFP 原生审计
+  拉不到不影响 WFP 原生审计 → `aegis-orchestrator::clash::audit` + `aegisd`
+  `spawn_clash_audit_enricher`（只读、去重、失败只记日志不崩）；  诚实记为
+  `Action::Observed` + `InterfaceRole::Unknown`（代理不知出口网卡，fail-closed）
 - [ ] 校园网/热点规则热切换：SSID 变化 → `PUT /providers/rules` + `set_mode` 联动
   （适配器方法已就位，缺编排接线）
 
@@ -1096,7 +1098,7 @@ Aegis 的审计规则、告警阈值、日志级别。
 5. **角色模型与 Clash/HypoMux 协同矩阵**：明确四角色下两程序的启停、TUN/系统代理、路由归属。
 6. **参考适配器 + fixture 契约测试**（§2A.4 ③）：先做 1 个参考适配器（建议 sing-box），把"适配"从形容词变成"这组 fixture 过没过"。
 
-### 21.1 已落地进度（截至 2026-10-20）
+### 21.1 已落地进度（截至 2026-10-21）
 
 | 项 | 状态 | 落点 |
 |---|---|---|
@@ -1107,12 +1109,12 @@ Aegis 的审计规则、告警阈值、日志级别。
 | 拓扑震荡熔断（已接 FFI） | ✅ | `aegis-fuse` |
 | Named Pipe + 显式 DACL + token 鉴权 | ✅ | `aegis-ipc` |
 | `Status` 的 JSON 契约（**字段只有一处定义**） | ✅ | `aegis-ipc` 可选 `json` feature：序列化由 Rust 派生生成，UI 侧不手写字段；文本协议仍是主干，JSON 只是给 UI 消费的旁路（09f9f84） |
-| 审计事件 + 证据链 + 只追加落盘 | ✅ | `aegis-audit`（**尚未接数据源**） |
+| 审计事件 + 证据链 + 只追加落盘 | ✅ | `aegis-audit`（第一审计源 WFP 内核捕获待接；**第二审计源 mihomo `/connections` 富化已接 B6**：`Action::Observed` + `InterfaceRole::Unknown`，只读、去重、绝不伪造裁决） |
 | **真正下发 WFP 规则** | 🟨 通路已验证，**整副笼子待授权** | `aegis-wfp::apply`；放行类规则已用无害探针逐条验证（见 §21.4），阻断类需人工 10 秒窗口 |
 | 证据导出（CSV/JSON 证据包） | ✅ | `aegis-audit::export`（CSV 防公式注入 + JSON 证据包） |
 | 适配器 SPI（能力接口） | ✅ | `aegis-orchestrator`：`Capability` + 逐能力失败模式 + 能力矩阵 |
 | 参考适配器 + 契约测试夹具 | ✅ | `aegis-orchestrator::reference` / `::contract`（§2A.4 ③） |
-| **Clash / mihomo 适配器（具体实现，B5）** | ✅ | `aegis-orchestrator::clash`：零依赖 HTTP/1.1 客户端 + `Adapter` SPI 能力接口（`TunInterfacePresent`/`HealthProbe`/`Reload`/`DnsOwnership`/`RuleEffectiveness`）+ `[proxy.clash]` 配置段；守卫断言 A 已接三态 `RulesEffective`（连不上→`None` 永不收紧）。**下游消费未接**：`/connections` 审计富化是 B6 |
+| **Clash / mihomo 适配器（具体实现，B5）** | ✅ | `aegis-orchestrator::clash`：零依赖 HTTP/1.1 客户端 + `Adapter` SPI 能力接口（`TunInterfacePresent`/`HealthProbe`/`Reload`/`DnsOwnership`/`RuleEffectiveness`）+ `[proxy.clash]` 配置段；守卫断言 A 已接三态 `RulesEffective`（连不上→`None` 永不收紧）。**下游消费已接（B6）**：`/connections` → `Action::Observed` 只读富化入审计链（诚实标注 `Unknown` 网卡，绝伪造裁决） |
 | **下游规则失效兜底：运行时接线** | ✅ 步 1–5（步 5 剩一半） | `aegisd` + `aegis-ipc`；见 `docs/GUARD-WIRING.md` |
 | 规则集模板（校园网 / 热点两套 YAML） | ✅ 已做 | `rulesets/{campus,hotspot}.yaml`；语义说明 `rulesets/README.md`；静态校验 `tools/check-rulesets.py` |
 | UI 界面骨架 | ✅ 已做（5 页 + 5 套主题，**扁平实底设计系统**） | `ui/`；设计决策见 §21.6 |

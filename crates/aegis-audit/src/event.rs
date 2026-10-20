@@ -32,12 +32,20 @@ pub enum Action {
     FirewallBlock,
     /// 明文 HTTP(80) 被拦：校园网 DPI 场景的专视图
     PlaintextBlock,
+    /// **代理侧观测**：这条连接被 mihomo / Clash 看到了，正在经代理流动。
+    ///
+    /// ⚠ 这不是 WFP 裁决，也**不代表**"本机允许它出去"——它只说明"代理层
+    /// 有这条连接"。`is_blocked()` 对它是 `false`：被 WFP 拦掉的包根本不会
+    /// 出现在代理的连接表里，所以"出现在代理连接表"本身就排除了"被本地掐死"。
+    /// 把它和 `Allow` 一起归到"非阻断"也避免了它污染"被阻断记录"专视图。
+    /// 真正"这条连接最终是否被 WFP 放行"只有 WFP ALE 层知道——那是第一审计源。
+    Observed,
 }
 
 impl Action {
     /// 是否被本地拦下了。审计视图的"被阻断记录"专视图按这个筛。
     pub fn is_blocked(self) -> bool {
-        !matches!(self, Self::Allow)
+        !matches!(self, Self::Allow | Self::Observed)
     }
 
     /// 证据导出用的稳定标签。
@@ -50,6 +58,7 @@ impl Action {
             Self::Reject => "reject",
             Self::FirewallBlock => "firewall-block",
             Self::PlaintextBlock => "plaintext-block",
+            Self::Observed => "observed",
         }
     }
 }
@@ -61,6 +70,7 @@ impl fmt::Display for Action {
             Self::Reject => "规则拒绝",
             Self::FirewallBlock => "内核阻断",
             Self::PlaintextBlock => "明文阻断",
+            Self::Observed => "代理侧观测",
         };
         f.write_str(s)
     }
@@ -171,11 +181,14 @@ mod tests {
     }
 
     #[test]
-    fn blocked_is_everything_but_allow() {
+    fn blocked_is_everything_but_allow_or_observed() {
         assert!(Action::Reject.is_blocked());
         assert!(Action::FirewallBlock.is_blocked());
         assert!(Action::PlaintextBlock.is_blocked());
         assert!(!Action::Allow.is_blocked());
+        // ⚠ Observed 是代理侧观测，不是裁决：它绝不能进"被阻断记录"专视图，
+        // 也不能被当成"放行"——它是第三态，单独标注。
+        assert!(!Action::Observed.is_blocked());
     }
 
     /// 证据包要跨系统比对，标签里不能出现中文。
@@ -190,12 +203,14 @@ mod tests {
         assert_eq!(Action::Reject.tag(), "reject");
         assert_eq!(Action::FirewallBlock.tag(), "firewall-block");
         assert_eq!(Action::PlaintextBlock.tag(), "plaintext-block");
+        assert_eq!(Action::Observed.tag(), "observed");
 
         for a in [
             Action::Allow,
             Action::Reject,
             Action::FirewallBlock,
             Action::PlaintextBlock,
+            Action::Observed,
         ] {
             assert!(a.tag().is_ascii(), "{a} 的标签必须是 ASCII：{}", a.tag());
             assert!(!a.tag().is_empty());
@@ -220,6 +235,7 @@ mod tests {
         assert_eq!(Action::Reject.to_string(), "规则拒绝");
         assert_eq!(Action::FirewallBlock.to_string(), "内核阻断");
         assert_eq!(Action::PlaintextBlock.to_string(), "明文阻断");
+        assert_eq!(Action::Observed.to_string(), "代理侧观测");
 
         let mut seen = Vec::new();
         for a in [
@@ -227,6 +243,7 @@ mod tests {
             Action::Reject,
             Action::FirewallBlock,
             Action::PlaintextBlock,
+            Action::Observed,
         ] {
             let s = a.to_string();
             assert!(!s.is_empty());

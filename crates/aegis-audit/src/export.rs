@@ -196,6 +196,7 @@ fn role_tag_str(role: InterfaceRole) -> &'static str {
         InterfaceRole::FreeOutbound => "free-outbound",
         InterfaceRole::Aggregated => "aggregated",
         InterfaceRole::Isolated => "isolated",
+        InterfaceRole::Unknown => "unknown",
     }
 }
 

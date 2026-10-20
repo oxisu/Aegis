@@ -64,6 +64,7 @@ pub fn role_tag(role: InterfaceRole) -> u8 {
         InterfaceRole::FreeOutbound => 2,
         InterfaceRole::Aggregated => 3,
         InterfaceRole::Isolated => 4,
+        InterfaceRole::Unknown => 5,
     }
 }
 
@@ -77,6 +78,7 @@ pub fn role_from_tag(tag: u8) -> Option<InterfaceRole> {
         2 => InterfaceRole::FreeOutbound,
         3 => InterfaceRole::Aggregated,
         4 => InterfaceRole::Isolated,
+        5 => InterfaceRole::Unknown,
         _ => return None,
     })
 }
@@ -88,6 +90,7 @@ pub fn action_tag(action: Action) -> u8 {
         Action::Reject => 2,
         Action::FirewallBlock => 3,
         Action::PlaintextBlock => 4,
+        Action::Observed => 5,
     }
 }
 
@@ -98,6 +101,7 @@ pub fn action_from_tag(tag: u8) -> Option<Action> {
         2 => Action::Reject,
         3 => Action::FirewallBlock,
         4 => Action::PlaintextBlock,
+        5 => Action::Observed,
         _ => return None,
     })
 }
@@ -256,6 +260,7 @@ mod tests {
             (InterfaceRole::FreeOutbound, 2),
             (InterfaceRole::Aggregated, 3),
             (InterfaceRole::Isolated, 4),
+            (InterfaceRole::Unknown, 5),
         ] {
             assert_eq!(role_tag(role), tag, "{role}");
             assert_eq!(role_from_tag(tag), Some(role), "{tag}");
@@ -265,12 +270,13 @@ mod tests {
             (Action::Reject, 2),
             (Action::FirewallBlock, 3),
             (Action::PlaintextBlock, 4),
+            (Action::Observed, 5),
         ] {
             assert_eq!(action_tag(action), tag, "{action}");
             assert_eq!(action_from_tag(tag), Some(action), "{tag}");
         }
         assert_eq!(role_from_tag(0), None, "未知编号不能回退到某个角色");
-        assert_eq!(role_from_tag(5), None);
+        assert_eq!(role_from_tag(6), None);
         assert_eq!(action_from_tag(0), None);
         assert_eq!(action_from_tag(9), None);
     }

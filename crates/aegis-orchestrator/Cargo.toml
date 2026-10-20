@@ -16,6 +16,14 @@ thiserror     = { workspace = true }
 #   同步的 SPI 拖进异步。理由详见 `src/clash/http.rs` 模块文档。
 serde       = { workspace = true }
 serde_json  = { workspace = true }
+# 把连接级元数据翻译成审计事件时，需要消费这两者的类型：
+# - aegis-core：`InterfaceRole`（诚实标注"代理侧观测，未知网卡"）
+# - aegis-audit：`AuditEvent` / `Action` / `Protocol`（第二审计源的产物）
+# ⚠ 依赖方向安全：aegis-core 只依赖 aegis-model（零 Win32），
+#   aegis-audit 只依赖 aegis-core + sha2，都不会把 windows crate 拖进本 crate，
+#   所以 orchestrator 依旧是纯逻辑、可只读干跑、不碰系统。
+aegis-core  = { workspace = true }
+aegis-audit = { workspace = true }
 
 [dev-dependencies]
 mutants = { workspace = true }

@@ -31,6 +31,15 @@ pub enum InterfaceRole {
     Aggregated,
     /// 未知 / 未配置 / 违规网卡：WFP 绝对 DROP ALL
     Isolated,
+    /// 网卡角色**无法判定**（代理侧观测场景下特有）。
+    ///
+    /// ⚠ 这是给"第二审计源"用的：Clash / mihomo 适配器只能看到"经过代理的
+    /// 连接"，它**不知道这条连接最终从哪张物理网卡出去**（那是 WFP / 路由表的
+    /// 事）。把这种记录硬塞进某个具体角色等于伪造裁决证据。
+    /// 所以它必须存在，且 `allows_egress` / `locks_dns` 一律返回 false
+    /// （fail-closed）——一条"不知道走了哪张网卡"的记录，绝不能因此被当成
+    /// "走白名单放行了"。
+    Unknown,
 }
 
 impl InterfaceRole {
@@ -55,6 +64,7 @@ impl fmt::Display for InterfaceRole {
             Self::FreeOutbound => "自由出海",
             Self::Aggregated => "带宽聚合",
             Self::Isolated => "彻底绝缘",
+            Self::Unknown => "未知（代理侧观测，未判定网卡）",
         };
         f.write_str(s)
     }

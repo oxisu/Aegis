@@ -65,6 +65,8 @@ dependencies = [
 name = "aegis-orchestrator"
 version = "0.1.0-alpha.2"
 dependencies = [
+ "aegis-audit",
+ "aegis-core",
  "aegis-version",
  "mutants",
  "serde",

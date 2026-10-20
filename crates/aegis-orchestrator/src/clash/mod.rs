@@ -31,6 +31,7 @@
 //! 也就是说：**控制口连不上必须走 `Err`，绝不能报 `RulesIneffective`**。
 //! 混起来的后果是"网明明是好的，守卫却把它收了"——而收紧的代价是整机断网。
 
+pub mod audit;
 pub mod http;
 pub mod wire;
 

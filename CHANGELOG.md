@@ -125,6 +125,33 @@
     只会拖异步 SPI；SPI 本身没有异步必要。代价是只支持明文 HTTP/1.1——哪天控制口
     要上网络，正确做法是换库，不是给这里加 TLS。
 
+- **审计接连接级数据源（§9 阶段 0 · B6 · 第二审计源只读富化）**
+  - 把 mihomo `/connections` 的连接级元数据接进 `aegis-audit`，作为**第二审计源
+    （可选富化）**——WFP ALE 内核层仍是第一审计源（权威裁决 / 出口网卡），本源只补
+    host / 进程路径 / 命中规则这些代理侧才有的字段。
+  - **诚实映射（最关键的设计决策）**：代理侧**没有** WFP 裁决、**不知道**出口网卡，
+    绝不伪造裁决证据——每条连接记成 `Action::Observed`（非裁决、非阻断，
+    `is_blocked()==false`）+ `InterfaceRole::Unknown`（fail-closed：`allows_egress` /
+    `locks_dns` 均 false）。`aegis-audit` 因此新增枚举变体 `Action::Observed` 与
+    `InterfaceRole::Unknown`，以及证据编码 `action_tag` / `role_tag` 的稳定编号
+    （各映射为 5，与既有变体一一对应、未知编号不回退）。
+  - `aegis-orchestrator::clash::audit`：纯函数 `connection_to_audit_event` /
+    `connections_to_audit_events` 完成"mihomo `Connections` → `Vec<AuditEvent>`"，
+    `pid=0`（mihomo 不给 PID）、`luid=0`、`host` / `rule` 为 `Option`（拉不到即 `None`，
+    不影响基本记录）；`start`（RFC3339）**手写**解析为毫秒时间戳（**不引 chrono**，
+    与手写 HTTP 同一哲学），解析失败回退到注入的 `now_ms`；畸形 IP 退化为
+    `0.0.0.0:<port>` 但**不丢记录**。14 项单测（含闰年 / 时区 / 越界校验 + 假 mihomo
+    端到端：`ClashAdapter::connections()` 拉取 → 解析 → 映射成 `Observed`）。
+  - `aegisd` 接线：配置 `[proxy.clash]` 时启动**只读**审计富化线程
+    （`spawn_clash_audit_enricher`，周期 5s），`connections()` → 映射 → 逐条追加进
+    审计链；**去重**（同一连接只首现落盘一次，内存上界 = 活跃连接数）；控制口连不上 /
+    解析失败 / 锁不可用都**只记日志不崩、不收紧**（第二源缺失不影响第一源审计）。
+  - 顺手修了一个真 bug：`wire.rs` 的 `rule_payload` 漏了 `#[serde(rename="rulePayload")]`
+    （mihomo 返回的是 camelCase），漏掉会被静默忽略、富化出的"命中规则"永远为空——
+    被 B6 的单测抓到。
+  - 设计取舍：**只读消费，绝不改 mihomo 配置 / 不下发规则**。它只是把"经过代理的
+    连接"记下来证明链路通，真正的阻断判定仍在 WFP 第一审计源。
+
 - **UI 打包配置（`ui/src-tauri/tauri.conf.json` 的 `bundle` 段）**
   - 此前整个 `bundle` 段**缺失**，`tauri build` 会按默认行为走，产物不可预期。
     现补齐 `icon` / `targets` / `publisher` / `category` 与 `windows` 段

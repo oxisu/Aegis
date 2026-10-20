@@ -143,7 +143,10 @@ pub struct Connection {
     #[serde(default)]
     pub rule: String,
     /// 命中的规则载荷（实测是规则的内容，如一个域名或 `cn`）。
-    #[serde(default)]
+    ///
+    /// ⚠ mihomo 给的是 **camelCase** `rulePayload`，漏掉 rename 会被静默忽略、
+    ///   回退成空串——第二审计源就丢掉了"命中了哪条规则"这件关键事实。
+    #[serde(default, rename = "rulePayload")]
     pub rule_payload: String,
     pub metadata: Metadata,
 }

@@ -222,12 +222,14 @@ mod tests {
                     InterfaceRole::FreeOutbound,
                     InterfaceRole::Aggregated,
                     InterfaceRole::Isolated,
+                    InterfaceRole::Unknown,
                 ] {
                     for action in [
                         Action::Allow,
                         Action::Reject,
                         Action::FirewallBlock,
                         Action::PlaintextBlock,
+                        Action::Observed,
                     ] {
                         base.host = host.clone();
                         base.rule = rule.clone();

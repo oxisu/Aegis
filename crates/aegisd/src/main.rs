@@ -55,6 +55,7 @@ use std::net::TcpStream;
 
 use aegis_audit::{Action, AuditEvent, AuditLog, InterfaceRole, Protocol};
 use aegis_config::{load_file, Config};
+// 第二审计源接线：把 mihomo 连接级元数据翻译成 `Action::Observed` 审计事件。
 use aegis_core::guard::{evaluate, GuardAction, GuardPolicy, GuardTracker, GuardVerdict};
 use aegis_core::role::{adjudicate_all, Confidence};
 use aegis_core::state::{insulation, State};
@@ -63,6 +64,8 @@ use aegis_ipc::{
     GUARD_EFFECTIVE, GUARD_INEFFECTIVE, GUARD_UNKNOWN, OK_PREFIX, REQ_APPLY, REQ_CONFIRM, REQ_PING,
     REQ_ROLLBACK, REQ_STATUS,
 };
+use aegis_orchestrator::clash::audit::connection_to_audit_event;
+use aegis_orchestrator::clash::{ClashAdapter, ClashConfig};
 use aegis_sense::{default_egress, snapshot};
 use aegis_version as version;
 use aegis_wfp::{
@@ -70,6 +73,7 @@ use aegis_wfp::{
     Action as WfpAction, ApplyTicket, CagePolicy, FilterSpec, Phase, Session, CONFIRM_WINDOW_MS,
     MAX_RESTORE_ATTEMPTS,
 };
+use std::collections::HashSet;
 
 /// 退出码。**刻意各不相同**：运维看到码就知道卡在哪一步，
 /// 不用去翻日志猜。
@@ -114,6 +118,13 @@ const DEFAULT_GUARD_INTERVAL_SECS: u64 = 3;
 /// 目标把包丢掉（而不是拒绝）时能挂几十秒，守卫就卡死在那儿——
 /// 而它卡死的代价正好是"失效期间没人看着"。
 const CONTROL_PROBE_TIMEOUT: Duration = Duration::from_millis(800);
+
+/// 第二审计源（mihomo 连接表）的轮询周期（秒）。
+///
+/// 比守卫慢：它只是富化，不参与任何裁决/收紧，漏几秒毫无代价；
+/// 太快则每轮都把当前连接重描一遍（去重后只在连接首次出现时落盘，
+/// 但仍徒增控制口压力）。5 秒是"够新、又不烦"的折中。
+const CLASH_AUDIT_INTERVAL_SECS: u64 = 5;
 
 fn main() {
     let raw: Vec<String> = std::env::args().skip(1).collect();
@@ -522,6 +533,26 @@ fn serve(args: Args) -> ! {
             );
         },
     }
+
+    // ── 第二审计源：mihomo 连接级元数据（只读富化）────────────────────
+    //
+    // 这**不**改变任何流量、不碰 WFP、不收紧。它只是周期性地把"当前经过代理的
+    // 连接"作为 `Action::Observed` 写进审计链，补上 WFP 第一审计源拿不到的
+    // host / 进程路径 / 命中规则。拉不到（控制口连不上）就跳过本轮——
+    // 第二审计源缺失**绝不**影响基本审计（第一源仍在）。
+    if let Some(clash_cfg) = &config.proxy.clash {
+        println!(
+            "Clash 审计富化：每 {} 秒拉取连接（只读，{}）",
+            CLASH_AUDIT_INTERVAL_SECS, clash_cfg.control_addr
+        );
+        spawn_clash_audit_enricher(
+            clash_cfg,
+            Arc::clone(&audit),
+            Duration::from_secs(CLASH_AUDIT_INTERVAL_SECS),
+        );
+    } else {
+        println!("Clash 审计富化：未配置 [proxy.clash]，跳过。");
+    }
     println!();
 
     println!("启动完成。IPC 已在 {} 上应答。", args.pipe);
@@ -608,6 +639,91 @@ fn spawn_guard_observer(
             append_guard_line(&log, &line);
         }
     });
+}
+
+/// 第二审计源的富化线程：**只读**地把 mihomo 当前连接写进审计链。
+///
+/// 设计要点（见 design-spec §2A / §12 F3）：
+/// - 只观测、不裁决：每条连接记成 `Action::Observed` + `InterfaceRole::Unknown`，
+///   绝不冒充 WFP 的裁决证据（那是第一审计源的事）。
+/// - **去重**：同一连接只在首次出现时落盘一次，避免每轮把同一批连接重描一遍
+///   把日志撑爆。内存上界 = 当前活跃连接数。
+/// - 控制口连不上 / 解析失败**只记日志不崩**：第二审计源缺失不影响基本审计，
+///   也不收紧（收紧是 WFP 第一源的事）。
+/// - 进程退出线程随之消失，无需 join / 停止标志（同守卫线程）。
+fn spawn_clash_audit_enricher(cfg: &aegis_config::Clash, audit: AuditSlot, interval: Duration) {
+    let cfg = cfg.clone();
+    thread::spawn(move || {
+        // 适配器无状态（只持配置 + 能力声明），跨轮复用即可，不必每轮重建。
+        let adapter = build_clash_adapter(&cfg);
+        // 已记录过的连接 id：只保留"当前仍活跃"的，腾出已关闭连接的占位，
+        // 并允许其将来重连时重新记录。内存上界 = 当前活跃连接数。
+        let mut seen: HashSet<String> = HashSet::new();
+        let mut ticks = 0u64;
+        loop {
+            thread::sleep(interval);
+            ticks += 1;
+            let conns = match adapter.connections() {
+                Ok(c) => c,
+                Err(e) => {
+                    // 判不了，不是故障。跳过本轮，不收紧、不崩。
+                    println!("[clash-audit #{ticks}] 读取连接失败（跳过本轮）：{e}");
+                    // 控制口失联时 seen 失去参照，清空以免占位常驻且恢复后不被重记。
+                    seen.clear();
+                    continue;
+                },
+            };
+            let total = conns.connections.len();
+            let mut logged = 0usize;
+            {
+                let Ok(mut log) = audit.lock() else {
+                    // 锁被毒化：跳过本轮，下一轮再试。
+                    println!("[clash-audit #{ticks}] 审计锁不可用，跳过本轮");
+                    seen.clear();
+                    continue;
+                };
+                for conn in &conns.connections {
+                    if seen.contains(&conn.id) {
+                        continue;
+                    }
+                    let event = connection_to_audit_event(conn, now_ms());
+                    if log.append(&event).is_ok() {
+                        seen.insert(conn.id.clone());
+                        logged += 1;
+                    } else {
+                        println!(
+                            "[clash-audit #{ticks}] 写入审计事件失败：连接 {} 跳过",
+                            conn.id
+                        );
+                    }
+                }
+                let _ = log.flush();
+            }
+            // 仅保留仍活跃的连接 id（见上方字段注释）。
+            seen = conns.connections.iter().map(|c| c.id.clone()).collect();
+            if logged > 0 {
+                println!("[clash-audit #{ticks}] +{logged} 条观测连接（活跃 {total} 条）");
+            }
+        }
+    });
+}
+
+/// 把 `[proxy.clash]` 配置翻译成适配器配置（secret 优先走环境变量）。
+///
+/// 与 `clash_assertion_a` 同构：同一个配置段、同一套 secret 解析规则，
+/// 避免两处各写一遍而漂移。
+fn build_clash_adapter(clash: &aegis_config::Clash) -> ClashAdapter {
+    let secret = clash
+        .secret_env
+        .as_ref()
+        .and_then(|k| std::env::var(k).ok())
+        .unwrap_or_else(|| clash.secret.clone());
+    ClashAdapter::new(ClashConfig {
+        addr: clash.control_addr.clone(),
+        secret,
+        tun_candidates: Vec::new(),
+        expected_providers: clash.expected_providers.clone(),
+    })
 }
 
 /// 把这一拍的结论写进对外状态，必要时落一条审计。
