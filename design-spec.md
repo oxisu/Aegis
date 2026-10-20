@@ -552,7 +552,11 @@ sequenceDiagram
 
 **阶段 0 · 权限与骨架**
 - [x] GUI ↔ 服务的 named pipe 通道本身（显式 DACL + 一次性 token 鉴权）→ `aegis-ipc`
-- [ ] Windows Service 宿主 + 管理员自启动/提权逻辑（UAC / 服务安装）
+- [x] Windows Service 宿主 → `aegisd install / uninstall / start / stop / status`
+  ⚠ **UAC 自动提权未做**：现在"用管理员终端跑这一步"由人承担，
+  `install` 报"需要管理员权限"而不是自己弹 UAC。选这个而不是自动弹窗是有意的：
+  自动提权会把"我要装一个开机自启的 SYSTEM 服务"这件事变得太轻易，
+  而它对机器的影响大到应该由人明确按下回车。见 `docs/SERVICE.md`
 - [x] GUI ↔ 服务通信的**客户端**（`aegisctl` 那段会话流程已抽成 `aegis_ipc::client`）
 - [x] GUI（**Tauri v2 + Vue 3 + Tailwind**，见 §21.5）**外壳**——5 页界面 +
       1.5s 轮询真数据已接通，端到端验证通过（2026-10-19）
@@ -1106,6 +1110,7 @@ Aegis 的审计规则、告警阈值、日志级别。
 | UI 接 Tauri 外壳 + 轮询真数据 | ✅ 已做（1.5s 轮询 `REQ_STATUS`） | `ui/src-tauri` |
 | UI 打包与签名 | 🟨 **配置就位，签名未做** | `ui/src-tauri/tauri.conf.json` 补了 `bundle` 段；exe 已实测可出（`npm run tauri:build -- --no-bundle` 5m08s），**安装包需外部工具链**（本机无 NSIS / WiX），签名无证书**刻意留空** |
 | **最小可运行链路** | ✅ | `aegisd` + `aegisctl`：配置 → IPC → 感知 → 裁决 → 干跑 → 审计 |
+| Windows 服务宿主（开机自启） | 🟨 **代码就位，未在本机安装** | `aegisd service`：install / uninstall / start / stop / status；`crates/aegisd/src/service.rs`。⚠ 装服务会改开机行为，**执行需用户授权**；UAC 自动提权未做（见 `docs/SERVICE.md`） |
 
 ### 21.5 ⚠ UI 选型修正（2026-10-19 实测，同日二次改定）
 

@@ -78,7 +78,13 @@ mod exit {
     pub const IPC: i32 = 3;
     pub const SENSE: i32 = 4;
     pub const AUDIT: i32 = 5;
+    /// 服务管理类命令失败（§9 阶段 0）
+    pub const SERVICE: i32 = 6;
 }
+
+mod service;
+
+use service::ServiceCommand;
 
 /// 一次下发的票据。**纯数据**（`filter_ids` 只是 `Vec<u64>`），
 /// 所以可以跨线程共享；真正不能跨线程的是 WFP 会话句柄，它**永远待在
@@ -110,8 +116,68 @@ const DEFAULT_GUARD_INTERVAL_SECS: u64 = 3;
 const CONTROL_PROBE_TIMEOUT: Duration = Duration::from_millis(800);
 
 fn main() {
-    let args = Args::parse(std::env::args().skip(1));
+    let raw: Vec<String> = std::env::args().skip(1).collect();
 
+    // 服务管理子命令（install / uninstall / start / stop / status）**先**分发。
+    // 放在参数解析之前是有意的：这些子命令各自独立，让它们先走一遍
+    // 守护进程那套解析只会拿到一屏"忽略未知参数"的噪音。
+    match ServiceCommand::parse(&raw) {
+        Ok(Some(sub)) => {
+            let label = sub.label();
+            match run_service_command(sub) {
+                Ok(msg) => {
+                    println!("{msg}");
+                    std::process::exit(0);
+                },
+                Err(e) => {
+                    eprintln!("[FATAL] `aegisd {label}` 失败：{e}");
+                    std::process::exit(exit::SERVICE);
+                },
+            }
+        },
+        Ok(None) => {}, // 不是子命令，走守护进程
+        Err(e) => {
+            // 是子命令但参数不全
+            eprintln!("[FATAL] {e}");
+            print_usage();
+            std::process::exit(exit::SERVICE);
+        },
+    }
+
+    let args = Args::parse(raw.into_iter());
+
+    // ── 服务模式：SCM 外壳 + 与控制台**同一份**守护链路 ──────────────
+    if args.service {
+        run_as_service(args);
+    }
+
+    serve(args)
+}
+
+/// 以服务形态运行：SCM 调度在主线程，守护链路在旁路线程。
+///
+/// 两者不能反：SCM 的 dispatcher 必须待在主线程（它要在服务主线程上下文里
+/// 阻塞并回调状态机），而链路逻辑没有理由非得占用那个线程。
+fn run_as_service(args: Args) -> ! {
+    service::enter_service_mode();
+    let inner = args.clone();
+    std::thread::spawn(move || serve(inner));
+
+    service::scm_dispatch();
+
+    // dispatch 正常返回 = SCM 已经要停这个服务了。
+    // ⚠ 直接结束进程是**刻意**的：WFP 规则全在动态会话里，进程一死内核
+    //    立即清空。主动去 force_teardown() 反而多出一段"进程还活着但规则
+    //    已经撤了"的窗口期。
+    println!("收到服务停止信号，退出（WFP 动态会话随进程清空）。");
+    std::process::exit(0);
+}
+
+/// 守护逻辑主体（控制台与服务两种运行形态共用**唯一一份**实现）。
+///
+/// 返回 `!` 是刻意的：链路的所有终止路径都自己 `exit`，调用方无需处理
+/// 返回值，也就不会写出"以为它会返回"的死代码。
+fn serve(args: Args) -> ! {
     println!("Aegis · aegisd —— {}", version::full());
     println!("最小链路：配置 → IPC → 感知 → 裁决 → WFP 干跑 → 审计");
     println!("⚠ 启动过程中**不下发**任何 WFP 规则；");
@@ -459,7 +525,19 @@ fn main() {
     println!();
 
     println!("启动完成。IPC 已在 {} 上应答。", args.pipe);
-    if args.serve_secs == 0 {
+    if service::is_service_mode() {
+        // ⚠ 服务模式下**忽略** --serve-secs：它的生命周期归 SCM。
+        //   照抄控制台那个 30 秒默认值的话，开机 30 秒后服务自己就没了——
+        //   现象是"服务看起来在、但连接不上"，排错方向会跑到 IPC 上去。
+        println!("服务模式：等待 SCM 停止信号（--serve-secs 被忽略，这是刻意的）。");
+        service::wait_or_stop(args.serve_secs);
+        println!("收到停止信号，退出。");
+        if let Ok(g) = ticket_slot.lock() {
+            if g.as_ref().is_some_and(|t| t.phase == Phase::Committed) {
+                println!("⚠ 已确认的规则会随本进程退出而清空（动态会话）——这是兜底，不是 bug。");
+            }
+        }
+    } else if args.serve_secs == 0 {
         println!("--serve-secs 0：不等客户端，直接退出。");
     } else {
         println!(
@@ -472,7 +550,7 @@ fn main() {
             args.token_file.display(),
             args.pipe
         );
-        thread::sleep(Duration::from_secs(args.serve_secs));
+        service::wait_or_stop(args.serve_secs);
         println!("服务时间到，退出。");
         if let Ok(g) = ticket_slot.lock() {
             if g.as_ref().is_some_and(|t| t.phase == Phase::Committed) {
@@ -480,6 +558,12 @@ fn main() {
             }
         }
     }
+
+    // 走到这里说明等待结束（控制台模式到点 / 服务模式收到停止信号）。
+    // 显式 exit 而不是让它自然返回：`serve()` 的返回类型是 `!`，
+    // 而"自然返回"在服务模式下意味着**悄悄退出服务**，SCM 会当成异常终止
+    // 在事件日志里留一条 ERROR。安静地按正常路径退出才对。
+    std::process::exit(0);
 }
 
 // ── 守卫观测（步 1：只判不动手）─────────────────────────────────────
@@ -1409,6 +1493,7 @@ fn truncate(s: &str, max: usize) -> String {
     format!("{head}…")
 }
 
+#[derive(Clone)]
 struct Args {
     config: PathBuf,
     pipe: String,
@@ -1419,6 +1504,12 @@ struct Args {
     guard_interval_secs: u64,
     /// 守卫是否**真的动手**（步 2）。默认 false —— 只观测。
     guard_act: bool,
+    /// 以 Windows 服务形态运行（由 SCM 调度）。
+    ///
+    /// ⚠ 只有 SCM 拉起的进程才该带这个：它在主线程阻塞于
+    ///   `StartServiceCtrlDispatcherW`。手工带它跑会让 SCM 判定"服务没启动"
+    ///   并在事件日志里报错——但链路本身照跑，所以现象是"能用，事件日志有红字"。
+    service: bool,
 }
 
 impl Args {
@@ -1430,6 +1521,7 @@ impl Args {
         let mut serve_secs: u64 = 30;
         let mut guard_interval_secs: u64 = DEFAULT_GUARD_INTERVAL_SECS;
         let mut guard_act = false;
+        let mut service = false;
         let mut args = argv;
 
         while let Some(a) = args.next() {
@@ -1453,6 +1545,7 @@ impl Args {
                 // 开关型参数，不带值：默认必须是"不动作"，
                 // 收紧的代价是整机断网，不能让一次手滑的命令行把它打开。
                 "--guard-act" => guard_act = true,
+                "--service" => service = true,
                 "--help" | "-h" => {
                     print_usage();
                     std::process::exit(0);
@@ -1481,7 +1574,49 @@ impl Args {
             serve_secs,
             guard_interval_secs,
             guard_act,
+            service,
         }
+    }
+}
+
+/// 执行服务管理子命令，返回要打印给用户的文本。
+///
+/// ⚠ 这些命令**会改这台机器的状态**（注册/删除服务 = 改开机行为）。
+///   代码只提供能力，执行与否由人决定——项目约定：涉及系统状态变更的
+///   动作必须先取得用户明确同意。
+fn run_service_command(sub: ServiceCommand) -> Result<String, String> {
+    match sub {
+        ServiceCommand::Status => Ok(if service::is_installed() {
+            format!(
+                "服务「{}」已安装（SCMgr 名：{}）。",
+                service::SERVICE_DISPLAY_NAME,
+                service::SERVICE_NAME
+            )
+        } else {
+            format!("服务「{}」未安装。", service::SERVICE_NAME)
+        }),
+        ServiceCommand::Install { opts, start_now } => {
+            if service::is_installed() {
+                return Err("服务已安装。要重装请先 `aegisd uninstall`。".into());
+            }
+            let spec = service::install(&opts)?;
+            let mut msg = format!(
+                "已注册服务。\n  显示名  ：{}\n  启动方式：{}\n  binPath  ：{}",
+                spec.display_name,
+                spec.start_type.label(),
+                spec.bin_path
+            );
+            if start_now {
+                service::start()?;
+                msg.push_str("\n已启动。");
+            } else {
+                msg.push_str("\n未启动（加 --start 可立即启动，或 `aegisd start`）。");
+            }
+            Ok(msg)
+        },
+        ServiceCommand::Uninstall => service::uninstall().map(|_| "服务已卸载。".to_string()),
+        ServiceCommand::Start => service::start().map(|_| "服务已启动。".to_string()),
+        ServiceCommand::Stop => service::stop().map(|_| "已向服务发出停止指令。".to_string()),
     }
 }
 
@@ -1501,6 +1636,12 @@ fn print_usage() {
         DEFAULT_GUARD_INTERVAL_SECS
     );
     println!("  --guard-act              守卫**真的动手**（默认只观测，见下）");
+    println!("  --service                以服务形态运行（由 SCM 拉起时才用）");
+    println!();
+    println!("服务管理子命令（**需要管理员权限**，会改这台机器的开机行为）：");
+    println!("  aegisd install --config <配置文件> [--data-dir <dir>] [--start] [--start-type auto|demand]");
+    println!("  aegisd uninstall | start | stop | status");
+    println!("  ⚠ 注册后开机自动以 SYSTEM 运行。先 `aegisd status` 查是否已装。");
     println!();
     println!("守卫默认处于**只观测**形态：只判『下游规则生效吗』并记日志，");
     println!("不会收紧也不会放宽。加 --guard-act 之后 Tighten 才会真的撤掉放行");

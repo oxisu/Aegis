@@ -17,5 +17,14 @@ aegis-wfp     = { workspace = true }
 aegis-audit   = { workspace = true }
 aegis-ipc     = { workspace = true }
 
+# Windows Service 宿主（service.rs）。只开 SCM 需要的两个 feature，
+# 别整包开——`Win32_*` 的 feature 是**按模块**切的，开全量等于
+# 把整个 Win32 元数据拖进编译。
+#
+# ⚠ 为什么守护进程这一层可以直接依赖 `windows`：它是**二进制 crate**，
+#   本来就要读 Win32（通过 aegis-sense / aegis-wfp）。依赖方向铁律约束的是
+#   策略层（core / config）不许碰感知层，不是禁止二进制层碰 OS。
+windows = { workspace = true, features = ["Win32_Foundation", "Win32_System_Services"] }
+
 [dev-dependencies]
 mutants = { workspace = true }
