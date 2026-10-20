@@ -119,6 +119,7 @@ dependencies = [
  "aegis-version",
  "aegis-wfp",
  "mutants",
+ "windows",
 ]
 
 [[package]]
