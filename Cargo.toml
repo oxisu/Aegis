@@ -104,6 +104,8 @@ aegis-audit   = { path = "crates/aegis-audit" }
 aegis-orchestrator = { path = "crates/aegis-orchestrator" }
 # 工作区内部：微秒级网口熔断器
 aegis-fuse    = { path = "crates/aegis-fuse" }
+# 工作区内部：非 WFP 网络设置采集/还原执行层（系统代理 + 路由表，B4 快照）
+aegis-netcfg  = { path = "crates/aegis-netcfg" }
 
 # ── Release 优化：本机安全底座追求极小体积与快速冷启动 ──
 [profile.release]

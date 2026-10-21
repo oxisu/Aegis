@@ -1,0 +1,46 @@
+[package]
+name        = "aegis-netcfg"
+description = "非 WFP 网络设置的采集/还原执行层（系统代理注册表 + 路由表）—— B4 快照与一键复原基础"
+version.workspace      = true
+edition.workspace      = true
+rust-version.workspace = true
+license.workspace      = true
+authors.workspace      = true
+
+[dependencies]
+# 需要：
+#  - Win32_System_Registry：系统代理（Internet Settings）读写；
+#  - Win32_NetworkManagement_IpHelper + Ndis + WinSock：GetIpForwardTable2 路由表；
+#  - Win32_Foundation：HKEY / WIN32_ERROR 等基础类型。
+windows = { workspace = true, features = [
+    "Win32_Foundation",
+    "Win32_System_Registry",
+    "Win32_NetworkManagement_IpHelper",
+    "Win32_NetworkManagement_Ndis",
+    "Win32_Networking_WinSock",
+] }
+
+# 快照类型（纯数据，不碰 Win32）——还原的对象就是它。
+aegis-model   = { workspace = true }
+# 版本标识：快照文件与日志都要能回溯到具体版本/提交。
+aegis-version = { workspace = true }
+
+thiserror  = { workspace = true }
+serde      = { workspace = true }
+serde_json = { workspace = true }
+tracing    = { workspace = true }
+
+[dev-dependencies]
+# 把"必须连真实系统才跑得到"的胶水标出来，避免变异报告里挂假警报。
+mutants = { workspace = true }
+
+# ── 为什么本 crate 独立存在，不塞进 sense / wfp ────────────────────────────
+# - `aegis-sense` 是**只读**事实层；往里加"写回注册表/路由"会破坏它
+#   "策略层可只读干跑"的契约，一条都不该混。
+# - `aegis-wfp` 是 WFP 专用；而这里还原的是**非 WFP** 项（系统代理 + 路由）——
+#   WFP 规则走动态会话自动清空，根本不经过本 crate。
+# 于是"非 WFP 的执行"独立成一层，与事实层、WFP 层正交。
+#
+# 依赖方向：本 crate 依赖 aegis-model（类型）与 aegis-version（标识），
+# **不**依赖 aegis-core / aegis-config / aegis-sense —— 策略层与配置层
+# 依然零 Win32，可脱离特权环境干跑。

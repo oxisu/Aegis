@@ -152,6 +152,37 @@
   - 设计取舍：**只读消费，绝不改 mihomo 配置 / 不下发规则**。它只是把"经过代理的
     连接"记下来证明链路通，真正的阻断判定仍在 WFP 第一审计源。
 
+- **网络设置快照 + 退出/崩溃还原（§9 阶段 0 · B4 · 非 WFP 项可逆基础）**
+  - 范围由设计钉死：WFP 防火墙 / kill-switch 走**动态会话**（进程死内核自动清空，
+    无需快照）；本条目只对**非 WFP 项**——**系统代理注册表**（`ProxyEnable` /
+    `ProxyServer` / `ProxyOverride` / `AutoConfigURL`）与 **IPv4 路由表**——做
+    "变更前快照 + 一键复原 + 退出/崩溃还原"，杜绝静态残留导致的真断网。
+  - 新增 crate **`aegis-netcfg`**（非 WFP 采集/还原**执行层**）：与 `aegis-sense`
+    （只读事实）对称、与 `aegis-wfp`（WFP 专用）正交。**不**依赖 `aegis-core` /
+    `aegis-config` / `aegis-sense`，策略层与配置层保持零 Win32、可只读干跑。
+  - `aegis-model`：新增 `NetSnapshot` / `SystemProxy` / `RouteEntry`（纯数据 +
+    serde，`override` 键名 rename 回 Windows 原名）。路由度量存**合成度量**
+    （接口度量 + 偏移），复述并规避 `aegis-sense` 踩过的"偏移恒 0"陷阱。
+  - **`SnapshotGuard`（可逆笼子，用户硬约束的落点）**：`arm()` 采集基线 →
+    任何改动由 `apply_change(闭包)` 包起来（结构上不可能"先改后快照"）→
+    `restore()` **一键复原**（幂等，未改过则 no-op、**绝不碰系统**）→
+    变更失败**立即回滚**基线（回滚也失败则保持 dirty 不谎报干净）→ `Drop` 退出兜底。
+    9 项单测全部走内存后端（`MockBackend`/`RecordingBackend`），零真系统触碰。
+  - **崩溃恢复靠落盘**：`Drop` 不在 `taskkill`/蓝屏下执行，故改动前把基线
+    **原子写**（`.tmp` + `rename`）到 `<data-dir>/net-baseline.json`；下次启动
+    发现残留即按它还原再清文件。`persist` 模块 5 项单测（往返 / 缺文件 / 损坏报错 / 无 tmp 残留）。
+  - `aegisd` 接线：启动**先崩溃恢复、再 arm 采集基线**（只读）；`REQ_SNAPSHOT`
+    （只读）展示基线；`rollback` 升级为**一键复原**（拆 WFP + 还原非 WFP，二者独立）；
+    正常退出前显式还原（`process::exit` 不跑 `Drop`）；`Status` 新增
+    `restore_protected` / `restore_pending`（`restore_` 前缀，前向兼容）。
+  - `aegisctl`：新增 `snapshot` 只读子命令；`status` 增显"还原保护"区块。
+  - ⚠ **本会话不实际改本机**：B4 只立"可逆基础"，**没有任何触发点会调用写回**
+    （arm 采集是只读；guard 只在 dirty 时才写）。真正的非 WFP 改动触发在后续阶段。
+  - ⚠ **两条已知限制（后续阶段解决，此处如实记账）**：① aegisd 以 `SYSTEM` 运行时
+    读写的 `HKCU` 是 SYSTEM 的 hive，**不是登录用户的**——系统代理要作用到用户需
+    加载对应用户 hive（路由是机器全局，SYSTEM 读/写即正确）；② 路由还原是
+    best-effort 重建（度量交系统自动），精确"拆掉 Aegis 加的那几条"需记录改动 diff。
+
 - **UI 打包配置（`ui/src-tauri/tauri.conf.json` 的 `bundle` 段）**
   - 此前整个 `bundle` 段**缺失**，`tauri build` 会按默认行为走，产物不可预期。
     现补齐 `icon` / `targets` / `publisher` / `category` 与 `windows` 段

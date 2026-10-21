@@ -21,6 +21,12 @@ pub const REQ_APPLY: &str = "apply";
 pub const REQ_CONFIRM: &str = "confirm";
 /// 请求：立即拆除（**危险**）。
 pub const REQ_ROLLBACK: &str = "rollback";
+/// 请求：查询当前"非 WFP 网络设置"改前基线快照（**只读**，B4）。
+///
+/// 一键复原由 [`REQ_ROLLBACK`] 承担（拆除 WFP + 还原非 WFP 项）；
+/// 本请求只负责把基线内容**展示**出来，让 GUI 的"网络设置快照"面板
+/// 能告诉用户"若还原，会回到什么状态"。它只读，绝不改系统。
+pub const REQ_SNAPSHOT: &str = "snapshot";
 
 /// 一个请求词属于哪个风险等级。
 ///
@@ -30,6 +36,8 @@ pub const REQ_ROLLBACK: &str = "rollback";
 pub fn risk_of(word: &str) -> crate::peer::Risk {
     match word {
         REQ_APPLY | REQ_CONFIRM | REQ_ROLLBACK => crate::peer::Risk::Dangerous,
+        // 只读类显式列出，意图清晰；未列出的未知词按只读处理。
+        REQ_STATUS | REQ_PING | REQ_SNAPSHOT => crate::peer::Risk::ReadOnly,
         _ => crate::peer::Risk::ReadOnly,
     }
 }
@@ -118,6 +126,17 @@ pub struct Status {
     pub wfp_invariants_ok: bool,
     /// 守卫（下游规则生效性）当前的状态。见 [`GuardView`]。
     pub guard: GuardView,
+    /// 非 WFP 还原保护是否在位（`SnapshotGuard` 已 arm，B4）。
+    ///
+    /// `false` = 尚未采集基线——此时任何非 WFP 改动都没有还原兜底，
+    /// 属于应当暴露的异常，而不是静默的"正常"。
+    pub restore_protected: bool,
+    /// 是否有**待还原**的非 WFP 改动（guard dirty）。
+    ///
+    /// `true` = 系统代理/路由已被 Aegis 改过、尚未 `rollback` 还原。
+    /// 这正是"一键复原"要作用的对象；为 `true` 时 GUI 应把【恢复网络】
+    /// 按钮提到最显眼处。
+    pub restore_pending: bool,
 }
 
 /// 守卫当前的状态。
@@ -199,6 +218,9 @@ impl Status {
             line("guard_needs_human", bool_text(self.guard.needs_human)),
             line("guard_verdict", clean(&self.guard.verdict)),
             line("guard_reason", clean(&self.guard.reason)),
+            // 还原保护状态（B4）：`restore_` 前缀，老控制端遇未知前缀整行跳过。
+            line("restore_protected", bool_text(self.restore_protected)),
+            line("restore_pending", bool_text(self.restore_pending)),
         ];
         out.push(String::new());
         out.join("\n")
@@ -226,6 +248,8 @@ impl Status {
             wfp_rules: 0,
             wfp_invariants_ok: false,
             guard: GuardView::default(),
+            restore_protected: false,
+            restore_pending: false,
         };
         let mut seen_state = false;
         let mut seen_insulation = false;
@@ -304,6 +328,20 @@ impl Status {
                 },
                 "guard_verdict" => s.guard.verdict = v.to_string(),
                 "guard_reason" => s.guard.reason = v.to_string(),
+                // 还原保护字段**缺失不算错**（老守护进程没有）：读成 false，
+                // 即"没在保护/无待还原"——与 guard_* 同一套前向兼容策略。
+                "restore_protected" => {
+                    s.restore_protected = v.parse().map_err(|_| StatusError::BadField {
+                        key: "restore_protected",
+                        value: v.to_string(),
+                    })?;
+                },
+                "restore_pending" => {
+                    s.restore_pending = v.parse().map_err(|_| StatusError::BadField {
+                        key: "restore_pending",
+                        value: v.to_string(),
+                    })?;
+                },
                 _ => continue,
             }
         }
@@ -367,6 +405,8 @@ mod tests {
                 verdict: GUARD_INEFFECTIVE.to_string(),
                 reason: "1 项未通过 [代理可达]".to_string(),
             },
+            restore_protected: true,
+            restore_pending: false,
         }
     }
 
@@ -445,6 +485,29 @@ mod tests {
         assert_eq!(Status::from_text(&t).unwrap(), sample());
     }
 
+    /// 老守护进程没有 `restore_*` 字段 → 读成"未保护 / 无待还原"，
+    /// 不报字段缺失（与 `guard_*` 同一套前向兼容策略）。
+    #[test]
+    fn restore_fields_missing_read_as_default_false() {
+        let text = sample().to_text();
+        let kept: Vec<&str> = text
+            .lines()
+            .filter(|l| !l.starts_with("restore_"))
+            .collect();
+        let older = kept.join("\n");
+        let got = Status::from_text(&older).unwrap();
+        assert!(!got.restore_protected);
+        assert!(!got.restore_pending);
+    }
+
+    /// `snapshot` 是只读请求：绝不能被当成危险命令要求提权，
+    /// 也不该因此改任何系统状态。
+    #[test]
+    fn snapshot_request_is_read_only() {
+        use crate::peer::Risk;
+        assert_eq!(risk_of(REQ_SNAPSHOT), Risk::ReadOnly);
+    }
+
     #[test]
     fn a_non_numeric_count_is_an_error_not_a_silent_zero() {
         let t = sample().to_text().replace("audit_len=1", "audit_len=lots");
@@ -473,7 +536,15 @@ mod tests {
         assert_eq!(REQ_APPLY, "apply");
         assert_eq!(REQ_CONFIRM, "confirm");
         assert_eq!(REQ_ROLLBACK, "rollback");
-        let all = [REQ_STATUS, REQ_PING, REQ_APPLY, REQ_CONFIRM, REQ_ROLLBACK];
+        assert_eq!(REQ_SNAPSHOT, "snapshot");
+        let all = [
+            REQ_STATUS,
+            REQ_PING,
+            REQ_APPLY,
+            REQ_CONFIRM,
+            REQ_ROLLBACK,
+            REQ_SNAPSHOT,
+        ];
         let mut seen = Vec::new();
         for w in all {
             assert!(!seen.contains(&w), "请求词重复：{w}");

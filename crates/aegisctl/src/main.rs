@@ -16,9 +16,10 @@
 //! |---|---|---|
 //! | `status`（默认） | 查守护进程状态 | 无 |
 //! | `ping` | 心跳 | 无 |
+//! | `snapshot` | 查非 WFP 改前基线快照（B4，只读） | 无 |
 //! | `apply` | 下发绝缘笼，**装完只是待确认** | 控制端已提权 |
 //! | `confirm` | 确认刚才那次下发 | 控制端已提权 |
-//! | `rollback` | 立即拆除（含已确认的强拆） | 控制端已提权 |
+//! | `rollback` | 立即拆除（含已确认的强拆）+ 还原非 WFP 项 | 控制端已提权 |
 //!
 //! `apply` 之后必须在 10 秒内 `confirm`，否则守护进程自动撤销——
 //! 这条倒计时的意义是：人装错了、手滑了、或者根本不在机器旁边的时候，
@@ -44,7 +45,7 @@ use aegis_ipc::client::{ClientError, Session};
 use aegis_ipc::GuardView;
 use aegis_ipc::{
     IpcToken, Status, Verdict, GUARD_EFFECTIVE, GUARD_INEFFECTIVE, GUARD_OFF, GUARD_UNKNOWN,
-    REQ_APPLY, REQ_CONFIRM, REQ_PING, REQ_ROLLBACK, REQ_STATUS,
+    REQ_APPLY, REQ_CONFIRM, REQ_PING, REQ_ROLLBACK, REQ_SNAPSHOT, REQ_STATUS,
 };
 use aegis_version as version;
 
@@ -59,6 +60,8 @@ enum Cmd {
     Confirm,
     /// 拆除（危险）。
     Rollback,
+    /// 查询非 WFP 改前基线快照（只读，B4）。
+    Snapshot,
 }
 
 impl Cmd {
@@ -70,6 +73,7 @@ impl Cmd {
             Self::Apply => REQ_APPLY,
             Self::Confirm => REQ_CONFIRM,
             Self::Rollback => REQ_ROLLBACK,
+            Self::Snapshot => REQ_SNAPSHOT,
         }
     }
 
@@ -217,7 +221,7 @@ fn main() -> ExitCode {
             println!("   超时未确认，规则会被**自动撤销**。");
             return ExitCode::SUCCESS;
         },
-        Cmd::Confirm | Cmd::Rollback => {
+        Cmd::Confirm | Cmd::Rollback | Cmd::Snapshot => {
             println!("8. ← {body}");
             return ExitCode::SUCCESS;
         },
@@ -255,6 +259,19 @@ fn main() -> ExitCode {
         }
     );
     print_guard(&status.guard);
+
+    // B4：还原保护状态（非 WFP 项：系统代理 / 路由）。这是"一键复原"的可见面——
+    // 断网时人得一眼看到"有没有残留、怎么一键恢复"。
+    println!();
+    println!("── 还原保护（非 WFP：系统代理 / 路由）──────────────────────────");
+    if !status.restore_protected {
+        println!("  状态        : **未就绪**（启动时未采到基线）——此刻不应改动非 WFP 设置");
+    } else if status.restore_pending {
+        println!("  状态        : **有待还原改动**（系统代理/路由已被 Aegis 改过）");
+        println!("  一键复原    : aegisctl rollback（拆 WFP + 还原非 WFP 项）");
+    } else {
+        println!("  状态        : 在位（改前快照 + 退出/崩溃还原 + 一键 rollback）");
+    }
 
     // 可信指纹对不上 = 拓扑变了，按设计该重新打断用户确认。
     if let Some(trusted) = args.expect_fingerprint {
@@ -326,6 +343,7 @@ impl Cmd {
             REQ_APPLY => Some(Self::Apply),
             REQ_CONFIRM => Some(Self::Confirm),
             REQ_ROLLBACK => Some(Self::Rollback),
+            REQ_SNAPSHOT => Some(Self::Snapshot),
             _ => None,
         }
     }
@@ -385,9 +403,10 @@ fn print_usage() {
     println!("命令（默认 status）：");
     println!("  status     查守护进程状态（只读）");
     println!("  ping       心跳（只读）");
+    println!("  snapshot   查非 WFP 改前基线快照（只读，B4）");
     println!("  apply      下发绝缘笼（**危险**，装完只是待确认）");
     println!("  confirm    确认刚才那次下发（**危险**）");
-    println!("  rollback   立即拆除，含已确认规则的强拆（**危险**）");
+    println!("  rollback   立即拆除，含已确认规则的强拆 + 还原非 WFP 项（**危险**）");
     println!();
     println!("选项：");
     println!(
@@ -468,6 +487,7 @@ mod tests {
         assert_eq!(Cmd::from_word("apply"), Some(Cmd::Apply));
         assert_eq!(Cmd::from_word("confirm"), Some(Cmd::Confirm));
         assert_eq!(Cmd::from_word("rollback"), Some(Cmd::Rollback));
+        assert_eq!(Cmd::from_word("snapshot"), Some(Cmd::Snapshot));
     }
 
     /// 危险命令的标记必须和请求词表一致：漏标一个，控制端就不会打印
@@ -485,7 +505,7 @@ mod tests {
         for c in [Cmd::Apply, Cmd::Confirm, Cmd::Rollback] {
             assert_eq!(risk_of(c.word()), Risk::Dangerous);
         }
-        for c in [Cmd::Status, Cmd::Ping] {
+        for c in [Cmd::Status, Cmd::Ping, Cmd::Snapshot] {
             assert_eq!(risk_of(c.word()), Risk::ReadOnly);
         }
     }

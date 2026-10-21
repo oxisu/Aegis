@@ -82,6 +82,10 @@ impl fmt::Display for InterfaceKind {
     }
 }
 
+/// 网络设置快照：**非 WFP 项**的"改前基线"（系统代理 + 路由表）。
+/// 采集/写回在 `aegis-netcfg`，这里只存类型（见 [`snapshot`]）。
+pub mod snapshot;
+
 /// `MIB_IF_ROW2.InterfaceAndOperStatusFlags` 的位标志（netioapi.h）。
 pub mod if_flags {
     /// 位 0：接口由硬件（真实网卡）承载
@@ -323,3 +327,7 @@ impl fmt::Display for FingerprintScope {
         f.write_str(s)
     }
 }
+
+// 快照类型在根路径也透一份：调用方拿 `aegis_model::NetSnapshot` 即可，
+// 不必记得它住在 snapshot 子模块里。
+pub use self::snapshot::{NetSnapshot, RouteEntry, SystemProxy};

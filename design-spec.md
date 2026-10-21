@@ -560,7 +560,11 @@ sequenceDiagram
 - [x] GUI ↔ 服务通信的**客户端**（`aegisctl` 那段会话流程已抽成 `aegis_ipc::client`）
 - [x] GUI（**Tauri v2 + Vue 3 + Tailwind**，见 §21.5）**外壳**——5 页界面 +
       1.5s 轮询真数据已接通，端到端验证通过（2026-10-19）
-- [ ] 网络设置变更前的快照 + 退出还原机制（防断网残留）
+- [x] 网络设置变更前的快照 + 退出还原机制（防断网残留）
+  → 新 crate `aegis-netcfg`：非 WFP 项（系统代理 + 路由表）采集/还原执行层。
+    `SnapshotGuard` 保证"改前快照 + 一键 rollback + 失败回滚 + Drop 兜底"，
+    基线**原子落盘**做崩溃恢复（`Drop` 不在强杀下执行）。⚠ 只立可逆基础、
+    无触发点会真改；用户 hive 代理与精确路由 diff 留待后续（见 CHANGELOG B4）。
 
 **阶段 1 · 感知 + Clash 接管（核心）**
 - [x] SSID / 默认出口 / 路由表检测 → `aegis-sense`
@@ -725,6 +729,9 @@ Aegis 不碰 NAT、不碰代理链、不做转发。这样职责清晰，
 - **DNS 幽灵泄漏防护（架构体检 #2）**：校园网模式硬规则——**禁止真实物理网卡出站目的端口 53（UDP/TCP）**；所有 DNS 强制圈定在 TUN 内或仅放行指定内网 DNS/DoH，杜绝 Smart Multi-Homed Name Resolution 把敏感域名解析发往校园网 10.x DNS。
 - **泄漏检测**：扫描是否有进程直连真实网卡（绕过 Clash TUN）——基于路由表 + 连接归属判断，异常即告警并可选自动阻断。
 - **网络设置快照 / 还原**：展示快照内容，提供手动还原按钮；WFP 项由动态会话自动还原，仅非 WFP 项（系统代理、路由）走快照还原。
+  → **已落地（B4）**：`aegis-netcfg` 的 `SnapshotGuard` 提供改前快照 + 一键 `rollback`
+    还原 + 退出/崩溃兜底（基线原子落盘）；GUI 面板可经 `REQ_SNAPSHOT` 拉基线、
+    经 `rollback` 一键复原。⚠ 系统代理的**用户 hive** 上下文与精确路由 diff 属后续阶段。
 
 ### F7 · 告警与通知（Alerts）
 - **Toast/通知**：明文 HTTP 阻断、泄漏检测、模式切换、服务/权限异常。

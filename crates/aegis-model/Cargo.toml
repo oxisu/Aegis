@@ -13,6 +13,10 @@ authors.workspace      = true
 
 serde = { workspace = true }
 
+[dev-dependencies]
+# 只给单测用：验证快照 JSON 往返。正式构建不引入。
+serde_json = { workspace = true }
+
 # ── 为什么这个 crate 必须单独存在 ────────────────────────────────────────
 # 分层铁律是「感知层 = 事实，策略层 = 策略」。策略层（aegis-core）只需要
 # 若干个**类型**（InterfaceInfo / InterfaceKind / if_flags ...），不需要

@@ -17,6 +17,9 @@ aegis-sense   = { workspace = true }
 aegis-wfp     = { workspace = true }
 aegis-audit   = { workspace = true }
 aegis-ipc     = { workspace = true }
+# B4：非 WFP 网络设置快照/还原执行层（系统代理 + 路由表）。
+# 二进制层可依赖它（守护进程本来就要碰 OS）；策略层 core/config 不碰。
+aegis-netcfg  = { workspace = true }
 
 # Windows Service 宿主（service.rs）。只开 SCM 需要的两个 feature，
 # 别整包开——`Win32_*` 的 feature 是**按模块**切的，开全量等于

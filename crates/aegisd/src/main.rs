@@ -62,8 +62,9 @@ use aegis_core::state::{insulation, State};
 use aegis_ipc::{
     check_compat, encode_handshake, msg_type, GuardView, IpcToken, PipeServer, Status, DENY_PREFIX,
     GUARD_EFFECTIVE, GUARD_INEFFECTIVE, GUARD_UNKNOWN, OK_PREFIX, REQ_APPLY, REQ_CONFIRM, REQ_PING,
-    REQ_ROLLBACK, REQ_STATUS,
+    REQ_ROLLBACK, REQ_SNAPSHOT, REQ_STATUS,
 };
+use aegis_netcfg::{clear_baseline, load_baseline, NetCfgBackend, SnapshotGuard, WindowsBackend};
 use aegis_orchestrator::clash::audit::connection_to_audit_event;
 use aegis_orchestrator::clash::{ClashAdapter, ClashConfig};
 use aegis_sense::{default_egress, snapshot};
@@ -104,6 +105,20 @@ type GuardSlot = std::sync::Arc<std::sync::Mutex<GuardView>>;
 /// 审计日志。**审计要能回答"谁在什么时候把网断掉的"**，所以守卫的每个
 /// 动作都得落盘，不能只写在守护进程的日志里（那个会随会话一起没）。
 type AuditSlot = std::sync::Arc<std::sync::Mutex<AuditLog>>;
+
+/// B4 非 WFP 网络设置快照守卫（系统代理 + 路由表）。
+///
+/// `None` = 未 arm（采集基线失败）。此刻 `restore_protected=false` 会如实
+/// 上报——没有基线的"还原保护"是假的，不能显示成正常。
+///
+/// ⚠ 放进 `Mutex` 只为跨线程共享（IPC 线程读基线 / rollback 还原 / 退出还原）；
+/// WFP 票据同理是纯数据可共享，真正碰系统的动作都在持锁的瞬间同步完成。
+type NetCfgSlot = std::sync::Arc<std::sync::Mutex<Option<SnapshotGuard<WindowsBackend>>>>;
+
+/// 基线快照落盘路径（崩溃恢复用）。放在 data-dir 里，随运行数据一起走。
+fn baseline_path(data_dir: &std::path::Path) -> std::path::PathBuf {
+    data_dir.join("net-baseline.json")
+}
 
 /// 守卫观测的默认周期（秒）。
 ///
@@ -261,12 +276,15 @@ fn serve(args: Args) -> ! {
     let ticket_slot: TicketSlot = Arc::new(Mutex::new(None));
     // 守卫状态单独一个槽位：`aegisctl status` 要能看到"为什么断网"。
     let guard_slot: GuardSlot = Arc::new(Mutex::new(GuardView::default()));
+    // B4：非 WFP 网络设置快照守卫。先置 None，启动后段（审计就绪）再 arm。
+    let netcfg_slot: NetCfgSlot = Arc::new(Mutex::new(None));
     let (ready_tx, ready_rx) = std_mpsc::channel::<Result<(), String>>();
     let serve_pipe = args.pipe.clone();
     let serve_token = token.clone();
     let serve_status = Arc::clone(&status_slot);
     let serve_ticket = Arc::clone(&ticket_slot);
     let serve_guard = Arc::clone(&guard_slot);
+    let serve_netcfg = Arc::clone(&netcfg_slot);
     let serve_plan = plan.clone();
     thread::spawn(move || {
         let server = match PipeServer::bind_named(&serve_pipe) {
@@ -284,6 +302,7 @@ fn serve(args: Args) -> ! {
             &serve_guard,
             &serve_plan,
             &serve_ticket,
+            &serve_netcfg,
         );
     });
 
@@ -458,6 +477,16 @@ fn serve(args: Args) -> ! {
     println!("  ⚠ 这条是**链路自检事件，不是真实连接**；正式版导出证据包时必须过滤掉。");
     println!();
 
+    // ── B4：非 WFP 网络设置快照守卫（系统代理 + 路由表）──────────────
+    //
+    // 两件事，顺序刻意：
+    //  1. **崩溃恢复优先**：若 data-dir 里有残留基线文件，说明上一轮改了
+    //     非 WFP 项却被强杀（Drop 没跑）——先按它还原，再清文件。
+    //  2. **arm 采集基线**：只读，绝不在此刻改任何系统设置。采集失败
+    //     不致命（B4 无触发点会真改），只让 restore_protected=false 如实上报。
+    let netcfg_protected = arm_netcfg_guard(&args.data_dir, &netcfg_slot);
+    println!();
+
     // ── 把状态交给 IPC 线程，然后按 --serve-secs 等待 ─────────────────
     let status = Status {
         state: state.to_string(),
@@ -470,6 +499,8 @@ fn serve(args: Args) -> ! {
         wfp_rules: plan.len(),
         wfp_invariants_ok: ok,
         guard: GuardView::default(),
+        restore_protected: netcfg_protected,
+        restore_pending: false,
     };
 
     // 状态交给服务线程：在它拿到之前，任何 status 查询都会得到"启动中"
@@ -594,6 +625,11 @@ fn serve(args: Args) -> ! {
     // 显式 exit 而不是让它自然返回：`serve()` 的返回类型是 `!`，
     // 而"自然返回"在服务模式下意味着**悄悄退出服务**，SCM 会当成异常终止
     // 在事件日志里留一条 ERROR。安静地按正常路径退出才对。
+    //
+    // ⚠ `process::exit` **不跑析构函数**——SnapshotGuard 的 Drop 兜底不会触发。
+    // 所以正常退出前必须显式还原一次非 WFP 改动（B4 无触发点，通常是 no-op；
+    // 但一旦将来接了真改动，这条就是"一键复原"在干净退出时的落点）。
+    restore_netcfg_on_exit(&netcfg_slot);
     std::process::exit(0);
 }
 
@@ -1208,13 +1244,14 @@ fn serve_forever(
     guard: &GuardSlot,
     plan: &[FilterSpec],
     ticket: &TicketSlot,
+    netcfg: &NetCfgSlot,
 ) {
     loop {
         let end = match server.accept() {
             Ok(e) => e,
             Err(_) => return,
         };
-        if let Err(_e) = serve_one(&end, token, status, guard, plan, ticket) {
+        if let Err(_e) = serve_one(&end, token, status, guard, plan, ticket, netcfg) {
             // 连接层面的错误（断开 / 帧坏）视为这次会话结束，继续等下一个
         }
         // ⚠ 必须显式 disconnect，否则下一次 accept 会失败：
@@ -1234,6 +1271,7 @@ fn serve_one(
     guard: &GuardSlot,
     plan: &[FilterSpec],
     ticket: &TicketSlot,
+    netcfg: &NetCfgSlot,
 ) -> Result<(), aegis_ipc::PipeError> {
     let mut reader = aegis_ipc::FrameReader::new();
 
@@ -1303,25 +1341,34 @@ fn serve_one(
                     match status.lock().ok().and_then(|s| s.clone()) {
                         // 守卫状态是**活的**，不能直接用启动时那份快照——
                         // 快照会永远显示"没在干活"，而用户恰恰是在断了网
-                        // 之后才来查的。
+                        // 之后才来查的。还原保护状态同理（B4，读快照守卫）。
                         Some(mut s) => {
                             if let Ok(g) = guard.lock() {
                                 s.guard = g.clone();
+                            }
+                            if let Ok(nc) = netcfg.lock() {
+                                (s.restore_protected, s.restore_pending) = match nc.as_ref() {
+                                    Some(g) => (true, g.is_dirty()),
+                                    None => (false, false),
+                                };
                             }
                             s.to_text()
                         },
                         None => "启动中：状态尚不可用".to_string(),
                     }
+                } else if word == REQ_SNAPSHOT {
+                    // B4：把非 WFP 改前基线展示出来（只读，绝不改系统）。
+                    snapshot_text(netcfg)
                 } else if word == REQ_APPLY {
                     do_apply(plan, ticket)
                 } else if word == REQ_CONFIRM {
                     do_confirm(ticket)
                 } else if word == REQ_ROLLBACK {
-                    do_rollback(ticket)
+                    do_rollback(ticket, netcfg)
                 } else {
                     format!(
-                        "未知请求：{word}（可用：{REQ_STATUS} / {REQ_PING} / {REQ_APPLY} / \
-                         {REQ_CONFIRM} / {REQ_ROLLBACK}）"
+                        "未知请求：{word}（可用：{REQ_STATUS} / {REQ_PING} / {REQ_SNAPSHOT} / \
+                         {REQ_APPLY} / {REQ_CONFIRM} / {REQ_ROLLBACK}）"
                     )
                 };
                 end.send(msg_type::RESPONSE, 0, frame.seq, body.as_bytes())?
@@ -1595,27 +1642,223 @@ fn do_confirm(slot: &TicketSlot) -> String {
 /// `Pending` 走普通拆除（等超时也行，这里不等）；
 /// 已 `Committed` 的走**紧急强拆**——这是兜底手册里
 /// "人在现场发现笼子装错了"的那条通道，它能撤掉已确认的规则。
-fn do_rollback(slot: &TicketSlot) -> String {
+fn do_rollback(slot: &TicketSlot, netcfg: &NetCfgSlot) -> String {
+    // 一键复原 = 拆 WFP（若有票据）+ 还原非 WFP 项（若改过）。二者**独立**：
+    // 没有 WFP 票据也该还原非 WFP 改动，反之亦然。
+    let (wfp_msg, wfp_did) = rollback_wfp(slot);
+    let (nc_msg, nc_state) = restore_netcfg(netcfg);
+
+    let any_failed = matches!(nc_state, NcRestore::Failed);
+    let any_did = wfp_did || matches!(nc_state, NcRestore::Restored);
+    let head = if any_failed {
+        // 有残留没还原干净：必须让用户知道"没完全成功"，而不是报个 ok 了事。
+        format!("{DENY_PREFIX}一键复原未完全成功（有非 WFP 残留，需人工留意）")
+    } else if any_did {
+        format!("{OK_PREFIX}一键复原")
+    } else {
+        format!("{DENY_PREFIX}无可复原项")
+    };
+    format!("{head}\n  {wfp_msg}\n  {nc_msg}")
+}
+
+/// 非 WFP 还原的结果分类。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum NcRestore {
+    /// 无事可做（未 arm，或未改过）。
+    Idle,
+    /// 真的还原了。
+    Restored,
+    /// 尝试还原但失败（有残留）。
+    Failed,
+}
+
+/// 拆 WFP 下发票据。返回 `(无前缀描述, 是否真的触发了拆除)`。
+fn rollback_wfp(slot: &TicketSlot) -> (String, bool) {
     let mut g = match slot.lock() {
         Ok(g) => g,
-        Err(_) => return format!("{DENY_PREFIX}票据锁损坏，无法拆除"),
+        Err(_) => return ("票据锁损坏，无法拆除".to_string(), false),
     };
     match g.as_mut() {
-        None => format!("{DENY_PREFIX}当前没有可拆除的下发"),
+        None => ("WFP：当前没有待拆除的下发".to_string(), false),
         Some(t) => {
             let n = t.filter_ids.len();
             match t.phase {
                 Phase::Pending => {
                     t.request_abort();
-                    format!("{OK_PREFIX}已标记拆除 {n} 条，看门狗 200 毫秒内执行")
+                    (
+                        format!("WFP：已标记拆除 {n} 条，看门狗 200 毫秒内执行"),
+                        true,
+                    )
                 },
                 Phase::Committed => {
                     t.force_teardown();
-                    format!("{OK_PREFIX}已请求**紧急强拆** {n} 条已确认规则，看门狗 200 毫秒内执行")
+                    (
+                        format!("WFP：已请求**紧急强拆** {n} 条已确认规则，看门狗 200 毫秒内执行"),
+                        true,
+                    )
                 },
-                Phase::RolledBack => format!("{DENY_PREFIX}这次下发已经拆除过了"),
+                Phase::RolledBack => ("WFP：这次下发已经拆除过了".to_string(), false),
             }
         },
+    }
+}
+
+/// 还原非 WFP 网络设置（系统代理 + 路由）到改前基线。返回 `(无前缀描述, 结果)`。
+///
+/// 只有"改过"（dirty）才写系统；否则是 `Idle`，绝不碰注册表/路由。
+fn restore_netcfg(netcfg: &NetCfgSlot) -> (String, NcRestore) {
+    let mut guard = match netcfg.lock() {
+        Ok(g) => g,
+        Err(_) => return ("非 WFP：锁损坏，无法还原".to_string(), NcRestore::Failed),
+    };
+    match guard.as_mut() {
+        None => (
+            "非 WFP：还原保护未就绪（启动时未采到基线）".to_string(),
+            NcRestore::Idle,
+        ),
+        Some(g) => {
+            if !g.is_dirty() {
+                ("非 WFP：无待还原改动".to_string(), NcRestore::Idle)
+            } else {
+                match g.restore() {
+                    Ok(true) => (
+                        "非 WFP：已还原系统代理/路由到改前基线".to_string(),
+                        NcRestore::Restored,
+                    ),
+                    Ok(false) => ("非 WFP：无待还原改动".to_string(), NcRestore::Idle),
+                    Err(e) => (
+                        format!("非 WFP：还原失败（{e}），可能有残留"),
+                        NcRestore::Failed,
+                    ),
+                }
+            }
+        },
+    }
+}
+
+// ── B4：非 WFP 快照守卫装配 / 展示 / 退出还原 ─────────────────────────
+
+/// 启动装配：**先崩溃恢复，再 arm 采集基线**。返回基线是否就绪。
+///
+/// 顺序刻意——残留基线意味着上一轮改了非 WFP 项却被强杀（`Drop` 没跑），
+/// 必须先按它还原再清文件，否则新采的基线会把"残留的坏状态"当成了原状。
+fn arm_netcfg_guard(data_dir: &std::path::Path, netcfg: &NetCfgSlot) -> bool {
+    let path = baseline_path(data_dir);
+
+    // 1. 崩溃恢复。B4 自身不产生该文件（无触发点会真改）；只有将来接了
+    //    非 WFP 改动、或被强杀时才会留下。有就还，没有是本该有的常态。
+    match load_baseline(&path) {
+        Ok(Some(stale)) => {
+            println!("  ⚠ 发现残留非 WFP 基线快照（上一轮疑似被强杀，Drop 未跑）：按基线还原…");
+            match WindowsBackend::new(now_ms()).apply(&stale) {
+                Ok(()) => {
+                    let _ = clear_baseline(&path);
+                    println!("  ✓ 已按残留基线还原系统代理/路由，并清除快照文件。");
+                },
+                Err(e) => {
+                    // 还原失败：**保留**快照文件，下次启动再试；绝不谎报成功。
+                    eprintln!("  [WARN] 按残留基线还原失败：{e}");
+                    eprintln!(
+                        "     已保留 {} 以便下次重启重试；可手动 aegisctl rollback。",
+                        path.display()
+                    );
+                },
+            }
+        },
+        Ok(None) => {},
+        Err(e) => eprintln!("  [WARN] 读取残留基线快照失败：{e}（忽略，继续 arm）"),
+    }
+
+    // 2. arm 采集基线（**只读**，绝不在此刻改任何系统设置）。
+    match SnapshotGuard::arm(WindowsBackend::new(now_ms())) {
+        Ok(guard) => {
+            let b = guard.baseline();
+            let server = if b.proxy.server.is_empty() {
+                "（空）"
+            } else {
+                b.proxy.server.as_str()
+            };
+            println!(
+                "  非 WFP 基线：系统代理 enabled={} server={} · 路由 {} 条",
+                b.proxy.enabled,
+                server,
+                b.routes.len()
+            );
+            println!("  还原保护  ：在位（改前快照 + 退出/崩溃还原 + 一键 rollback）");
+            if let Ok(mut slot) = netcfg.lock() {
+                *slot = Some(guard);
+            }
+            true
+        },
+        Err(e) => {
+            eprintln!("  [WARN] 采集非 WFP 基线失败：{e}");
+            eprintln!("     还原保护**未就绪**——此时不应进行任何非 WFP 网络改动。");
+            false
+        },
+    }
+}
+
+/// 把非 WFP 改前基线渲染成**只读**文本（供 `aegisctl snapshot` 展示）。
+fn snapshot_text(netcfg: &NetCfgSlot) -> String {
+    let guard = match netcfg.lock() {
+        Ok(g) => g,
+        Err(_) => return format!("{DENY_PREFIX}快照锁损坏"),
+    };
+    match guard.as_ref() {
+        None => {
+            format!("{DENY_PREFIX}还原保护未就绪（启动时未采到基线）——不掌握网络原状，不应改动。")
+        },
+        Some(g) => {
+            let b = g.baseline();
+            let or_empty = |s: &str| {
+                if s.is_empty() {
+                    "（空）".to_string()
+                } else {
+                    s.to_string()
+                }
+            };
+            let pac = b
+                .proxy
+                .autoconfig_url
+                .clone()
+                .unwrap_or_else(|| "（无）".into());
+            format!(
+                "{OK_PREFIX}非 WFP 改前基线（taken_at_ms={}）\n  \
+                 系统代理 enabled  : {}\n  \
+                 系统代理 server   : {}\n  \
+                 系统代理 override : {}\n  \
+                 PAC AutoConfigURL : {}\n  \
+                 路由条数          : {}\n  \
+                 待还原(dirty)     : {}",
+                b.taken_at_ms,
+                b.proxy.enabled,
+                or_empty(&b.proxy.server),
+                or_empty(&b.proxy.override_),
+                pac,
+                b.routes.len(),
+                g.is_dirty(),
+            )
+        },
+    }
+}
+
+/// 正常退出前显式还原非 WFP 改动——`process::exit` **不跑 `Drop`**，
+/// 守卫的析构兜底不会触发，必须在这里补一刀。B4 无触发点，通常是 no-op。
+fn restore_netcfg_on_exit(netcfg: &NetCfgSlot) {
+    let mut guard = match netcfg.lock() {
+        Ok(g) => g,
+        Err(_) => return,
+    };
+    if let Some(g) = guard.as_mut() {
+        if g.is_dirty() {
+            match g.restore() {
+                Ok(true) => println!("退出前已还原非 WFP 网络设置（系统代理/路由）到改前基线。"),
+                Ok(false) => {},
+                Err(e) => eprintln!(
+                    "[WARN] 退出前还原非 WFP 设置失败：{e}（可手动 aegisctl rollback 重试）"
+                ),
+            }
+        }
     }
 }
 
@@ -2323,6 +2566,11 @@ mod tests {
         Arc::new(Mutex::new(None))
     }
 
+    /// 未 arm 的非 WFP 快照守卫（测试默认态：无基线、无待还原）。
+    fn empty_netcfg() -> NetCfgSlot {
+        Arc::new(Mutex::new(None))
+    }
+
     /// 直接用仓库里的样例配置，免得在测试里维护第二份 schema
     /// （两份必然漂移，而漂移的表现是"测试过了、真机加载失败"）。
     const EXAMPLE_CONFIG: &str = include_str!("../../../config/config.example.toml");
@@ -2355,7 +2603,7 @@ mod tests {
     #[test]
     fn confirm_and_rollback_without_a_ticket_are_denied() {
         assert!(do_confirm(&empty_slot()).starts_with(DENY_PREFIX));
-        assert!(do_rollback(&empty_slot()).starts_with(DENY_PREFIX));
+        assert!(do_rollback(&empty_slot(), &empty_netcfg()).starts_with(DENY_PREFIX));
     }
 
     #[test]
@@ -2396,7 +2644,7 @@ mod tests {
             vec![3],
             vec![3],
         ));
-        let out = do_rollback(&slot);
+        let out = do_rollback(&slot, &empty_netcfg());
         assert!(out.starts_with(OK_PREFIX), "{out}");
         assert!(slot
             .lock()
@@ -2414,7 +2662,7 @@ mod tests {
         t.confirm(now_ms()).unwrap();
         *slot.lock().unwrap() = Some(t);
 
-        let out = do_rollback(&slot);
+        let out = do_rollback(&slot, &empty_netcfg());
         assert!(out.starts_with(OK_PREFIX), "{out}");
         assert!(
             slot.lock()
@@ -2433,7 +2681,44 @@ mod tests {
         let mut t = ApplyTicket::pending(now_ms(), CONFIRM_WINDOW_MS, vec![5], vec![5]);
         t.mark_rolled_back("已拆");
         *slot.lock().unwrap() = Some(t);
-        assert!(do_rollback(&slot).starts_with(DENY_PREFIX));
+        assert!(do_rollback(&slot, &empty_netcfg()).starts_with(DENY_PREFIX));
+    }
+
+    /// 未 arm 时，快照查询必须诚实说"未就绪"，不能假装有基线。
+    #[test]
+    fn snapshot_text_reports_unarmed_honestly() {
+        let out = snapshot_text(&empty_netcfg());
+        assert!(out.starts_with(DENY_PREFIX), "{out}");
+        assert!(out.contains("未就绪"), "{out}");
+    }
+
+    /// 未 arm 时还原 = Idle（无事可做），且**不碰系统**。
+    #[test]
+    fn restore_netcfg_is_idle_when_unarmed() {
+        let (msg, state) = restore_netcfg(&empty_netcfg());
+        assert_eq!(state, NcRestore::Idle);
+        assert!(msg.contains("未就绪"), "{msg}");
+    }
+
+    /// arm 成功且干净时：无待还原、快照展示 ok 且 dirty=false。
+    ///
+    /// ⚠ 只走**只读**路径（采集真实基线；未 dirty 所以绝不写系统）。
+    /// 采集在本机应成功；即便失败也只是 protected=false，不断言它。
+    #[test]
+    fn armed_clean_guard_reports_no_pending_restore() {
+        let dir = std::env::temp_dir().join(format!("aegisd-netcfg-test-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let slot: NetCfgSlot = Arc::new(Mutex::new(None));
+        let protected = arm_netcfg_guard(&dir, &slot);
+        if protected {
+            let (msg, state) = restore_netcfg(&slot);
+            assert_eq!(state, NcRestore::Idle, "干净守卫不该有待还原");
+            assert!(msg.contains("无待还原"), "{msg}");
+            let snap = snapshot_text(&slot);
+            assert!(snap.starts_with(OK_PREFIX), "{snap}");
+            assert!(snap.contains("待还原(dirty)     : false"), "{snap}");
+        }
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// Boot 层规则在**碰引擎之前**就被拒：装错了重启都清不掉。
@@ -2443,7 +2728,6 @@ mod tests {
         assert!(out.starts_with(DENY_PREFIX), "{out}");
         assert!(out.contains("Boot"), "{out}");
     }
-
     /// 并发下发会让回执和票据对不上，而回滚时"不知道哪批 id 是哪次装的"
     /// 就是删错规则。
     #[test]
