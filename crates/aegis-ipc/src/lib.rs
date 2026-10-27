@@ -50,8 +50,8 @@ pub mod version;
 pub use client::{talk, ClientError, Connected, Handshook, Ready, Session};
 pub use ctl::{
     classify, risk_of, GuardView, Status, StatusError, DENY_PREFIX, GUARD_EFFECTIVE,
-    GUARD_INEFFECTIVE, GUARD_OFF, GUARD_UNKNOWN, OK_PREFIX, REQ_APPLY, REQ_CONFIRM, REQ_PING,
-    REQ_ROLLBACK, REQ_SNAPSHOT, REQ_STATUS, STATUS_V1,
+    GUARD_INEFFECTIVE, GUARD_OFF, GUARD_UNKNOWN, OK_PREFIX, REQ_APPLY, REQ_BLOCK_HTTP, REQ_CONFIRM,
+    REQ_HYPOMUX, REQ_PING, REQ_ROLLBACK, REQ_SNAPSHOT, REQ_STATUS, STATUS_V1,
 };
 pub use endpoint::{normalize_pipe_name, PIPE_NAME, PIPE_PREFIX, PIPE_SDDL, TOKEN_FILE_SDDL};
 pub use peer::{allows, is_elevated, Risk};

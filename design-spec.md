@@ -592,15 +592,21 @@ sequenceDiagram
 **阶段 2 · 防漏兜底**
 - [ ] 校园网模式下程序化下发 WFP/防火墙规则（kill-switch）
 - [ ] 规则/代理异常时的自动回滚
+- [x] 拓扑震荡熔断接 WFP（B7）：网口变动 → 注入动态会话绝缘笼（fail-closed，
+      默认只观测、`--fuse-auto` 才真落笼）；独立票据槽，`rollback` 一键复原；
+      纯逻辑在 `aegis-fuse`，组合点在 `aegisd` 监控线程（HANDLE 非 `Send`，
+      监听器留主线程保活，只把信号 `Arc` 交给线程）
 
 **阶段 3 · HypoMux 监管**
-- [ ] SCM 启停 `HypoMux Core` 服务
+- [x] SCM 启停 `Hypomux Core` 服务（B7；⚠ **红线**：绝不在守护链路自动调用，
+      只由 `aegisctl hypomux start|stop|status` 经 IPC 危险闸门抵达）
 - [ ] 配置读写 + 端口协调（系统代理 vs 虚拟网卡模式切换）
 - [ ] 与 Clash 的独占/分层仲裁
 
 **阶段 4 · 审计与告警**
 - [ ] 全量出站日志落盘（DNS/IP/端口/协议/进程/规则/时间）
-- [ ] 明文 80 连接阻断 + Toast 告警
+- [x] 明文 80 连接阻断（B7 · WFP 层）：轻量、可逆，与绝缘笼共用票据槽 +
+      两阶段确认闸门（`aegisctl block-http`）；Toast 告警留待 GUI
 - [ ] 证据链导出（被询问时可自证清白）
 
 **阶段 5 ·（可选）高级**

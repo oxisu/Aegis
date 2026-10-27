@@ -27,6 +27,19 @@ pub const REQ_ROLLBACK: &str = "rollback";
 /// 本请求只负责把基线内容**展示**出来，让 GUI 的"网络设置快照"面板
 /// 能告诉用户"若还原，会回到什么状态"。它只读，绝不改系统。
 pub const REQ_SNAPSHOT: &str = "snapshot";
+/// 请求：下发"明文 80 阻断"计划（**危险**：会改变本机网络状态，可逆）。
+///
+/// 与 [`REQ_APPLY`]（整副绝缘笼）不同，它只拦明文 HTTP(80)，是轻量选项，
+/// 但仍走同一套 apply/confirm/rollback 两阶段闸门——进程退出即清空，
+/// 亦可 `rollback` 一键复原（B7）。
+pub const REQ_BLOCK_HTTP: &str = "block-http";
+/// 请求：HypoMux 监管（**危险**，需提权）。
+///
+/// 词后跟子动作：`hypomux start` / `hypomux stop` / `hypomux status`。
+/// ⚠ **绝不**在 aegisd 启动/守护链路里自动调用——启动上游代理
+/// （HypoMux Core 服务）属于红线动作，只能由用户显式 `aegisctl hypomux start`
+/// 触发，且必须经提权检查（B7）。
+pub const REQ_HYPOMUX: &str = "hypomux";
 
 /// 一个请求词属于哪个风险等级。
 ///
@@ -35,7 +48,13 @@ pub const REQ_SNAPSHOT: &str = "snapshot";
 /// 这里用穷举而不是默认放行，正是为了让漏登记变成编译期可见的事。
 pub fn risk_of(word: &str) -> crate::peer::Risk {
     match word {
-        REQ_APPLY | REQ_CONFIRM | REQ_ROLLBACK => crate::peer::Risk::Dangerous,
+        REQ_APPLY | REQ_CONFIRM | REQ_ROLLBACK | REQ_BLOCK_HTTP | REQ_HYPOMUX => {
+            crate::peer::Risk::Dangerous
+        },
+        // `hypomux` 带子命令（start/stop/status）仍是危险命令：按前缀判定。
+        // ⚠ `concat!` 只接受字面量，而 `REQ_HYPOMUX` 是 `const` 不是字面量，
+        // 所以这里直接写死 `"hypomux "`（与 `REQ_HYPOMUX` 的值一致，已稳定）。
+        s if s.starts_with("hypomux ") => crate::peer::Risk::Dangerous,
         // 只读类显式列出，意图清晰；未列出的未知词按只读处理。
         REQ_STATUS | REQ_PING | REQ_SNAPSHOT => crate::peer::Risk::ReadOnly,
         _ => crate::peer::Risk::ReadOnly,
@@ -137,6 +156,13 @@ pub struct Status {
     /// 这正是"一键复原"要作用的对象；为 `true` 时 GUI 应把【恢复网络】
     /// 按钮提到最显眼处。
     pub restore_pending: bool,
+    /// 拓扑震荡熔断是否当前已落绝缘笼（fuse 接 WFP，B7）。
+    ///
+    /// `true` = 网口变动触发了熔断，守护进程已注入动态会话绝缘笼
+    /// （进程退出即清空，也可 `rollback` 一键复原）。这是"先断后分析"
+    /// 在运行时真正生效的标志——用户看到网断了且本字段为 `true`，
+    /// 就知道是熔断而不是别的原因。
+    pub fuse_caged: bool,
 }
 
 /// 守卫当前的状态。
@@ -221,6 +247,8 @@ impl Status {
             // 还原保护状态（B4）：`restore_` 前缀，老控制端遇未知前缀整行跳过。
             line("restore_protected", bool_text(self.restore_protected)),
             line("restore_pending", bool_text(self.restore_pending)),
+            // 拓扑熔断绝缘态（B7）：`fuse_` 前缀，老控制端遇未知前缀整行跳过。
+            line("fuse_caged", bool_text(self.fuse_caged)),
         ];
         out.push(String::new());
         out.join("\n")
@@ -250,6 +278,7 @@ impl Status {
             guard: GuardView::default(),
             restore_protected: false,
             restore_pending: false,
+            fuse_caged: false,
         };
         let mut seen_state = false;
         let mut seen_insulation = false;
@@ -342,6 +371,14 @@ impl Status {
                         value: v.to_string(),
                     })?;
                 },
+                // 熔断绝缘态**缺失不算错**（老守护进程没有）：读成 false，
+                // 即"未熔断"——与 `restore_*` / `guard_*` 同一套前向兼容策略。
+                "fuse_caged" => {
+                    s.fuse_caged = v.parse().map_err(|_| StatusError::BadField {
+                        key: "fuse_caged",
+                        value: v.to_string(),
+                    })?;
+                },
                 _ => continue,
             }
         }
@@ -407,6 +444,7 @@ mod tests {
             },
             restore_protected: true,
             restore_pending: false,
+            fuse_caged: true,
         }
     }
 
@@ -537,6 +575,8 @@ mod tests {
         assert_eq!(REQ_CONFIRM, "confirm");
         assert_eq!(REQ_ROLLBACK, "rollback");
         assert_eq!(REQ_SNAPSHOT, "snapshot");
+        assert_eq!(REQ_BLOCK_HTTP, "block-http");
+        assert_eq!(REQ_HYPOMUX, "hypomux");
         let all = [
             REQ_STATUS,
             REQ_PING,
@@ -544,6 +584,8 @@ mod tests {
             REQ_CONFIRM,
             REQ_ROLLBACK,
             REQ_SNAPSHOT,
+            REQ_BLOCK_HTTP,
+            REQ_HYPOMUX,
         ];
         let mut seen = Vec::new();
         for w in all {
@@ -589,5 +631,16 @@ mod tests {
         assert_eq!(risk_of(REQ_PING), Risk::ReadOnly);
         // 未知请求词按只读处理：它根本不会被识别，不该顺带获得更高权限
         assert_eq!(risk_of("whatever"), Risk::ReadOnly);
+    }
+
+    /// `block-http` 与 `hypomux` 是危险命令：漏登记就会变成"有 token 就能干"。
+    #[test]
+    fn new_dangerous_commands_are_classified_as_dangerous() {
+        use crate::peer::Risk;
+        assert_eq!(risk_of(REQ_BLOCK_HTTP), Risk::Dangerous);
+        assert_eq!(risk_of(REQ_HYPOMUX), Risk::Dangerous);
+        // 带子命令的 `hypomux start` 也必须被判定为危险，否则会绕过提权检查。
+        assert_eq!(risk_of("hypomux start"), Risk::Dangerous);
+        assert_eq!(risk_of("hypomux stop"), Risk::Dangerous);
     }
 }

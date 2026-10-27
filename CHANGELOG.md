@@ -609,6 +609,56 @@
     得先扩协议；塞假数据的代价是人以为看到的是本机状态
   - 11 项单测（端点解析 / token 解析 / 错误文案），`cargo test` 全过
 
+- **B7：HypoMux 监管 + 明文 80 阻断 + 拓扑震荡熔断接 WFP**（§9 阶段 3 / 阶段 4 部分落地）
+  - 三条线都遵循同一铁律：**断网行为可逆、一键复原**；**未经授权绝不自动启动上游代理**（红线：HypoMux SCM 启停会改变本机出口走向，只能由人显式 `aegisctl hypomux start` 触发，aegisd 启动/守护链路里**绝不**自动调用）。本机未装 HypoMux，启动逻辑**不实际执行**。
+  - **HypoMux 监管**（`aegisd/src/hypomux.rs`，独立最小 SCM 实现）：
+    - 只做 SCM 启停 `HypoMuxCore` 服务：`start()` / `stop()` / `status()` 经
+      `with_service_handle` 调 `StartServiceW` / `ControlService` / `QueryServiceStatus`。
+      不碰端口协调、不改配置、不与 Clash 互斥仲裁（那些留待后续阶段）
+    - 与服务宿主 `service.rs` **刻意分开**：目标服务名不同（`HypoMuxCore` vs `Aegis`），
+      复用它的 `Aegis` 专属函数有回归风险，故独立一套
+    - 红线注释钉在模块头上 + 函数头上；2 项单测（服务名稳定 / 三个子动作都被判为危险命令）
+    - ⚠ `SERVICE_STATUS` 构造用 `ENUM_SERVICE_TYPE` / `SERVICE_STATUS_CURRENT_STATE`
+      （windows crate 该类型未派生 `Default`），并移除了未用的 `SERVICE_ALL_ACCESS` 导入
+  - **明文 80 阻断**（`aegis-wfp` 构造器 + IPC 词 + 控制端子命令，三处）：
+    - `aegis-wfp::plaintext_http_block_plan()` 构造只拦明文 HTTP(80) 的计划（权重梯度
+      `W_PLAINTEXT_HTTP`）；轻量、**可逆**，与整副绝缘笼**共用票据槽与两阶段确认闸门**
+      （`do_apply` 复用）——进程退出即清空，亦可 `rollback` 一键复原
+    - `aegis-ipc` 新增 `REQ_BLOCK_HTTP = "block-http"`，**登记为 Dangerous**
+      （漏登记 = 有 token 就能干，会绕过提权检查）
+    - `aegisctl` 新增 `block-http` 子命令；`aegisd` 的 `REQ_BLOCK_HTTP` 分支调
+      `do_apply(&plaintext_http_block_plan(), ticket)`
+  - **拓扑震荡熔断接 WFP**（纯逻辑在 `aegis-fuse` 已落地，本会话把组合点接到 `aegisd`）：
+    - `aegis-fuse` 仍是**纯逻辑 crate**（不依赖 WFP，回调只 `fetch_add`）；"fuse 接 WFP"
+      组合点在 `aegisd` 的监控线程——熔断 `Arm` 时调 `aegis_wfp::apply` 注入**动态会话**
+      绝缘笼，进程死即内核清空 = 天然一键复原（被 `do_rollback` 覆盖）
+    - 监控线程 `spawn_fuse_monitor`：主线程注册 `InterfaceWatcher`（HANDLE 非 `Send`，
+      **不能跨线程搬**），只把 `Arc<ChangeSignal>` 副本交给线程；监听器本体 `let _keep`
+      保活到进程退出。决策层 `FuseGuard` 只有 `Arm` / `Idle` 两出口——**B7 不自动放行**，
+      熔断落笼后保持断网直到人 `rollback`
+    - **双模式**：`apply_cage(autocommit=false)`（人工 `apply` / `block-http`：两阶段确认，
+      超时自动撤销）；`apply_cage(autocommit=true)`（熔断自动落笼：跳过确认窗口直接 Commit，
+      fail-closed「先断后分析」）。`--fuse-auto` 默认 **false** —— 只观测，
+      与守卫的 `--guard-act` 同一套纪律：落笼 = 整机断网，绝不能默认开
+    - **独立票据槽** `fuse_slot`：熔断笼与人工笼分开，便于 `status` 区分与各自独立 rollback；
+      `FuseDecision::Arm` 落笼、`do_rollback` 同时撤 fuse_slot + 人工 ticket + 非 WFP 项
+    - 熔断笼被人工 `rollback` 后，监控线程检测到 `phase==RolledBack` 即 `guard.reset()` +
+      `armed=false`，允许下一次拓扑震荡重新落笼
+  - **协议扩展**（`aegis-ipc`）：
+    - `REQ_BLOCK_HTTP` / `REQ_HYPOMUX` 穷举登记为 Dangerous（`risk_of` 用字面量
+      `"hypomux "` 前缀判定，因 `concat!` 只接受字面量不接受 `const`）
+    - `Status` 新增 `fuse_caged: bool`（`fuse_` 前缀，老控制端遇未知前缀整行跳过；
+      缺失默认 `false`），`to_text` / `from_text` 已含；前/后向兼容测试钉死
+  - **`aegisctl` 扩展**：
+    - 新增 `block-http` 子命令（危险、需提权）
+    - 新增 `hypomux` **命令组**（位置参数 `hypomux start|stop|status`，解析器显式吃掉
+      子动作，避免 `start` 被当未知参数丢掉；不带子动作退回 `Status` 而非静默降级）
+    - `status` 增显「拓扑熔断」区块：已落笼 → 提示 `rollback`；未熔断 → 提示默认只观测
+  - 验收：`cargo fmt` + `clippy -D warnings` 零警告；`cargo test` 三 crate 全过
+    （aegis-ipc 75 / aegisctl 10 / aegisd 55，含 B7 新增的
+    `hypomux_subcommands_are_all_dangerous` / `bin_path_carries_fuse_auto_only_when_asked` /
+    `danger_marks_match_the_request_word_table` / `hypomux_group_consumes_its_subcommand` / 等）
+
 ### Changed
 
 - **危险操作改定：界面里不给按钮，给命令**

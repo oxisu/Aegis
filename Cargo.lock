@@ -132,6 +132,7 @@ dependencies = [
  "aegis-audit",
  "aegis-config",
  "aegis-core",
+ "aegis-fuse",
  "aegis-ipc",
  "aegis-model",
  "aegis-netcfg",

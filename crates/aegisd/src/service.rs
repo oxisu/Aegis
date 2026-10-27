@@ -89,6 +89,9 @@ pub struct ServeOptions {
     /// 守卫是否真的动手（收紧）。**服务模式下依然默认关**——
     /// 收紧的代价是整机断网，这条不因"它现在是服务了"而放松。
     pub guard_act: bool,
+    /// 拓扑震荡熔断是否**真的落笼**（B7）。**服务模式下依然默认关**——
+    /// 落笼 = 整机断网，同样不因"它现在是服务了"而放松。
+    pub fuse_auto: bool,
     /// 服务可执行文件自身（SCM 的 binPath 指向它）。
     pub binary: String,
     /// 开机自启还是手动启动。
@@ -157,6 +160,9 @@ pub fn build_bin_path(opts: &ServeOptions) -> String {
     s.push_str(&format!(" --pipe \"{}\"", opts.pipe));
     if opts.guard_act {
         s.push_str(" --guard-act");
+    }
+    if opts.fuse_auto {
+        s.push_str(" --fuse-auto");
     }
     s
 }
@@ -492,6 +498,7 @@ fn parse_install_opts(argv: &[String]) -> Result<ServeOptions, String> {
     let mut pipe: Option<String> = None;
     let mut token_file: Option<String> = None;
     let mut guard_act = false;
+    let mut fuse_auto = false;
     let mut start_type = StartType::Auto;
 
     let mut i = 0;
@@ -515,6 +522,10 @@ fn parse_install_opts(argv: &[String]) -> Result<ServeOptions, String> {
             },
             "--guard-act" => {
                 guard_act = true;
+                i += 1;
+            },
+            "--fuse-auto" => {
+                fuse_auto = true;
                 i += 1;
             },
             "--start-type" => {
@@ -556,6 +567,7 @@ fn parse_install_opts(argv: &[String]) -> Result<ServeOptions, String> {
         token_file,
         data_dir,
         guard_act,
+        fuse_auto,
         binary,
         start_type,
     })
@@ -572,6 +584,7 @@ mod tests {
             token_file: r"C:\ProgramData\Aegis\ipc.token".into(),
             data_dir: r"C:\ProgramData\Aegis".into(),
             guard_act: false,
+            fuse_auto: false,
             binary: binary.into(),
             start_type: StartType::Auto,
         }
@@ -679,6 +692,15 @@ mod tests {
         assert!(!ServiceSpec::from_opts(&o).bin_path.contains("--guard-act"));
         o.guard_act = true;
         assert!(ServiceSpec::from_opts(&o).bin_path.contains("--guard-act"));
+    }
+
+    // ── 危险开关默认不跟着服务走 ─────────────────────────────────────
+    #[test]
+    fn bin_path_carries_fuse_auto_only_when_asked() {
+        let mut o = opts("aegisd.exe");
+        assert!(!ServiceSpec::from_opts(&o).bin_path.contains("--fuse-auto"));
+        o.fuse_auto = true;
+        assert!(ServiceSpec::from_opts(&o).bin_path.contains("--fuse-auto"));
     }
 
     #[test]

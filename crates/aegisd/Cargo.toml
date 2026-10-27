@@ -17,6 +17,9 @@ aegis-sense   = { workspace = true }
 aegis-wfp     = { workspace = true }
 aegis-audit   = { workspace = true }
 aegis-ipc     = { workspace = true }
+# B7：拓扑震荡熔断（纯逻辑）→ 由本守护进程组合进 WFP（fuse 接 WFP）。
+# 二进制层可依赖它（熔断决策层不碰内核，WFP 注入在 aegisd 这边做）。
+aegis-fuse    = { workspace = true }
 # B4：非 WFP 网络设置快照/还原执行层（系统代理 + 路由表）。
 # 二进制层可依赖它（守护进程本来就要碰 OS）；策略层 core/config 不碰。
 aegis-netcfg  = { workspace = true }
@@ -28,7 +31,7 @@ aegis-netcfg  = { workspace = true }
 # ⚠ 为什么守护进程这一层可以直接依赖 `windows`：它是**二进制 crate**，
 #   本来就要读 Win32（通过 aegis-sense / aegis-wfp）。依赖方向铁律约束的是
 #   策略层（core / config）不许碰感知层，不是禁止二进制层碰 OS。
-windows = { workspace = true, features = ["Win32_Foundation", "Win32_System_Services"] }
+windows = { workspace = true, features = ["Win32_Foundation", "Win32_System_Services", "Win32_NetworkManagement_IpHelper"] }
 
 [dev-dependencies]
 mutants = { workspace = true }

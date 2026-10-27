@@ -77,7 +77,20 @@ pub const DHCP_SERVICE: &str = "Dhcp";
 /// mDNS(5353)、NetBIOS(137)。不封掉，等于把浏览记录广播给整层楼。
 pub const PORTS_BROADCAST_LEAK: &[u16] = &[5353, 5355, 137];
 
-/// 受限广播地址。Boot 层 DHCP 放行**只能**用它做目的地址条件。
+/// 明文 HTTP 端口（非 TLS）。
+///
+/// 设计（§9 阶段 4 / §20.6）：校园网模式下，明文 80 流量在离开真实网卡前
+/// 即被拦截——靠 WFP ALE 出站层 DROP，包根本不离开本机。这条端口单独成
+/// 规则是为了"意图显式 + 可独立告警"，而不是藏进默认拒绝里看不出来。
+pub const PORT_PLAINTEXT_HTTP: u16 = 80;
+
+/// 明文 80 阻断规则的权重。
+///
+/// 高于"存量连接兜底"(10) 与"默认拒绝"(5)，低于广播封锁(12)——它只针对
+/// 一个具体端口，不该盖过广播/53 这类更宽的封锁。
+pub const W_PLAINTEXT_HTTP: u8 = 11;
+
+/// 受限广播地址。 Boot 层 DHCP 放行**只能**用它做目的地址条件。
 pub const BROADCAST_V4: Ipv4Addr = Ipv4Addr::new(255, 255, 255, 255);
 
 /// Aegis 会下发规则的 WFP 层。
@@ -511,6 +524,38 @@ pub fn cage_plan(p: CagePolicy) -> Vec<FilterSpec> {
         });
     }
 
+    apply_order(&out)
+}
+
+/// 明文 HTTP（端口 80）阻断计划（§9 阶段 4 / §20.6）。
+///
+/// # 与 [`cage_plan`] 的关系
+///
+/// [`cage_plan`] 的默认拒绝已经把 80 一起兜住了；这里把它**单独拎出来**，
+/// 是为了两件事：
+/// 1. **意图显式**：审计/排障时能一眼看到"我们在主动拦明文 HTTP"，
+///    而不是从一堆默认拒绝里猜；
+/// 2. **可独立应用**：可以**不装整副绝缘笼**就只拦明文 HTTP——
+///    例如桌面用户只想屏蔽明文流量、不想全盘断网时的轻量选项。
+///
+/// ⚠ **可逆**：这条计划里全是运行期动态会话规则（[`Tier::Runtime`]），
+/// 走与 [`cage_plan`] 完全相同的 [`crate::apply`] / [`crate::rollback`]
+/// 两阶段闸门——进程退出内核自动清空，也可 `rollback` 一键复原。
+///
+/// ⚠ **不碰回环**：回环放行（GUI↔服务）权重更高，本计划不会阻断
+/// 本机自身的 127.0.0.1 通信。
+pub fn plaintext_http_block_plan() -> Vec<FilterSpec> {
+    let mut out = Vec::new();
+    for layer in [Layer::AleAuthConnectV4, Layer::AleAuthConnectV6] {
+        out.push(FilterSpec {
+            name: "明文 HTTP(80) 阻断",
+            layer,
+            action: Action::Block,
+            weight: W_PLAINTEXT_HTTP,
+            conditions: vec![Condition::RemotePort(PORT_PLAINTEXT_HTTP)],
+            tier: Tier::Runtime,
+        });
+    }
     apply_order(&out)
 }
 
@@ -2074,5 +2119,39 @@ mod tests {
         });
         assert!(is_safe(&plan), "{:?}", verify(&plan));
         assert!(needs_confirmation(&plan));
+    }
+
+    /// 明文 80 阻断计划：恰好两条（V4+V6），都 Block 目的端口 80，且是运行期规则。
+    #[test]
+    fn plaintext_http_block_plan_targets_only_port_80() {
+        let plan = plaintext_http_block_plan();
+        assert_eq!(plan.len(), 2, "V4 + V6 各一条");
+        for f in &plan {
+            assert_eq!(f.action, Action::Block, "必须是阻断");
+            assert_eq!(
+                f.conditions,
+                vec![Condition::RemotePort(PORT_PLAINTEXT_HTTP)],
+                "只匹配目的端口 80，不牵连其它端口"
+            );
+            assert_eq!(f.tier, Tier::Runtime, "必须是运行期（进程退出即清空）规则");
+            assert!(!f.survives_reboot(), "绝不能写进 Boot 层——装错即变砖");
+        }
+    }
+
+    /// 明文 80 计划必须通过 preflight：无 Boot 规则、条件可映射。
+    #[test]
+    fn plaintext_http_block_plan_passes_preflight() {
+        assert!(crate::preflight(&plaintext_http_block_plan()).is_ok());
+    }
+
+    /// 它不是"默认拒绝"——不含任何无条件的兜底规则，独立应用时不会全盘断网。
+    #[test]
+    fn plaintext_http_block_plan_is_not_a_catch_all() {
+        assert!(
+            plaintext_http_block_plan()
+                .iter()
+                .all(|f| !f.is_catch_all()),
+            "明文 80 计划只拦 80，不能兜底断网"
+        );
     }
 }

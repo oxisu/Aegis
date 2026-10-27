@@ -20,6 +20,12 @@
 //! | `apply` | 下发绝缘笼，**装完只是待确认** | 控制端已提权 |
 //! | `confirm` | 确认刚才那次下发 | 控制端已提权 |
 //! | `rollback` | 立即拆除（含已确认的强拆）+ 还原非 WFP 项 | 控制端已提权 |
+//! | `block-http` | 只拦明文 HTTP(80)（B7，轻量、可逆） | 控制端已提权 |
+//! | `hypomux start\|stop\|status` | 启停/查 HypoMux Core 上游代理（B7，危险） | 控制端已提权 |
+//!
+//! ⚠ `hypomux` 是**命令组**，后面必须跟子动作（`start`/`stop`/`status`）。
+//! 它改变本机网络出口走向，属于红线动作——只能由人显式调用，
+//! 绝不在 aegisd 启动/守护链路里自动触发（见 [`crate::aegisd`] 的红线注释）。
 //!
 //! `apply` 之后必须在 10 秒内 `confirm`，否则守护进程自动撤销——
 //! 这条倒计时的意义是：人装错了、手滑了、或者根本不在机器旁边的时候，
@@ -45,7 +51,8 @@ use aegis_ipc::client::{ClientError, Session};
 use aegis_ipc::GuardView;
 use aegis_ipc::{
     IpcToken, Status, Verdict, GUARD_EFFECTIVE, GUARD_INEFFECTIVE, GUARD_OFF, GUARD_UNKNOWN,
-    REQ_APPLY, REQ_CONFIRM, REQ_PING, REQ_ROLLBACK, REQ_SNAPSHOT, REQ_STATUS,
+    REQ_APPLY, REQ_BLOCK_HTTP, REQ_CONFIRM, REQ_HYPOMUX, REQ_PING, REQ_ROLLBACK, REQ_SNAPSHOT,
+    REQ_STATUS,
 };
 use aegis_version as version;
 
@@ -62,6 +69,17 @@ enum Cmd {
     Rollback,
     /// 查询非 WFP 改前基线快照（只读，B4）。
     Snapshot,
+    /// 下发"明文 80 阻断"计划（危险，B7，轻量可逆）。
+    BlockHttp,
+    /// HypoMux 监管：启动上游代理服务（危险，B7，红线动作）。
+    HypomuxStart,
+    /// HypoMux 监管：停止上游代理服务（危险，B7，红线动作）。
+    HypomuxStop,
+    /// HypoMux 监管：查询上游代理服务状态（危险，B7）。
+    ///
+    /// ⚠ 即便只是查询，IPC 层仍把它判为危险命令（前缀 `hypomux `），
+    /// 所以控制端需以管理员身份运行才能走到守护进程的 hypomux 处理。
+    HypomuxStatus,
 }
 
 impl Cmd {
@@ -74,12 +92,25 @@ impl Cmd {
             Self::Confirm => REQ_CONFIRM,
             Self::Rollback => REQ_ROLLBACK,
             Self::Snapshot => REQ_SNAPSHOT,
+            Self::BlockHttp => REQ_BLOCK_HTTP,
+            Self::HypomuxStart => "hypomux start",
+            Self::HypomuxStop => "hypomux stop",
+            Self::HypomuxStatus => "hypomux status",
         }
     }
 
     /// 这条命令会不会改变本机网络状态。
     fn dangerous(self) -> bool {
-        matches!(self, Self::Apply | Self::Confirm | Self::Rollback)
+        matches!(
+            self,
+            Self::Apply
+                | Self::Confirm
+                | Self::Rollback
+                | Self::BlockHttp
+                | Self::HypomuxStart
+                | Self::HypomuxStop
+                | Self::HypomuxStatus
+        )
     }
 }
 
@@ -221,7 +252,13 @@ fn main() -> ExitCode {
             println!("   超时未确认，规则会被**自动撤销**。");
             return ExitCode::SUCCESS;
         },
-        Cmd::Confirm | Cmd::Rollback | Cmd::Snapshot => {
+        Cmd::Confirm
+        | Cmd::Rollback
+        | Cmd::Snapshot
+        | Cmd::BlockHttp
+        | Cmd::HypomuxStart
+        | Cmd::HypomuxStop
+        | Cmd::HypomuxStatus => {
             println!("8. ← {body}");
             return ExitCode::SUCCESS;
         },
@@ -273,6 +310,18 @@ fn main() -> ExitCode {
         println!("  状态        : 在位（改前快照 + 退出/崩溃还原 + 一键 rollback）");
     }
 
+    // B7：拓扑熔断绝缘态。这是"先断后分析"在运行时真正生效的标志——
+    // 用户看到网断了且本字段为 `true`，就知道是熔断而不是别的原因，
+    // 不至于误以为是别的故障甚至去卸载 Aegis。
+    println!();
+    println!("── 拓扑熔断（fuse 接 WFP，B7）────────────────────────────────────");
+    if status.fuse_caged {
+        println!("  状态        : **已落绝缘笼**（网口变动触发，动态会话）");
+        println!("  复原        : aegisctl rollback（拆熔断笼 + 拆人工笼 + 还原非 WFP 项）");
+    } else {
+        println!("  状态        : 未熔断（默认只观测，加 --fuse-auto 才真落笼）");
+    }
+
     // 可信指纹对不上 = 拓扑变了，按设计该重新打断用户确认。
     if let Some(trusted) = args.expect_fingerprint {
         if trusted != status.fingerprint {
@@ -313,6 +362,25 @@ impl Args {
                 // `--ping` 是历史写法，等价于 `ping` 子命令
                 "--ping" => cmd = Cmd::Ping,
                 "--expect-fingerprint" => expect_fingerprint = args.next(),
+                // `hypomux` 是**命令组**：后面跟子动作 start/stop/status，
+                // 必须在这里显式把子动作吃掉——否则 `start` 会被当成未知参数丢掉，
+                // 而 `aegisctl hypomux`（不带子动作）也会被 silently downgrade。
+                // ⚠ 红线动作：启停上游代理会改变本机出口走向，只由人显式触发。
+                // 用常量而非字面量：请求词只有 aegis-ipc 一处定义。
+                REQ_HYPOMUX => {
+                    let act = args.next().unwrap_or_default();
+                    cmd = match act.as_str() {
+                        "start" => Cmd::HypomuxStart,
+                        "stop" => Cmd::HypomuxStop,
+                        "status" => Cmd::HypomuxStatus,
+                        other => {
+                            eprintln!(
+                                "[WARN] `hypomux` 需带子动作 start|stop|status（收到：{other}）"
+                            );
+                            Cmd::Status
+                        },
+                    };
+                },
                 "--help" | "-h" => {
                     print_usage();
                     std::process::exit(0);
@@ -344,6 +412,7 @@ impl Cmd {
             REQ_CONFIRM => Some(Self::Confirm),
             REQ_ROLLBACK => Some(Self::Rollback),
             REQ_SNAPSHOT => Some(Self::Snapshot),
+            REQ_BLOCK_HTTP => Some(Self::BlockHttp),
             _ => None,
         }
     }
@@ -407,6 +476,11 @@ fn print_usage() {
     println!("  apply      下发绝缘笼（**危险**，装完只是待确认）");
     println!("  confirm    确认刚才那次下发（**危险**）");
     println!("  rollback   立即拆除，含已确认规则的强拆 + 还原非 WFP 项（**危险**）");
+    println!("  block-http 只拦明文 HTTP(80)（**危险**，轻量可逆，B7）");
+    println!("  hypomux    上游代理监管（**危险**：改变本机出口走向，B7）");
+    println!("                hypomux start  : 启动 HypoMux Core 服务");
+    println!("                hypomux stop   : 停止 HypoMux Core 服务");
+    println!("                hypomux status : 查询服务状态");
     println!();
     println!("选项：");
     println!(
@@ -488,6 +562,7 @@ mod tests {
         assert_eq!(Cmd::from_word("confirm"), Some(Cmd::Confirm));
         assert_eq!(Cmd::from_word("rollback"), Some(Cmd::Rollback));
         assert_eq!(Cmd::from_word("snapshot"), Some(Cmd::Snapshot));
+        assert_eq!(Cmd::from_word("block-http"), Some(Cmd::BlockHttp));
     }
 
     /// 危险命令的标记必须和请求词表一致：漏标一个，控制端就不会打印
@@ -497,12 +572,25 @@ mod tests {
         assert!(Cmd::Apply.dangerous());
         assert!(Cmd::Confirm.dangerous());
         assert!(Cmd::Rollback.dangerous());
+        assert!(Cmd::BlockHttp.dangerous());
+        assert!(Cmd::HypomuxStart.dangerous());
+        assert!(Cmd::HypomuxStop.dangerous());
+        assert!(Cmd::HypomuxStatus.dangerous());
         assert!(!Cmd::Status.dangerous());
         assert!(!Cmd::Ping.dangerous());
+        assert!(!Cmd::Snapshot.dangerous());
 
         use aegis_ipc::risk_of;
         use aegis_ipc::Risk;
-        for c in [Cmd::Apply, Cmd::Confirm, Cmd::Rollback] {
+        for c in [
+            Cmd::Apply,
+            Cmd::Confirm,
+            Cmd::Rollback,
+            Cmd::BlockHttp,
+            Cmd::HypomuxStart,
+            Cmd::HypomuxStop,
+            Cmd::HypomuxStatus,
+        ] {
             assert_eq!(risk_of(c.word()), Risk::Dangerous);
         }
         for c in [Cmd::Status, Cmd::Ping, Cmd::Snapshot] {
@@ -515,6 +603,33 @@ mod tests {
         let a = Args::parse(argv(&["apply"]));
         assert_eq!(a.cmd, Cmd::Apply);
         assert!(a.cmd.dangerous());
+    }
+
+    /// `hypomux` 是命令组，必须把子动作吃掉，否则 `start` 会被当未知参数丢掉。
+    #[test]
+    fn hypomux_group_consumes_its_subcommand() {
+        let a = Args::parse(argv(&["hypomux", "start"]));
+        assert_eq!(a.cmd, Cmd::HypomuxStart);
+        assert!(a.cmd.dangerous());
+        assert_eq!(a.cmd.word(), "hypomux start");
+
+        let b = Args::parse(argv(&["hypomux", "stop"]));
+        assert_eq!(b.cmd, Cmd::HypomuxStop);
+
+        let c = Args::parse(argv(&["hypomux", "status"]));
+        assert_eq!(c.cmd, Cmd::HypomuxStatus);
+
+        // 不带子动作 → 退回 Status，且不静默降级成别的危险动作。
+        let d = Args::parse(argv(&["hypomux"]));
+        assert_eq!(d.cmd, Cmd::Status);
+    }
+
+    #[test]
+    fn block_http_is_a_dangerous_positional() {
+        let a = Args::parse(argv(&["block-http"]));
+        assert_eq!(a.cmd, Cmd::BlockHttp);
+        assert!(a.cmd.dangerous());
+        assert_eq!(a.cmd.word(), REQ_BLOCK_HTTP);
     }
 
     #[test]

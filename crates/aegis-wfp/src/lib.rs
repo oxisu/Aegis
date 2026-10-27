@@ -39,11 +39,12 @@ pub use model::{
     FLAG_PERSISTENT,
 };
 pub use plan::{
-    apply_order, cage_plan, invariants_violated, is_safe, needs_confirmation, verify,
-    verify_policy, verify_with, Action, CagePolicy, Condition, FilterSpec, Finding, FindingKind,
-    Layer, Severity, Tier, BROADCAST_V4, PORTS_BROADCAST_LEAK, PORT_DHCP_CLIENT, PORT_DHCP_SERVER,
-    PORT_DNS, WEIGHT_MAX, W_BROADCAST_LOCK, W_DEFAULT_DENY, W_DHCP, W_DNS_LOCK, W_FLOW_DROP,
-    W_LOOPBACK,
+    apply_order, cage_plan, invariants_violated, is_safe, needs_confirmation,
+    plaintext_http_block_plan, verify, verify_policy, verify_with, Action, CagePolicy, Condition,
+    FilterSpec, Finding, FindingKind, Layer, Severity, Tier, BROADCAST_V4, PORTS_BROADCAST_LEAK,
+    PORT_DHCP_CLIENT, PORT_DHCP_SERVER, PORT_DNS, PORT_PLAINTEXT_HTTP, WEIGHT_MAX,
+    W_BROADCAST_LOCK, W_DEFAULT_DENY, W_DHCP, W_DNS_LOCK, W_FLOW_DROP, W_LOOPBACK,
+    W_PLAINTEXT_HTTP,
 };
 pub use session::{LayerField, Session, SESSION_PREFIX};
 

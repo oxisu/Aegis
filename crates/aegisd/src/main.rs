@@ -61,8 +61,8 @@ use aegis_core::role::{adjudicate_all, Confidence};
 use aegis_core::state::{insulation, State};
 use aegis_ipc::{
     check_compat, encode_handshake, msg_type, GuardView, IpcToken, PipeServer, Status, DENY_PREFIX,
-    GUARD_EFFECTIVE, GUARD_INEFFECTIVE, GUARD_UNKNOWN, OK_PREFIX, REQ_APPLY, REQ_CONFIRM, REQ_PING,
-    REQ_ROLLBACK, REQ_SNAPSHOT, REQ_STATUS,
+    GUARD_EFFECTIVE, GUARD_INEFFECTIVE, GUARD_UNKNOWN, OK_PREFIX, REQ_APPLY, REQ_BLOCK_HTTP,
+    REQ_CONFIRM, REQ_HYPOMUX, REQ_PING, REQ_ROLLBACK, REQ_SNAPSHOT, REQ_STATUS,
 };
 use aegis_netcfg::{clear_baseline, load_baseline, NetCfgBackend, SnapshotGuard, WindowsBackend};
 use aegis_orchestrator::clash::audit::connection_to_audit_event;
@@ -75,6 +75,17 @@ use aegis_wfp::{
     MAX_RESTORE_ATTEMPTS,
 };
 use std::collections::HashSet;
+
+/// 拓扑震荡熔断 → WFP 绝缘笼 的决策层（B7，纯逻辑、不碰引擎）。
+mod fuse_guard;
+use fuse_guard::{FuseDecision, FuseGuard};
+
+/// HypoMux 监管（B7 · §9）：SCM 启停 `HypoMuxCore` 上游代理服务。
+///
+/// ⚠ 红线：本模块的函数**绝不**由 aegisd 启动/守护链路自动调用，只能由
+///   用户显式 `aegisctl hypomux start|stop|status`（且提权）经 IPC 危险命令
+///   闸门抵达。启动上游代理会改变本机网络出口走向，是人拍板的动作。
+mod hypomux;
 
 /// 退出码。**刻意各不相同**：运维看到码就知道卡在哪一步，
 /// 不用去翻日志猜。
@@ -278,6 +289,9 @@ fn serve(args: Args) -> ! {
     let guard_slot: GuardSlot = Arc::new(Mutex::new(GuardView::default()));
     // B4：非 WFP 网络设置快照守卫。先置 None，启动后段（审计就绪）再 arm。
     let netcfg_slot: NetCfgSlot = Arc::new(Mutex::new(None));
+    // B7：拓扑震荡熔断绝缘笼的独立票据槽（与人工下发的 cage 分开，
+    // 便于 status 区分"人下的"和"熔断自动落的"，以及各自独立 rollback）。
+    let fuse_slot: TicketSlot = Arc::new(Mutex::new(None));
     let (ready_tx, ready_rx) = std_mpsc::channel::<Result<(), String>>();
     let serve_pipe = args.pipe.clone();
     let serve_token = token.clone();
@@ -285,6 +299,7 @@ fn serve(args: Args) -> ! {
     let serve_ticket = Arc::clone(&ticket_slot);
     let serve_guard = Arc::clone(&guard_slot);
     let serve_netcfg = Arc::clone(&netcfg_slot);
+    let serve_fuse = Arc::clone(&fuse_slot);
     let serve_plan = plan.clone();
     thread::spawn(move || {
         let server = match PipeServer::bind_named(&serve_pipe) {
@@ -302,6 +317,7 @@ fn serve(args: Args) -> ! {
             &serve_guard,
             &serve_plan,
             &serve_ticket,
+            &serve_fuse,
             &serve_netcfg,
         );
     });
@@ -501,6 +517,7 @@ fn serve(args: Args) -> ! {
         guard: GuardView::default(),
         restore_protected: netcfg_protected,
         restore_pending: false,
+        fuse_caged: false,
     };
 
     // 状态交给服务线程：在它拿到之前，任何 status 查询都会得到"启动中"
@@ -585,6 +602,30 @@ fn serve(args: Args) -> ! {
         println!("Clash 审计富化：未配置 [proxy.clash]，跳过。");
     }
     println!();
+
+    // ── 拓扑震荡熔断监控（B7 · fuse 接 WFP）──────────────────────────
+    // 在主线程注册网口变更监听（HANDLE 非 Send，不能跨线程），取其信号 Arc 交给
+    // 监控线程；监听器本体的生命周期与进程同在（Drop 才会取消注册）。是否真落笼
+    // 由 --fuse-auto 决定，默认只观测（打印"若启用此刻会落笼"）。
+    {
+        let fuse_plan = plan.clone();
+        let serve_fuse = Arc::clone(&fuse_slot);
+        let watcher = aegis_fuse::InterfaceWatcher::register(aegis_fuse::WatchFamily::Any);
+        match &watcher {
+            Ok(w) => {
+                let signal = w.signal().clone();
+                spawn_fuse_monitor(fuse_plan, serve_fuse, args.fuse_auto, signal);
+            },
+            Err(e) => eprintln!("[WARN] 拓扑熔断：无法注册网口变更回调（{e}），熔断将不生效"),
+        }
+        // 保活：让监听器活到进程退出，注册才不会被撤销。
+        let _keep_watcher = watcher.ok();
+        if args.fuse_auto {
+            println!("拓扑熔断：已启用自动落笼（--fuse-auto）。第一个网口变动即落绝缘笼。");
+        } else {
+            println!("拓扑熔断：监视中（默认只观测，加 --fuse-auto 才真落笼）。");
+        }
+    }
 
     println!("启动完成。IPC 已在 {} 上应答。", args.pipe);
     if service::is_service_mode() {
@@ -1244,6 +1285,7 @@ fn serve_forever(
     guard: &GuardSlot,
     plan: &[FilterSpec],
     ticket: &TicketSlot,
+    fuse_slot: &TicketSlot,
     netcfg: &NetCfgSlot,
 ) {
     loop {
@@ -1251,7 +1293,7 @@ fn serve_forever(
             Ok(e) => e,
             Err(_) => return,
         };
-        if let Err(_e) = serve_one(&end, token, status, guard, plan, ticket, netcfg) {
+        if let Err(_e) = serve_one(&end, token, status, guard, plan, ticket, fuse_slot, netcfg) {
             // 连接层面的错误（断开 / 帧坏）视为这次会话结束，继续等下一个
         }
         // ⚠ 必须显式 disconnect，否则下一次 accept 会失败：
@@ -1271,6 +1313,7 @@ fn serve_one(
     guard: &GuardSlot,
     plan: &[FilterSpec],
     ticket: &TicketSlot,
+    fuse_slot: &TicketSlot,
     netcfg: &NetCfgSlot,
 ) -> Result<(), aegis_ipc::PipeError> {
     let mut reader = aegis_ipc::FrameReader::new();
@@ -1352,6 +1395,8 @@ fn serve_one(
                                     None => (false, false),
                                 };
                             }
+                            // 熔断绝缘态（B7）：熔断自动落的笼是否已注入。
+                            s.fuse_caged = fuse_slot_is_up(fuse_slot);
                             s.to_text()
                         },
                         None => "启动中：状态尚不可用".to_string(),
@@ -1364,7 +1409,13 @@ fn serve_one(
                 } else if word == REQ_CONFIRM {
                     do_confirm(ticket)
                 } else if word == REQ_ROLLBACK {
-                    do_rollback(ticket, netcfg)
+                    do_rollback(ticket, fuse_slot, netcfg)
+                } else if word == REQ_BLOCK_HTTP {
+                    // B7：明文 80 阻断（轻量、可逆，与整副绝缘笼共用票据槽）。
+                    do_apply(&aegis_wfp::plaintext_http_block_plan(), ticket)
+                } else if word == REQ_HYPOMUX || word.starts_with("hypomux ") {
+                    // B7：HypoMux 监管（危险、需提权、绝不自动调用）。
+                    do_hypomux(&word)
                 } else {
                     format!(
                         "未知请求：{word}（可用：{REQ_STATUS} / {REQ_PING} / {REQ_SNAPSHOT} / \
@@ -1424,22 +1475,28 @@ fn action_cn(a: aegis_wfp::Action) -> &'static str {
 /// 于是顺序是：本线程发指令 → 新线程里开会话并装规则 → 新线程就地
 /// 转成看门狗，会话**从头到尾都没离开过那个线程**。
 /// 反过来（先装再想办法把会话交给一个守护线程）是搬不动的。
-fn do_apply(plan: &[FilterSpec], slot: &TicketSlot) -> String {
+/// 下发绝缘笼（**共享实现**）。
+///
+/// - `autocommit=false`：两阶段确认（人工 `apply` / `block-http` 路径）——
+///   装好后等 [`CONFIRM_WINDOW_MS`] 内 `confirm`，超时自动撤销。
+/// - `autocommit=true`：熔断自动落笼（fuse 路径）——跳过确认窗口，直接把
+///   票据标成 `Committed`（fail-closed："先断后分析"，拓扑震荡时**不能**等
+///   人来确认）。进程退出即清空（动态会话），也可 `rollback` 一键复原。
+///
+/// 返回 `Ok(n)` = 前置检查通过且引擎已装好 `n` 条；`Err(e)` = 被拒或下发失败。
+fn apply_cage(plan: &[FilterSpec], slot: &TicketSlot, autocommit: bool) -> Result<usize, String> {
     // 一次只允许一个待确认的下发：并发装会让回执与票据对不上，
     // 而"不知道哪批 id 是哪次装的"在回滚时就是删错规则。
     if let Ok(g) = slot.lock() {
         if g.as_ref().is_some_and(|t| t.phase == Phase::Pending) {
-            return format!(
-                "{}已有一个待确认的下发，先 confirm 或 rollback。",
-                DENY_PREFIX
-            );
+            return Err("已有一个待确认的下发，先 confirm 或 rollback。".to_string());
         }
     }
 
     // 自检在**碰引擎之前**跑完：装到一半才发现条件翻译不了，
     // 会留下半套规则，而半套规则就是断网。
     if let Err(e) = preflight(plan) {
-        return format!("{}拒绝下发：{e}", DENY_PREFIX);
+        return Err(format!("拒绝下发：{e}"));
     }
 
     let (tx, rx) = std_mpsc::channel::<Result<usize, String>>();
@@ -1451,12 +1508,18 @@ fn do_apply(plan: &[FilterSpec], slot: &TicketSlot) -> String {
             Ok((session, receipt)) => {
                 let n = receipt.len();
                 if let Ok(mut g) = watchdog_slot.lock() {
-                    *g = Some(ApplyTicket::pending(
+                    let mut t = ApplyTicket::pending(
                         now,
                         CONFIRM_WINDOW_MS,
                         receipt.filter_ids,
                         receipt.permit_ids,
-                    ));
+                    );
+                    if autocommit {
+                        // 熔断自动落笼：直接确认，跳过人工确认窗口。
+                        // fail-closed —— 拓扑震荡时"先断后分析"，不能等 10 秒。
+                        let _ = t.confirm(now);
+                    }
+                    *g = Some(t);
                 }
                 let _ = tx.send(Ok(n));
                 watch(&session, &watchdog_slot, &watchdog_plan);
@@ -1468,16 +1531,24 @@ fn do_apply(plan: &[FilterSpec], slot: &TicketSlot) -> String {
     });
 
     match rx.recv_timeout(Duration::from_secs(5)) {
-        Ok(Ok(n)) => format!(
+        Ok(Ok(n)) => Ok(n),
+        Ok(Err(e)) => Err(format!("下发失败：{e}（多半是没提权：WFP 引擎要求管理员）")),
+        Err(_) => Err("下发超时（5 秒无结果）。状态未知，按**未下发**处理——\
+             装到一半的规则会随动态会话在进程退出时清空。"
+            .to_string()),
+    }
+}
+
+/// 下发绝缘笼（人工路径）：两阶段确认，[`CONFIRM_WINDOW_MS`] 内 `confirm`
+/// 否则自动撤销。
+fn do_apply(plan: &[FilterSpec], slot: &TicketSlot) -> String {
+    match apply_cage(plan, slot, false) {
+        Ok(n) => format!(
             "{}已下发 {n} 条规则。{CONFIRM_WINDOW_MS} 毫秒内不执行 \
              `aegisctl confirm` 将**自动撤销**。",
             OK_PREFIX
         ),
-        Ok(Err(e)) => format!("{DENY_PREFIX}下发失败：{e}（多半是没提权：WFP 引擎要求管理员）"),
-        Err(_) => format!(
-            "{DENY_PREFIX}下发超时（5 秒无结果）。状态未知，按**未下发**处理——\
-             装到一半的规则会随动态会话在进程退出时清空。"
-        ),
+        Err(e) => format!("{DENY_PREFIX}{e}"),
     }
 }
 
@@ -1642,14 +1713,15 @@ fn do_confirm(slot: &TicketSlot) -> String {
 /// `Pending` 走普通拆除（等超时也行，这里不等）；
 /// 已 `Committed` 的走**紧急强拆**——这是兜底手册里
 /// "人在现场发现笼子装错了"的那条通道，它能撤掉已确认的规则。
-fn do_rollback(slot: &TicketSlot, netcfg: &NetCfgSlot) -> String {
-    // 一键复原 = 拆 WFP（若有票据）+ 还原非 WFP 项（若改过）。二者**独立**：
-    // 没有 WFP 票据也该还原非 WFP 改动，反之亦然。
+fn do_rollback(slot: &TicketSlot, fuse_slot: &TicketSlot, netcfg: &NetCfgSlot) -> String {
+    // 一键复原 = 拆 WFP（若有票据）+ 拆熔断笼（若有）+ 还原非 WFP 项。
+    // 三者**独立**：各自有/没有都互不影响，缺哪样都不该卡住另一项。
     let (wfp_msg, wfp_did) = rollback_wfp(slot);
+    let (fuse_msg, fuse_did) = rollback_wfp(fuse_slot);
     let (nc_msg, nc_state) = restore_netcfg(netcfg);
 
     let any_failed = matches!(nc_state, NcRestore::Failed);
-    let any_did = wfp_did || matches!(nc_state, NcRestore::Restored);
+    let any_did = wfp_did || fuse_did || matches!(nc_state, NcRestore::Restored);
     let head = if any_failed {
         // 有残留没还原干净：必须让用户知道"没完全成功"，而不是报个 ok 了事。
         format!("{DENY_PREFIX}一键复原未完全成功（有非 WFP 残留，需人工留意）")
@@ -1658,7 +1730,112 @@ fn do_rollback(slot: &TicketSlot, netcfg: &NetCfgSlot) -> String {
     } else {
         format!("{DENY_PREFIX}无可复原项")
     };
-    format!("{head}\n  {wfp_msg}\n  {nc_msg}")
+    format!("{head}\n  {wfp_msg}\n  {fuse_msg}\n  {nc_msg}")
+}
+
+/// 熔断绝缘笼当前是否已注入（B7）。
+///
+/// 票据非 `None` 且未拆除即"已落笼"：`status` 据此告诉用户"网断是熔断
+/// 造成的，不是别的原因"。
+fn fuse_slot_is_up(slot: &TicketSlot) -> bool {
+    slot.lock()
+        .ok()
+        .and_then(|g| g.as_ref().map(|t| t.phase != Phase::RolledBack))
+        .unwrap_or(false)
+}
+
+/// HypoMux 监管（B7）：SCM 启停 `HypoMuxCore` 服务。
+///
+/// ⚠ **红线**：绝不在 aegisd 启动/守护链路里自动调用。它只由用户显式
+///   `aegisctl hypomux start|stop|status`（且提权）经 IPC 危险命令闸门
+///   抵达这里。启动上游代理会改变本机网络出口走向，是人拍板的动作。
+fn do_hypomux(word: &str) -> String {
+    let mut parts = word.split_whitespace();
+    let _cmd = parts.next(); // "hypomux"
+    match parts.next() {
+        Some("start") => hypomux::start(),
+        Some("stop") => hypomux::stop(),
+        Some("status") => hypomux::status(),
+        _ => {
+            format!("{DENY_PREFIX}用法：hypomux <start|stop|status>（需以管理员身份运行 aegisctl）")
+        },
+    }
+}
+
+/// 拓扑震荡熔断监控线程（B7 · fuse 接 WFP）。
+///
+/// 消费网口变动**信号**（由调用方在主线程注册的 `NotifyIpInterfaceChange` 回调
+/// 写入），按固定周期喂给 [`FuseGuard`] 决策。**真落笼只在 `auto` 时**发生——
+/// 默认只观测并打印"若启用此刻会落笼"，与守卫的 `--guard-act` 同一套纪律：
+/// 熔断落笼 = 整机断网，绝不能默认开。
+///
+/// ⚠ 为什么传 `Arc<ChangeSignal>` 而不是 `InterfaceWatcher`：后者持有原生
+/// `HANDLE`（不是 `Send`），无法跨线程移动。所以监听在主线程注册、其生存
+/// 周期与进程同在；监控线程只拿走 `signal` 的 `Arc` 副本去 `take()`。
+///
+/// 落笼走 [`apply_cage`] 的 `autocommit=true` 分支：跳过 10 秒确认窗口，
+/// 直接把动态会话绝缘笼标成已确认（fail-closed："先断后分析"）。进程退出即
+/// 清空，或 `rollback` 一键复原——`do_rollback` 已覆盖熔断笼这条独立票据槽。
+fn spawn_fuse_monitor(
+    plan: Vec<FilterSpec>,
+    fuse_slot: TicketSlot,
+    auto: bool,
+    signal: std::sync::Arc<aegis_fuse::ChangeSignal>,
+) {
+    let mut guard = FuseGuard::new();
+    thread::spawn(move || {
+        // 轮询周期 1 秒：熔断本身由去抖器在"第一个事件"即时触发，
+        // 这里只是把累积信号取走并决策，慢一秒无所谓，且避免空转。
+        let mut armed = false;
+        loop {
+            thread::sleep(Duration::from_secs(1));
+            let n = signal.take();
+
+            // 熔断笼被人工回滚 → 复位决策器，允许下一次拓扑震荡重新落笼。
+            // （`rollback` 之后票据 phase 变成 RolledBack，看门狗已撤规则。）
+            if guard.is_insulated() && armed {
+                let rolled_back = match fuse_slot.lock() {
+                    Ok(g) => match g.as_ref() {
+                        None => true,
+                        Some(t) => t.phase == Phase::RolledBack,
+                    },
+                    Err(_) => false,
+                };
+                if rolled_back {
+                    guard.reset();
+                    armed = false;
+                }
+            }
+
+            if n == 0 {
+                continue;
+            }
+
+            match guard.poll(aegis_fuse::now_ms(), n) {
+                FuseDecision::Idle => {},
+                FuseDecision::Arm => {
+                    if auto {
+                        // 真落笼：fail-closed，跳过确认窗口。
+                        match apply_cage(&plan, &fuse_slot, true) {
+                            Ok(k) => {
+                                armed = true;
+                                println!(
+                                    "[fuse] ⚠ 拓扑震荡：已自动落绝缘笼（{k} 条规则，动态会话；\
+                                     `aegisctl rollback` 可一键复原）"
+                                );
+                            },
+                            Err(e) => eprintln!("[fuse] ⚠ 落笼失败：{e}"),
+                        }
+                    } else {
+                        println!(
+                            "[fuse] ⚠ 拓扑震荡：检测到网口变动。若已启用 --fuse-auto，\
+                             此刻会立即落绝缘笼（先断后分析）。"
+                        );
+                    }
+                },
+            }
+        }
+    });
 }
 
 /// 非 WFP 还原的结果分类。
@@ -1914,6 +2091,12 @@ struct Args {
     guard_interval_secs: u64,
     /// 守卫是否**真的动手**（步 2）。默认 false —— 只观测。
     guard_act: bool,
+    /// 拓扑震荡熔断是否**真的落笼**（B7）。默认 false —— 只观测。
+    ///
+    /// ⚠ 与 `--guard-act` 同一套纪律：落笼 = 整机断网，绝不能默认开。
+    /// 打开后，第一个网口变动会立刻注入动态会话绝缘笼（fail-closed：先断后
+    /// 分析），直到人 `rollback`。熔断决策由监控线程做，本开关只控制"是否真落"。
+    fuse_auto: bool,
     /// 以 Windows 服务形态运行（由 SCM 调度）。
     ///
     /// ⚠ 只有 SCM 拉起的进程才该带这个：它在主线程阻塞于
@@ -1931,6 +2114,7 @@ impl Args {
         let mut serve_secs: u64 = 30;
         let mut guard_interval_secs: u64 = DEFAULT_GUARD_INTERVAL_SECS;
         let mut guard_act = false;
+        let mut fuse_auto = false;
         let mut service = false;
         let mut args = argv;
 
@@ -1955,6 +2139,7 @@ impl Args {
                 // 开关型参数，不带值：默认必须是"不动作"，
                 // 收紧的代价是整机断网，不能让一次手滑的命令行把它打开。
                 "--guard-act" => guard_act = true,
+                "--fuse-auto" => fuse_auto = true,
                 "--service" => service = true,
                 "--help" | "-h" => {
                     print_usage();
@@ -1984,6 +2169,7 @@ impl Args {
             serve_secs,
             guard_interval_secs,
             guard_act,
+            fuse_auto,
             service,
         }
     }
@@ -2046,6 +2232,7 @@ fn print_usage() {
         DEFAULT_GUARD_INTERVAL_SECS
     );
     println!("  --guard-act              守卫**真的动手**（默认只观测，见下）");
+    println!("  --fuse-auto              拓扑震荡熔断**真的落笼**（默认只观测，B7）");
     println!("  --service                以服务形态运行（由 SCM 拉起时才用）");
     println!();
     println!("服务管理子命令（**需要管理员权限**，会改这台机器的开机行为）：");
@@ -2603,7 +2790,7 @@ mod tests {
     #[test]
     fn confirm_and_rollback_without_a_ticket_are_denied() {
         assert!(do_confirm(&empty_slot()).starts_with(DENY_PREFIX));
-        assert!(do_rollback(&empty_slot(), &empty_netcfg()).starts_with(DENY_PREFIX));
+        assert!(do_rollback(&empty_slot(), &empty_slot(), &empty_netcfg()).starts_with(DENY_PREFIX));
     }
 
     #[test]
@@ -2644,7 +2831,7 @@ mod tests {
             vec![3],
             vec![3],
         ));
-        let out = do_rollback(&slot, &empty_netcfg());
+        let out = do_rollback(&slot, &empty_slot(), &empty_netcfg());
         assert!(out.starts_with(OK_PREFIX), "{out}");
         assert!(slot
             .lock()
@@ -2662,7 +2849,7 @@ mod tests {
         t.confirm(now_ms()).unwrap();
         *slot.lock().unwrap() = Some(t);
 
-        let out = do_rollback(&slot, &empty_netcfg());
+        let out = do_rollback(&slot, &empty_slot(), &empty_netcfg());
         assert!(out.starts_with(OK_PREFIX), "{out}");
         assert!(
             slot.lock()
@@ -2681,7 +2868,7 @@ mod tests {
         let mut t = ApplyTicket::pending(now_ms(), CONFIRM_WINDOW_MS, vec![5], vec![5]);
         t.mark_rolled_back("已拆");
         *slot.lock().unwrap() = Some(t);
-        assert!(do_rollback(&slot, &empty_netcfg()).starts_with(DENY_PREFIX));
+        assert!(do_rollback(&slot, &empty_slot(), &empty_netcfg()).starts_with(DENY_PREFIX));
     }
 
     /// 未 arm 时，快照查询必须诚实说"未就绪"，不能假装有基线。
